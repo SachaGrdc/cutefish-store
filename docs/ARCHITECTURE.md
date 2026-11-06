@@ -24,7 +24,7 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 2. [Architecture globale](#2-architecture-globale)
 3. [Diagrammes et flux de données](#3-diagrammes-et-flux-de-données)
 4. [Responsabilités des composants](#4-responsabilités-des-composants)
-5. Spécification préliminaire de l'API D-Bus (à rédiger)
+5. [Spécification préliminaire de l'API D-Bus](#5-spécification-préliminaire-de-lapi-d-bus)
 6. Catalogue et index (à rédiger)
 7. Backends APT et Flatpak (à rédiger)
 8. Threads et GLib (à rédiger)
@@ -259,7 +259,7 @@ sequenceDiagram
     S-->>U: PropertiesChanged(Progress, Phase), au plus 10 par seconde
     P-->>S: Finished(success)
     S->>S: journal, état installé mis à jour
-    S-->>U: Finished("success", "", "")
+    S-->>U: Finished("succeeded", "", "")
 ```
 
 ### 3.5 États d'une transaction
@@ -383,3 +383,273 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
 - Normalisation, dédoublonnage, écriture de l'instantané SQLite avec l'index
   FTS5, puis sortie.
 - N'accède pas au réseau et n'a aucune interface D-Bus.
+
+---
+
+## 5. Spécification préliminaire de l'API D-Bus
+
+Cette spécification sert de contrat entre l'interface et le service. Elle sera
+traduite en XML d'introspection (`data/org.cutefish.Store1.xml`) au début de
+l'implémentation. Les signatures suivent la notation D-Bus.
+
+> **Nom provisoire.** `org.cutefish.Store` suppose que le projet est adopté par
+> CutefishOS. Sinon, il faudra un nom en DNS inverse contrôlé par le projet
+> (O-002). Seul le préfixe changerait ; la structure reste la même.
+
+### 5.1 Principes
+
+- **Bus de session** uniquement. Le bus de session n'est accessible qu'à
+  l'utilisateur qui en est propriétaire (politique par défaut de D-Bus) : le
+  service ne gère aucune autorisation propre (§9).
+- **Toute opération longue est une transaction.** La méthode qui la crée
+  répond immédiatement avec le chemin d'un objet `Transaction`. Les autres
+  méthodes répondent en quelques millisecondes ; celles qui lisent SQLite
+  répondent de façon asynchrone depuis un thread de lecture (§8).
+- **Dictionnaires extensibles.** Les structures sont des `a{sv}` (P-012).
+  Un client ignore les clés qu'il ne connaît pas ; le service n'exige jamais
+  une clé nouvelle d'un ancien client.
+- **Identifiants opaques.**
+  - `app-id` : identifiant AppStream du composant fusionné (§6.4).
+  - `offer-id` : identifiant d'une offre, construit par le service, par
+    exemple `apt:firefox-esr` ou
+    `flatpak:user:flathub:app/org.mozilla.firefox/x86_64/stable`.
+  - Le client ne doit jamais les construire ni les analyser. Le service ne
+    les exécute jamais tels quels : il les **recherche** dans le catalogue ou
+    l'état, et refuse tout identifiant inconnu (§9.4).
+- **Génération du catalogue.** Toute réponse de lecture porte la
+  `catalog-generation` utilisée. Le client invalide ses caches quand elle
+  change.
+
+### 5.2 Objet principal
+
+Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
+`org.cutefish.Store1`.
+
+#### Propriétés (lecture seule, avec `PropertiesChanged`)
+
+| Propriété | Type | Description |
+|---|---|---|
+| `Version` | `s` | Version du service |
+| `State` | `s` | `starting`, `indexing` (aucun catalogue encore disponible), `ready`, `degraded` (un backend indisponible) |
+| `CatalogGeneration` | `t` | Génération de l'instantané en service ; 0 tant qu'il n'y en a pas |
+| `Backends` | `aa{sv}` | Par backend : `id` (`apt`, `flatpak`), `available` (`b`), `reason` (`s`), `scopes` (`as`) |
+| `Refreshing` | `b` | Un rafraîchissement est en cours |
+| `LastRefresh` | `t` | Horodatage (secondes UNIX) du dernier rafraîchissement réussi |
+| `UpdateCount` | `u` | Nombre de mises à jour disponibles |
+
+#### Lecture du catalogue
+
+| Méthode | Entrée | Sortie | Remarques |
+|---|---|---|---|
+| `Search` | `s text, a{sv} options` | `t generation, u total, aa{sv} results` | Options : `limit` (`u`, ≤ 200, défaut 60), `offset` (`u`), `category` (`s`), `backend` (`s`), `installed-only` (`b`). `text` : UTF-8 valide, ≤ 256 octets |
+| `Browse` | `s category, a{sv} options` | `t generation, u total, aa{sv} results` | Mêmes options ; `category` vide pour l'ensemble |
+| `ListCategories` | — | `t generation, aa{sv} categories` | `id`, `name` (traduit), `icon`, `count` |
+| `GetSummaries` | `as app_ids` | `t generation, aa{sv} summaries` | ≤ 200 identifiants ; utilisé pour remplir les lignes visibles |
+| `GetDetails` | `s app_id` | `t generation, a{sv} details` | Voir §5.4 |
+| `GetInstalled` | `a{sv} options` | `aa{sv} items` | Options : `backend` |
+| `GetUpdates` | — | `aa{sv} updates` | Voir §5.4 |
+| `GetPermissions` | `s offer_id` | `a{sv} permissions` | Flatpak seulement ; `NotSupported` pour APT |
+| `ListSources` | — | `aa{sv} sources` | Voir §5.4 |
+| `ListTransactions` | — | `ao paths` | Transactions encore publiées sur le bus |
+| `GetTransactionHistory` | `u limit` | `aa{sv} entries` | Lu dans le journal (`state.sqlite`) |
+
+#### Actions (chacune crée une transaction)
+
+| Méthode | Entrée | Sortie |
+|---|---|---|
+| `Install` | `s offer_id, a{sv} options` | `o transaction` |
+| `Remove` | `s offer_id, a{sv} options` | `o transaction` |
+| `Update` | `as offer_ids, a{sv} options` | `o transaction` |
+| `UpdateAll` | `a{sv} options` | `o transaction` |
+| `Refresh` | `a{sv} options` | `o transaction` (option `force`, `b`) |
+| `EnableSource` | `s source_id` | `o transaction` |
+| `DisableSource` | `s source_id` | `o transaction` |
+
+Les `options` sont réservées en v1 (dictionnaire vide accepté, clés inconnues
+refusées avec `InvalidArgs`, pour éviter qu'un client croie une option prise en
+compte alors qu'elle ne l'est pas).
+
+En v1, `EnableSource` et `DisableSource` ne concernent que la remote Flathub de
+l'installation utilisateur (P-011). Les dépôts APT sont listés en lecture
+seule (`can-toggle = false`).
+
+#### Images
+
+| Méthode ou signal | Signature | Description |
+|---|---|---|
+| `FetchImages` (méthode) | `as urls, s priority` → `a{ss} cached` | Répond tout de suite avec les URL déjà en cache (`url → chemin`). Les autres sont mises en file ; `priority` vaut `visible` (pile LIFO, servie en premier) ou `prefetch` |
+| `CancelImages` (méthode) | `as urls` | Retire ces URL de la file ; les téléchargements déjà commencés vont à leur terme et restent en cache |
+| `ImagesReady` (signal) | `a{ss}` | `url → chemin local`, regroupés (au plus un signal toutes les 50 ms) |
+| `ImagesFailed` (signal) | `a{ss}` | `url → code d'erreur` |
+
+Seules les URL **présentes dans le catalogue en service** sont acceptées
+(captures d'écran, icônes distantes). Le service n'est pas un client HTTP
+générique pour les autres processus de la session (§9.4).
+
+#### Signaux
+
+| Signal | Signature | Émis quand |
+|---|---|---|
+| `CatalogChanged` | `t generation` | Un nouvel instantané est en service |
+| `InstalledChanged` | `as app_ids` | L'état installé de ces applications a changé (quelle qu'en soit la cause : la boutique, `apt` en ligne de commande, `flatpak`) |
+| `UpdatesChanged` | `u count` | La liste des mises à jour a changé |
+| `TransactionAdded` | `o path` | Une transaction est créée, par n'importe quel client |
+| `TransactionRemoved` | `o path` | Une transaction terminée quitte le bus |
+
+### 5.3 Objet `Transaction`
+
+Chemin `/org/cutefish/Store/Transactions/<n>`, où `<n>` est un compteur propre
+à l'instance du service. Interface `org.cutefish.Store1.Transaction`.
+
+| Propriété | Type | Description |
+|---|---|---|
+| `Id` | `s` | UUID stable, conservé dans le journal (le chemin, lui, ne survit pas à un redémarrage) |
+| `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source` |
+| `Backend` | `s` | `apt`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
+| `AppIds` | `as` | Applications concernées (peut être vide pour des paquets système) |
+| `OfferIds` | `as` | Offres concernées |
+| `State` | `s` | `queued`, `planning`, `awaiting-confirmation`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted` (§3.5) |
+| `Phase` | `s` | Pendant `running` : `waiting-for-auth`, `waiting-for-lock`, `downloading`, `installing`, `removing`, `finishing` ; vide sinon |
+| `Progress` | `d` | De 0 à 1, ou −1 si indéterminé |
+| `DownloadedBytes`, `TotalBytes` | `t`, `t` | 0 si inconnu |
+| `Cancellable` | `b` | Une annulation est possible maintenant (PackageKit expose `AllowCancel` [MESURÉ]) |
+| `Plan` | `a{sv}` | Rempli à la fin de `planning` (§5.4) |
+| `Error` | `a{sv}` | `code` (§5.6), `message` (traduit), `details` (texte brut du backend, pour le diagnostic) |
+| `Created`, `Finished` | `t`, `t` | Horodatages |
+
+| Méthode ou signal | Signature | Description |
+|---|---|---|
+| `Confirm` | — | Seulement en `awaiting-confirmation` ; sinon `NotAllowed` |
+| `Cancel` | — | En `queued`, `planning` ou `awaiting-confirmation` : immédiat. En `running` : transmis au backend si `Cancellable`, sinon `NotAllowed` |
+| `Finished` (signal) | `s state, s error_code, s message` | Une seule fois, à l'état terminal |
+
+Règles de publication :
+
+- `Progress`, `Phase`, `DownloadedBytes` sont regroupés : au plus **10
+  `PropertiesChanged` par seconde** et par transaction.
+- Une transaction terminée reste sur le bus 5 minutes, puis
+  `TransactionRemoved` est émis. Son résultat reste consultable avec
+  `GetTransactionHistory`.
+
+### 5.4 Structures
+
+**Résumé d'application** (`Search`, `Browse`, `GetSummaries`) :
+`id` `s`, `name` `s`, `summary` `s`, `icon` `s` (chemin local, peut être
+vide), `icon-url` `s` (si l'icône n'est que distante), `backends` `as`,
+`installed` `b`, `has-update` `b`, `verified` `b`, `developer` `s`.
+
+**Détails** (`GetDetails`) : les clés du résumé, plus :
+
+- `description` `a(ss)` : blocs `(type, texte)` avec `type` ∈ `p`, `li`,
+  `oli`. Le service convertit le balisage AppStream en blocs simples ;
+  l'interface n'analyse jamais de HTML ;
+- `screenshots` `aa{sv}` : `caption`, `thumbnail-url`, `url`, `width`,
+  `height`, `default` ;
+- `releases` `aa{sv}` : `version`, `date` (`t`), `description` (`a(ss)`) ;
+- `urls` `a{ss}` (homepage, bugtracker, help, donation, vcs-browser) ;
+- `categories` `as`, `license` `s`, `content-rating` `a{ss}` ;
+- `launchable` `s` : identifiant du fichier desktop, pour
+  `org.cutefish.AppRuntime.launchApplication` [CODE] ;
+- `offers` `aa{sv}` : `id`, `backend`, `origin` (dépôt ou remote), `scope`
+  (`system`, `user`), `version`, `installed` `b`, `installed-version`,
+  `download-size` `t`, `installed-size` `t`, `sandboxed` `b`, `verified` `b`,
+  `default` `b`.
+
+**Mise à jour** (`GetUpdates`) : `offer-id`, `app-id` (vide pour un paquet
+système sans AppStream), `name`, `from-version`, `to-version`,
+`download-size`, `kind` (`app`, `runtime`, `system`).
+
+**Source** (`ListSources`) : `id`, `backend`, `name`, `url`, `scope`,
+`enabled` `b`, `kind` (`distribution`, `flathub`, `third-party`),
+`can-toggle` `b`, `suggested` `b` (source connue mais pas encore configurée,
+comme Flathub au premier lancement).
+
+**Plan** (propriété `Plan` d'une transaction) :
+
+- communs : `requires-confirmation` `b`, `reasons` `as` (`removes-packages`,
+  `new-permissions`, `new-source`, `rebase`, `untrusted`),
+  `download-size` `t`, `installed-size-change` `x` ;
+- `apt` `a{sv}` : `install`, `remove`, `upgrade`, `downgrade` (chacun `as`
+  de noms de paquets avec version) ;
+- `flatpak` `a{sv}` : `operations` `aa{sv}` (`ref`, `type` = install, update
+  ou uninstall, `remote`, `download-size`, `permissions` `a{sv}`,
+  `old-permissions` `a{sv}`).
+
+**Permissions Flatpak** (`GetPermissions`, plans) : la section `[Context]`
+des métadonnées du ref (`shared`, `sockets`, `devices`, `filesystems`,
+`features`, `persistent`), les règles `[Session Bus Policy]` et
+`[System Bus Policy]`, plus un résumé `risk` (`as` : `network`,
+`home-access`, `host-access`, `devices`, `x11`, …) calculé par le service
+pour un affichage cohérent.
+
+### 5.5 Annulation, concurrence et ordre
+
+- Une seule transaction modificatrice active par backend (P-009). Les
+  suivantes restent en `queued`.
+- Une demande qui porte sur une offre déjà concernée par une transaction non
+  terminée est refusée avec `Busy`, et l'erreur indique le chemin de la
+  transaction existante.
+- `Cancel` est accepté depuis n'importe quel client de la session : tous les
+  clients appartiennent au même utilisateur.
+- `Confirm` n'a pas de délai : une transaction en `awaiting-confirmation`
+  n'occupe pas la file de son backend. Elle y rentre au moment de la
+  confirmation, et son plan est **recalculé** si le catalogue ou l'état ont
+  changé entre-temps. Si le nouveau plan exige une confirmation différente,
+  elle revient en `awaiting-confirmation`.
+
+### 5.6 Erreurs
+
+Erreurs D-Bus des méthodes (réponse immédiate) :
+
+| Nom | Cas |
+|---|---|
+| `org.freedesktop.DBus.Error.InvalidArgs` | Argument mal formé, trop long, clé d'option inconnue |
+| `org.cutefish.Store1.Error.NotFound` | Identifiant inconnu dans la génération en service |
+| `org.cutefish.Store1.Error.NotSupported` | Opération sans objet pour ce backend |
+| `org.cutefish.Store1.Error.NotReady` | Aucun catalogue n'est encore disponible (premier lancement) |
+| `org.cutefish.Store1.Error.Busy` | L'offre est déjà dans une transaction en cours |
+| `org.cutefish.Store1.Error.NotAllowed` | Méthode de transaction appelée dans un état qui ne la permet pas |
+| `org.cutefish.Store1.Error.BackendUnavailable` | PackageKit absent, installation Flatpak inaccessible |
+
+Codes d'erreur d'une transaction (`Error.code`, `Finished.error_code`) :
+`auth-denied`, `auth-cancelled`, `network`, `no-space`, `untrusted`,
+`dependency`, `conflict`, `not-found`, `locked`, `cancelled`, `interrupted`,
+`backend-unavailable`, `internal`.
+
+Chaque backend traduit ses propres erreurs (`ErrorCode` de PackageKit,
+`GError` de libflatpak) vers ces codes (§7). Le texte d'origine est conservé
+dans `details`.
+
+### 5.7 Reconnexion et redémarrage du service
+
+**Côté client** :
+
+- Le client suit le propriétaire du nom `org.cutefish.Store`
+  (`Connection::watchName` dans `base::dbus` [CODE]).
+- Si le nom disparaît, il considère tous ses proxys de transaction comme
+  périmés et affiche un état « service indisponible » sans bloquer.
+- Il se reconnecte au prochain appel ; l'activation D-Bus relance le service.
+- Après reconnexion, il relit les propriétés, `ListTransactions`, et relance la
+  requête affichée. Ses caches sont indexés par `CatalogGeneration`.
+- Aucun appel synchrone : toutes les méthodes sont appelées avec
+  `Connection::callAsync` [CODE].
+
+**Côté service** :
+
+- Chaque transaction est écrite dans le journal (`state.sqlite`) à chaque
+  changement d'état. L'écriture se fait sur le thread de la boucle principale,
+  en mode WAL ; les écritures sont rares et courtes.
+- Au démarrage, toute transaction du journal qui n'est pas dans un état
+  terminal est traitée selon son backend :
+  - **APT** : la transaction PackageKit vit dans `packagekitd`, pas dans le
+    service. Le journal conserve son chemin (`tid`). Si
+    `GetTransactionList()` le contient encore, le service s'y rattache
+    (abonnement aux signaux, lecture des propriétés) [À VALIDER : rattachement
+    à une transaction créée par une autre connexion]. Sinon, elle passe en
+    `interrupted` et l'état installé est réconcilié.
+  - **Flatpak** : la transaction tournait dans le service et s'est arrêtée
+    avec lui. Elle passe en `interrupted`, puis l'état installé est
+    réconcilié avec libflatpak. Une reprise automatique n'est pas tentée en
+    v1 ; l'utilisateur relance l'action.
+- Le service ne s'arrête jamais sur inactivité tant qu'une transaction n'est
+  pas terminale.
