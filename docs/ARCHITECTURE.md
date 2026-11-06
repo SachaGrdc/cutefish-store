@@ -25,9 +25,9 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 3. [Diagrammes et flux de données](#3-diagrammes-et-flux-de-données)
 4. [Responsabilités des composants](#4-responsabilités-des-composants)
 5. [Spécification préliminaire de l'API D-Bus](#5-spécification-préliminaire-de-lapi-d-bus)
-6. Catalogue et index (à rédiger)
-7. Backends APT et Flatpak (à rédiger)
-8. Threads et GLib (à rédiger)
+6. [Catalogue et index](#6-catalogue-et-index)
+7. [Backends APT et Flatpak](#7-backends-apt-et-flatpak)
+8. [Threads et GLib](#8-threads-et-glib)
 9. Modèle de sécurité (à rédiger)
 10. Performances et caches (à rédiger)
 11. Arborescence du projet (à rédiger)
@@ -653,3 +653,485 @@ dans `details`.
     v1 ; l'utilisateur relance l'action.
 - Le service ne s'arrête jamais sur inactivité tant qu'une transaction n'est
   pas terminale.
+
+---
+
+## 6. Catalogue et index
+
+### 6.1 Sources du catalogue v1
+
+| Source | Fichiers | Mis à jour par | Volume mesuré |
+|---|---|---|---|
+| Debian (DEP-11) | `/var/lib/swcatalog/yaml/*_dep11_Components-<arch>.yml.gz`, icônes dans `/var/lib/swcatalog/icons/<origine>/<taille>/` [MESURÉ] | `apt update`, donc `RefreshCache` de PackageKit. Les cibles DEP-11 sont déclarées dans `/etc/apt/apt.conf.d/50appstream` [MESURÉ] | 2 045 `desktop-application` dans `main` ; 2 515 composants au total ; 1 843 noms de paquets distincts [MESURÉ] |
+| Flathub, installation utilisateur | `appstream.xml.gz` et `icons/64x64`, `icons/128x128` dans le dossier appstream de la remote, obtenu par `flatpak_remote_get_appstream_dir` [SYMBOLE] (`~/.local/share/flatpak/appstream/flathub/<arch>/active/` [MESURÉ]) | `flatpak_installation_update_appstream_full_sync` [SYMBOLE], exécuté par le service | 4 827 composants, 3 345 applications de bureau, XML de 50 Mo (11 Mo compressé), 14 460 captures d'écran, 4 826 `<bundle type="flatpak">` [MESURÉ] |
+
+Ce qui n'est **pas** indexé en v1 :
+
+- les `console-application`, runtimes et extensions, sauf pour décrire les
+  dépendances d'un plan ;
+- le catalogue Flathub de l'installation système (voir O-006 : elle ne sert
+  qu'à détecter les applications déjà installées) ;
+- les métadonnées locales (`/usr/share/metainfo`) d'applications installées
+  hors de tout catalogue. Elles pourraient compléter la page « Installées »
+  [À VALIDER : intérêt réel, coût].
+
+Ce qu'AppStream ne fournit pas et qui vient des backends, dans
+`state.sqlite` : état installé, versions installées, mises à jour, tailles
+exactes, permissions Flatpak.
+
+### 6.2 Chaîne d'indexation
+
+1. **Détection d'un changement.** Le service calcule une empreinte de chaque
+   fichier source (chemin, taille, `mtime`, puis SHA-256 si les deux premiers
+   ont changé). Il la compare à celle enregistrée dans l'instantané en
+   service. Rien ne change ⇒ pas d'indexation.
+   - Déclencheurs : fin d'un `Refresh`, signal `RepoListChanged` de
+     PackageKit, `base::FileWatch` (inotify) [CODE] sur les dossiers des catalogues
+     (pour un `apt update` lancé en ligne de commande), changement de langue
+     de session.
+   - Les déclencheurs sont regroupés sur 30 s.
+2. **Lancement de l'indexeur** (`base::Process` [CODE]) :
+   - arguments : chemin de sortie temporaire dans le même dossier que
+     `catalog.sqlite` (pour que le renommage soit atomique), langues
+     (O-009) ;
+   - entrée standard : description JSON des sources (chemins, origine,
+     backend, priorité, empreintes).
+   - Une seule indexation à la fois. Une nouvelle demande pendant
+     l'indexation est mémorisée et relancée une fois à la fin.
+3. **Dans l'indexeur** :
+   - abaisser sa propre priorité (`setpriority`, classe d'E/S idle) ;
+   - lire les sources **une par une** avec `AsMetadata`
+     (`as_metadata_parse_file` [SYMBOLE]) et libérer chaque source après
+     l'avoir écrite, pour limiter le pic mémoire. On n'utilise pas `AsPool`,
+     qui fusionne les origines et masquerait la provenance de chaque
+     composant ;
+   - normaliser chaque composant (§6.4) et écrire toutes les lignes dans une
+     seule transaction SQLite (`journal_mode=OFF`, `synchronous=OFF` : le
+     fichier est temporaire) ;
+   - construire l'index FTS5 (§6.3), `ANALYZE`, `PRAGMA optimize`, fermer ;
+   - code de sortie 0 seulement si tout a réussi.
+4. **Validation par le service** :
+   - ouverture en lecture seule ;
+   - `user_version` égal à la version de schéma attendue ;
+   - `PRAGMA quick_check` ;
+   - volumes plausibles : chaque source présente dans l'instantané précédent
+     doit garder au moins 50 % de ses composants, sauf si elle a été retirée.
+     Cela évite de remplacer un bon catalogue par un catalogue tronqué (fichier
+     en cours de téléchargement, par exemple).
+5. **Mise en service** :
+   - `rename()` atomique vers `catalog.sqlite`, génération + 1, signal
+     `CatalogChanged` ;
+   - les threads de lecture ouvrent de nouvelles connexions ;
+   - les requêtes en cours finissent sur l'ancien fichier, qui reste lisible
+     tant qu'il est ouvert (sémantique POSIX).
+6. **Échec** : l'instantané précédent reste en service. L'erreur est
+   journalisée, `State` passe à `degraded` seulement s'il n'existe aucun
+   catalogue.
+
+[À MESURER] durée et pic mémoire de l'indexeur sur Debian + Flathub
+(objectif initial : < 10 s, < 300 Mo, sur la machine d'audit).
+
+### 6.3 Schéma (préliminaire)
+
+**`catalog.sqlite`** (lecture seule une fois en service) :
+
+| Table | Contenu |
+|---|---|
+| `meta` | Version de schéma (aussi dans `PRAGMA user_version`), génération, date, langues, empreintes des sources |
+| `sources` | `id`, `backend`, `origin` (suite Debian ou nom de remote), `scope`, `label`, `priority` |
+| `apps` | Une ligne par application fusionnée : `rowid`, `app_id` (unique), `name`, `summary`, `developer`, `icon_path`, `icon_url`, `verified`, `license`, `flags`. Volontairement étroite : c'est la table lue pour remplir les listes |
+| `app_details` | `app_id`, puis description (blocs), captures, versions, URL, classification du contenu, en JSON compact. Lue seulement par `GetDetails` |
+| `app_categories` | `(app_id, category)`, indexée par catégorie |
+| `offers` | `offer_id`, `app_id`, `backend`, `source_id`, `ref` (nom de paquet, ou ref Flatpak `app/ID/arch/branche`), `is_default` |
+| `aliases` | Identifiants alternatifs (`<provides><id>`, ancien identifiant en `.desktop`) vers `app_id` |
+| `search` | Table virtuelle FTS5, `content=''` (sans contenu, liée par `rowid` à `apps`) |
+
+**Index de recherche** :
+
+- colonnes FTS5 : `name`, `keywords`, `summary`, `developer`, `categories`
+  (noms traduits), `description` (texte brut tronqué à 2 000 caractères
+  [À VALIDER]) ;
+- tokenizer `unicode61 remove_diacritics 2`, préfixes indexés `prefix='2 3'`
+  [MESURÉ : FTS5 disponible dans le SQLite 3.46.1 de Debian 13] ;
+- classement : `bm25` pondéré (nom 10, mots-clés 5, résumé 2, développeur 1,
+  catégories 1, description 0,5), puis bonus pour une correspondance exacte ou
+  un préfixe du nom, pour une application vérifiée et pour une application
+  installée. Les poids sont à régler sur un jeu de requêtes de référence
+  (§13) ;
+- construction de la requête : la saisie est découpée avec les mêmes règles
+  que le tokenizer, limitée à 8 termes, et chaque terme devient `"terme"*`.
+  **La saisie n'est jamais transmise telle quelle comme syntaxe FTS5**
+  (opérateurs `NEAR`, `OR`, filtres de colonnes, guillemets) : c'est une
+  question d'exactitude autant que de robustesse ;
+- un second index `trigram` sur `name` seul servira aux sous-chaînes et aux
+  fautes légères si la mesure montre un besoin [À VALIDER ; tokenizer
+  `trigram` disponible, MESURÉ].
+
+**`state.sqlite`** (mode WAL ; seul écrivain : le thread principal du
+service) :
+
+| Table | Contenu |
+|---|---|
+| `installed` | `offer_id`, `app_id` (peut être vide), `backend`, `scope`, `version`, `origin` |
+| `updates` | `offer_id`, `app_id`, `from_version`, `to_version`, `download_size`, `kind` |
+| `transactions` | Journal : `id` (UUID), type, backend, offres, état, plan, erreur, `pk_tid`, horodatages |
+| `images` | `url`, `path`, `bytes`, `etag`, `last_modified`, `last_used`, `status` |
+| `source_state` | Consentements (Flathub), dernier rafraîchissement par source |
+
+Les connexions de lecture attachent `state.sqlite` en lecture seule
+(`ATTACH … ?mode=ro`) pour fournir `installed` et `has-update` dans les
+résultats de recherche sans aller-retour supplémentaire.
+
+### 6.4 Identifiants, correspondances et dédoublonnage
+
+**Correspondance entre composant AppStream et gestionnaire** :
+
+- APT : champ `Package:` du DEP-11 (`as_component_get_pkgname` [SYMBOLE]),
+  et donc offre `apt:<paquet>`. L'architecture native est résolue par
+  PackageKit au moment du plan.
+- Flatpak : `<bundle type="flatpak">app/ID/arch/branche</bundle>`
+  (`as_component_get_bundle` [SYMBOLE]) et nom de la remote, donc offre
+  `flatpak:user:<remote>:<ref>`.
+
+**Normalisation des identifiants** [MESURÉ] :
+
+- 1 364 des 2 515 identifiants Debian (`main`) et 511 identifiants Flathub se
+  terminent encore par `.desktop` (forme héritée) ;
+- `app_id` = identifiant sans le suffixe `.desktop` ; la forme d'origine est
+  conservée dans `aliases`.
+
+**Fusion** :
+
+1. Même `app_id` normalisé : une seule application, plusieurs offres.
+   [MESURÉ] 419 applications communes à Debian `main` et Flathub sans
+   normalisation, **444** avec : le catalogue fusionné compte environ 4 950
+   applications de bureau.
+2. Alias explicites : si un composant déclare l'identifiant d'un autre dans
+   `<provides><id>`, ils sont fusionnés. Si deux applications distinctes
+   revendiquent le même alias, rien n'est fusionné et un avertissement est
+   journalisé.
+3. **Jamais de fusion sur le nom seul** : trop de faux positifs.
+
+**Métadonnées affichées** pour une application fusionnée :
+
+- chaque champ vient de la source de l'**offre par défaut** ;
+- un champ vide est complété par les autres sources, dans l'ordre de
+  priorité des sources ;
+- la règle de choix de l'offre par défaut est une fonction de `core`, testée
+  isolément. Sa politique reste à décider (O-004) ; en attendant, la règle
+  provisoire est : offre installée, sinon préférence de l'utilisateur, sinon
+  la source de priorité la plus haute.
+
+### 6.5 Langues
+
+- Noms, résumés, mots-clés et descriptions sont indexés dans la langue de
+  session, avec repli sur la forme non traduite. Langues supplémentaires :
+  O-009.
+- Le choix de la langue passe par l'API de libappstream
+  (`as_component_set_context_locale` [SYMBOLE] ou le réglage de langue
+  d'`AsMetadata`) [À VALIDER : sélection effective des traductions en
+  YAML DEP-11 et en XML Flathub].
+- Un changement de langue de session (suivi par `base::SessionLanguage` [CODE], qui
+  dépend de cutefish-services ; ailleurs, la langue est lue au démarrage) déclenche une nouvelle indexation. L'ancien instantané reste servi
+  en attendant.
+
+---
+
+## 7. Backends APT et Flatpak
+
+### 7.1 Interface commune
+
+Une classe abstraite C++ dans `core`, implémentée deux fois. Tous les rappels
+arrivent sur la boucle principale du service, quel que soit le thread qui a
+fait le travail.
+
+| Opération | Rôle | APT | Flatpak |
+|---|---|---|---|
+| `availability()` | Backend utilisable, et sinon pourquoi | Nom `org.freedesktop.PackageKit` activable et `BackendName` connu | Installation utilisateur ouvrable |
+| `catalogSources()` | Fichiers à donner à l'indexeur | Fichiers DEP-11 | Dossier appstream de chaque remote activée |
+| `refresh(cancel)` | Rafraîchir les métadonnées | `RefreshCache` | Mise à jour de l'appstream des remotes |
+| `queryInstalled()` | Ce qui est installé | `Resolve(installed)` sur les paquets du catalogue | Refs d'applications installées |
+| `queryUpdates()` | Mises à jour disponibles | `GetUpdates` | `list_installed_refs_for_update` |
+| `permissions(offer)` | Permissions d'une offre | `NotSupported` | Métadonnées du ref |
+| `sources()` | Sources configurées | `GetRepoList` (lecture) | Remotes de l'installation |
+| `plan(request)` | Calculer le plan | Simulation PackageKit | Préparation jusqu'au signal `ready` |
+| `execute(plan, sink)` | Exécuter un plan confirmé | Transaction PackageKit | `FlatpakTransaction` |
+| `cancel(handle)` | Annuler | `Cancel` si `AllowCancel` | `GCancellable` |
+| signal `changed` | État installé, mises à jour ou sources modifiés hors de la boutique | Signaux du démon PackageKit | Surveillance de l'installation (`flatpak_installation_create_monitor` [SYMBOLE]) |
+
+Le `sink` reçoit des événements normalisés (phase, progression, octets,
+élément courant), traduits ensuite en propriétés D-Bus.
+
+**Différences volontairement visibles** (pas cachées par l'abstraction) :
+
+| Sujet | APT | Flatpak (utilisateur) |
+|---|---|---|
+| Authentification | polkit via PackageKit (`package-install` : `auth_admin_keep`, `package-remove` : `auth_admin`, `system-update` : `auth_admin_keep` [MESURÉ]) | Aucune |
+| Contenu du plan | Paquets installés, supprimés, mis à jour | Refs, runtimes, permissions anciennes et nouvelles |
+| Annulation | Possible seulement quand PackageKit l'autorise (`AllowCancel`) | Possible à tout moment ; effet à la prochaine étape interruptible |
+| Isolation | Aucune (`sandboxed = false`) | Bac à sable, permissions affichées |
+| Vérification | Signature des dépôts par APT (`sqv` sur Debian 13 [MESURÉ]) | Signature GPG des commits OSTree |
+
+### 7.2 Backend APT (PackageKit)
+
+**Connexion** : bus système, objet `/org/freedesktop/PackageKit`, via
+`base::dbus` [CODE]. Au démarrage, lecture de `BackendName`, `Roles`,
+`Filters`, `DistroId`, `Locked` [MESURÉ : propriétés présentes]. Si les rôles
+nécessaires manquent, le backend se déclare indisponible.
+
+**Déroulement d'un appel** :
+
+1. `CreateTransaction()` renvoie un chemin d'objet ;
+2. abonnement aux signaux de cet objet **avant** l'appel de la méthode, pour
+   ne rien manquer ;
+3. `SetHints` avec `locale=<langue>`, `interactive=true|false`,
+   `background=true|false`, `cache-age=<s>` [MESURÉ : clés documentées dans
+   l'interface installée] ;
+4. appel de la méthode, avec `transaction_flags` contenant toujours
+   `ONLY_TRUSTED` pour les opérations qui modifient le système ;
+5. réception de `Package`/`Packages`, `ItemProgress`, `ErrorCode`, puis
+   `Finished` ; `Destroy` libère l'abonnement [MESURÉ : noms des signaux].
+
+**Opérations** :
+
+| Besoin | Appel PackageKit | Remarques |
+|---|---|---|
+| État installé | `Resolve(filter=installed, noms)` par lots de 500 | [MESURÉ] 1 843 noms en 0,52 s avec `pkcon`. `package_id` = `nom;version;arch;données`, les données indiquant `installed` ou `manual:<origine>` |
+| Plan d'installation | `Resolve(newest, arch native)`, puis `InstallPackages(ONLY_TRUSTED \| SIMULATE)` | Les signaux `Package` donnent l'action par paquet (installation, suppression, mise à jour, rétrogradation) |
+| Tailles | `GetDetails(package_ids)` | Taille de téléchargement |
+| Installation | `InstallPackages(ONLY_TRUSTED)`, hint `interactive=true` | |
+| Plan de suppression | `RemovePackages(ONLY_TRUSTED \| SIMULATE, ids, allow_deps=true, autoremove=false)` | Toute suppression d'un autre paquet ⇒ confirmation (P-008) |
+| Suppression | Même appel sans `SIMULATE` | Simulation refaite juste avant (§5.5). Une petite fenêtre de concurrence subsiste : PackageKit n'offre pas de « exécuter exactement ce plan ». Elle est acceptée et documentée |
+| Mises à jour | `GetUpdates`, puis `UpdatePackages(ONLY_TRUSTED, ids)` | Les paquets sans offre dans le catalogue sont de type `system` (périmètre : O-005) |
+| Rafraîchissement | `RefreshCache(force=false)`, hint `background=true` | polkit `system-sources-refresh` : `yes` pour l'utilisateur actif [MESURÉ] |
+| Sources | `GetRepoList` puis signaux `RepoDetail` | Lecture seule en v1 |
+
+**Suivi des changements faits hors de la boutique** :
+
+- signaux du démon : `InstalledChanged`, `UpdatesChanged`, `RepoListChanged`,
+  `TransactionListChanged` [MESURÉ : signaux présents] ;
+- le hook APT `DPkg::Post-Invoke` de PackageKit appelle `StateHasChanged`
+  après chaque exécution de dpkg [MESURÉ : fichier présent], donc un `apt
+  install` en ligne de commande devrait produire ces signaux [À VALIDER :
+  signaux effectivement émis] ;
+- les signaux sont regroupés sur 2 s avant de relancer `Resolve` et
+  `GetUpdates`.
+
+**Phases** (`Status` de PackageKit vers `Phase`) :
+
+| Phase | Statuts PackageKit |
+|---|---|
+| `waiting-for-auth` | attente d'autorisation |
+| `waiting-for-lock` | attente du verrou |
+| `downloading` | téléchargement, téléchargement des listes |
+| `installing` | installation, mise à jour |
+| `removing` | suppression |
+| `finishing` | nettoyage, validation |
+
+Le tableau de correspondance exact sera établi à partir de l'énumération
+`PkStatusEnum` [À VALIDER]. Une valeur inconnue est conservée telle quelle dans
+les journaux et affichée sous une phase générique.
+
+**Erreurs** (`ErrorCode` vers §5.6) :
+
+| Code commun | Familles d'erreurs PackageKit (noms exacts à confirmer [À VALIDER]) |
+|---|---|
+| `auth-denied` | not-authorized |
+| `locked` | cannot-get-lock |
+| `network` | no-network, connexion échouée |
+| `untrusted` | signatures GPG manquantes ou invalides |
+| `dependency` | échec de résolution des dépendances |
+| `conflict` | conflits de fichiers ou de paquets |
+| `no-space` | plus de place sur le disque |
+| `not-found` | paquet introuvable |
+| `cancelled` | transaction annulée |
+
+**Ce que le backend APT ne fait jamais en v1** :
+
+- `InstallFiles` (fichiers `.deb` locaux) ;
+- transactions sans `ONLY_TRUSTED` ;
+- import de clés (`RepoSignatureRequired` fait échouer la transaction avec
+  `untrusted`) ;
+- acceptation de licences (`EulaRequired` fait échouer la transaction) ;
+- ajout de dépôts.
+
+**Paquets protégés** : la suppression d'un paquet indispensable au bureau
+(méta-paquet `cutefish-desktop`, la boutique elle-même) est refusée par une
+liste de protection dans `core`, en plus des protections d'APT
+[À VALIDER : comportement du backend apt de PackageKit face aux paquets
+`Essential` et `Priority: required`].
+
+### 7.3 Backend Flatpak (libflatpak)
+
+**Installation** : `flatpak_installation_new_user` [SYMBOLE]. Une installation
+système (`flatpak_installation_new_system` [SYMBOLE]) s'ajoutera comme une
+seconde instance du même backend, avec `scope = system` (D-005, O-006). Toutes
+les offres portent leur scope, donc ce changement n'affecte ni l'API ni le
+modèle.
+
+**Remotes** :
+
+- liste : `flatpak_installation_list_remotes` [SYMBOLE] ;
+- création de Flathub après consentement : `flatpak_remote_new_from_file`
+  sur le `flathub.flatpakrepo` livré avec la boutique, puis
+  `flatpak_installation_add_remote` [SYMBOLE] (P-011) ;
+- activation et désactivation : `flatpak_remote_set_disabled` puis
+  `flatpak_installation_modify_remote` [SYMBOLE] ;
+- les remotes déjà configurées par l'utilisateur sont affichées et
+  utilisées. Elles sont marquées `third-party` sauf Flathub, reconnue par
+  son URL et sa clé.
+
+**Résolution d'une offre** :
+
+- la ref vient de l'AppStream (`bundle`), la remote de l'origine de la
+  source ;
+- avant le plan : `flatpak_installation_fetch_remote_ref_sync_full`
+  [SYMBOLE], qui donne `get_download_size`, `get_installed_size`, `get_eol`,
+  `get_eol_rebase` et `get_metadata` (permissions) [SYMBOLE].
+
+**État** :
+
+- installées : `flatpak_installation_list_installed_refs_by_kind(APP)`
+  [SYMBOLE], mises en correspondance avec le catalogue par la ref ;
+- mises à jour : `flatpak_installation_list_installed_refs_for_update`
+  [SYMBOLE]. Cet appel interroge le réseau : il s'exécute sur le thread de
+  requêtes et son résultat est mis en cache dans `state.sqlite` ;
+- runtimes devenus inutiles : `flatpak_installation_list_unused_refs`
+  [SYMBOLE]. Les proposer au nettoyage est hors v1.
+
+**Transactions** :
+
+- `flatpak_transaction_new_for_installation`, `add_install`, `add_update`,
+  `add_uninstall`, `add_default_dependency_sources`,
+  `set_no_interaction(TRUE)`, puis `flatpak_transaction_run` [SYMBOLE] ;
+- `run` est **bloquant** : il s'exécute sur le thread des transactions
+  Flatpak (§8).
+
+**Plan en deux passes** (P-008) :
+
+1. *Passe de planification* : la transaction est lancée. Dans le signal
+   `ready` [SYMBOLE : chaîne présente dans la bibliothèque], le backend
+   recopie les opérations dans une structure C++ (type, ref, remote,
+   `get_download_size`, `get_metadata`, `get_old_metadata` [SYMBOLE]), puis
+   **retourne `FALSE` pour interrompre** la transaction. Aucun thread ne reste
+   bloqué en attendant l'utilisateur.
+2. *Passe d'exécution*, après `Confirm()` ou si aucune confirmation n'est
+   requise : une nouvelle transaction identique est lancée. Dans `ready`, le
+   backend vérifie que les opérations et les permissions sont **identiques**
+   au plan confirmé. Si elles diffèrent (une mise à jour a été publiée
+   entre-temps), il interrompt la transaction et la remet en
+   `awaiting-confirmation` avec le nouveau plan.
+
+[À VALIDER] le coût de cette double résolution (métadonnées distantes
+interrogées deux fois) et le comportement exact de `ready` quand le gestionnaire
+retourne `FALSE` (interruption propre, sans effet de bord).
+
+**Autres signaux de `FlatpakTransaction`** [SYMBOLE : noms présents] :
+
+| Signal | Traitement v1 |
+|---|---|
+| `new-operation` | Suivi de la progression de l'opération (`flatpak_transaction_progress_get_progress` et son signal `changed`) |
+| `operation-done` | Opération suivante ; état installé mis à jour |
+| `operation-error` | Erreur fatale, la transaction s'arrête. Une erreur non fatale (opération ignorée) est conservée dans les journaux |
+| `add-new-remote` | Refusé : la boutique n'ajoute pas de remote implicitement |
+| `choose-remote-for-ref` | La remote de l'offre, rien d'autre |
+| `end-of-lifed-with-rebase` | Ajoute la raison `rebase` au plan, donc une confirmation |
+| `webflow-start`, `basic-auth-start`, `install-authenticator` | Non pris en charge en v1 (remotes authentifiées) : la transaction échoue |
+
+**Permissions** : la section `[Context]` et les politiques de bus des
+métadonnées (un `GKeyFile`) sont lues sur le thread Flatpak et converties en
+`a{sv}`, avec le résumé `risk` (§5.4). Pour une mise à jour, la comparaison
+entre l'ancien et le nouveau jeu de permissions détermine la raison
+`new-permissions`.
+
+**Annulation** : un `GCancellable` par transaction. `g_cancellable_cancel` est
+appelé depuis la boucle principale ; il est sûr entre threads [DOC GLib].
+L'erreur d'annulation qui en résulte est traduite en `cancelled`.
+
+**Erreurs** : les `GError` des domaines `FLATPAK_ERROR` et `G_IO_ERROR` sont
+traduits vers §5.6 (`ALREADY_INSTALLED` et `NOT_INSTALLED` vers une
+réconciliation silencieuse, `OUT_OF_SPACE` vers `no-space`, `UNTRUSTED` vers
+`untrusted`, erreurs réseau vers `network`, `ABORTED` vers `cancelled`, …)
+[À VALIDER : liste exacte des codes de `FlatpakError` dans la version
+minimale retenue].
+
+---
+
+## 8. Threads et GLib
+
+### 8.1 Interface (`cutefish-store`)
+
+| Contexte | Rôle |
+|---|---|
+| Thread principal (boucle du toolkit) | Événements, mise en page, rendu, D-Bus via la connexion de session de l'application (`Application::sessionBus()` [CODE]). **Tous les appels sont asynchrones** (`callAsync`). |
+| Pool global du toolkit | Décodage des images par `ImageView` [CODE], et rien d'autre |
+
+Il n'y a ni autre thread, ni GLib, ni réseau, ni SQLite. Le temps passé dans
+chaque gestionnaire d'événement est mesuré en build de développement (§10.5).
+
+### 8.2 Service (`cutefish-store-service`)
+
+| Contexte | Nombre | Rôle | Possède |
+|---|---|---|---|
+| Thread principal (`base::EventLoop`) | 1 | API D-Bus de session, client PackageKit sur le bus système, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexions sd-bus, état des transactions, connexion d'écriture SQLite |
+| Lecteurs SQLite (`base::ThreadPool`) | 2 | Recherche, navigation, détails | Une connexion en lecture seule par thread (`catalog.sqlite` avec `state.sqlite` attachée), jamais partagée |
+| Thread GLib « requêtes Flatpak » | 1 | Liste des installées, mises à jour, métadonnées des refs, mise à jour de l'appstream, remotes | Son `GMainContext`, son `FlatpakInstallation` |
+| Thread GLib « transactions Flatpak » | 1 | Une `FlatpakTransaction` à la fois (P-009) | Son `GMainContext`, son `FlatpakInstallation`, la transaction en cours |
+| Téléchargements d'images | jusqu'à 4 | libcurl en mode bloquant, comme `calendar/src/download.cpp` [CODE] | Un handle curl par téléchargement |
+| Indexeur | 0 ou 1 processus | §6.2 | — |
+
+**Règles** :
+
+1. **Aucun objet GLib ne traverse de frontière entre threads.** Chaque objet
+   libflatpak est créé, utilisé et détruit sur son thread GLib. Seules des
+   structures C++ simples (chaînes, vecteurs, entiers) en sortent.
+2. **Pont unique vers GLib** : un petit composant `GlibWorker` dans
+   `backend-flatpak` :
+   - démarre un thread, crée un `GMainContext`, le rend
+     *thread-default* (`g_main_context_push_thread_default`) et y fait
+     tourner un `GMainLoop` ;
+   - reçoit les tâches par `g_main_context_invoke_full` (sûr entre threads
+     [DOC GLib]) ;
+   - renvoie les résultats sur la boucle principale par `base::LoopHandle::post`
+     [CODE], qui abandonne le résultat si la boucle n'existe plus ;
+   - à l'arrêt : annule les `GCancellable`, quitte la boucle, attend le thread.
+
+   C'est la seule abstraction autour de GLib, et elle est privée au backend.
+3. **Les signaux de `FlatpakTransaction`** sont reçus sur le thread qui
+   exécute `run` [HYPOTHÈSE : émission sur le thread appelant, à confirmer].
+   Les gestionnaires copient les données et les postent vers la boucle
+   principale. Ils ne prennent aucune décision qui demande l'utilisateur ; la
+   seule décision synchrone (retourner `FALSE` dans `ready`) compare des
+   données déjà présentes dans le thread.
+4. **Le thread principal ne bloque jamais** :
+   - aucune lecture du catalogue sur ce thread ;
+   - les écritures dans `state.sqlite` sont petites (une ligne de journal ou
+     un lot d'état installé), en WAL avec `synchronous=NORMAL` ;
+   - en build de développement, tout gestionnaire qui dépasse 5 ms est
+     journalisé.
+5. **PackageKit ne demande pas de thread** : tout est asynchrone sur sd-bus.
+6. **L'indexeur est mono-thread** et utilise GLib de façon synchrone, sans
+   boucle principale.
+
+### 8.3 Limites de concurrence
+
+| Ressource | Limite | Au-delà |
+|---|---|---|
+| Transaction APT modificatrice | 1 active | File `queued` |
+| `FlatpakTransaction` | 1 active | File `queued` |
+| Requêtes de lecture SQLite | 2 en parallèle | File du pool |
+| Requêtes Flatpak (hors transactions) | 1 à la fois | File du `GlibWorker` |
+| Téléchargements d'images | 4 au total | Pile LIFO pour `visible`, file FIFO pour `prefetch` ; annulables tant qu'ils n'ont pas commencé |
+| Indexeur | 1 processus | Demande mémorisée, relancée une fois |
+| Signaux de progression | 10 par seconde et par transaction | Regroupés |
+
+### 8.4 Accès SQLite
+
+| Base | Écrivain | Lecteurs | Mode |
+|---|---|---|---|
+| Fichier temporaire de l'indexeur | L'indexeur seul | Le service (validation) | `journal_mode=OFF` pendant la construction |
+| `catalog.sqlite` | Personne : remplacé en bloc par `rename()` | Les threads de lecture | Lecture seule, `immutable` envisageable [À VALIDER] |
+| `state.sqlite` | Le thread principal du service | Les threads de lecture (`ATTACH` en lecture seule) | WAL, `synchronous=NORMAL`, `busy_timeout` court |
+
+Chaque connexion appartient à un seul thread (ouverture avec
+`SQLITE_OPEN_NOMUTEX`) ; aucune connexion n'est partagée.
