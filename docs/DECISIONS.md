@@ -240,6 +240,80 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   service devaient tous utiliser `ToolkitBase` (`EventLoop`, `ThreadPool`,
   `dbus`, `json`, `logging`, `Settings`).
 
+### P-008 — Transactions en deux temps : plan, puis confirmation
+
+- **Statut** : Validée (propriétaire, phase 0.3, après le prototype 1). Le
+  mécanisme Flatpak retenu est la **double passe** (mécanisme B), avec une
+  comparaison **sémantique** des plans. L'identifiant `P-008` est conservé.
+- **Décision** : toute transaction calcule d'abord un plan :
+  - pour PackageKit, `SIMULATE` ;
+  - pour Flatpak, le signal `ready` d'une première `FlatpakTransaction`.
+
+  Le cœur applique une politique de confirmation commune. Une confirmation
+  explicite est exigée si le plan :
+  - supprime d'autres paquets ;
+  - ajoute des permissions Flatpak ;
+  - ajoute une source (remote) ;
+  - change de remote (fin de vie avec rebase) ;
+  - installe ou supprime dans l'installation Flatpak système (D-011).
+- **Mécanisme Flatpak : double passe** :
+  1. construire une première transaction ;
+  2. la résoudre et copier le plan dans le signal `ready`, qui retourne
+     `FALSE` : rien n'est téléchargé ni installé ;
+  3. présenter le plan à l'utilisateur ;
+  4. attendre la confirmation **sans conserver de transaction active** ;
+  5. après `Confirm`, reconstruire une seconde transaction ;
+  6. comparer son plan au plan confirmé, dans son signal `ready` ;
+  7. exécuter seulement si les différences sont acceptables ; sinon,
+     interrompre et redemander une confirmation avec le nouveau plan.
+- **Règles de comparaison** (sémantique, pas une égalité stricte) :
+  - **nouvelle confirmation nécessaire** si une opération apparaît (y compris
+    une dépendance supplémentaire), si le commit, la remote ou le type d'une
+    opération change, si de nouvelles permissions sont demandées, ou si une
+    autre différence modifie substantiellement ce qui sera installé ou
+    supprimé ;
+  - **sans conséquence** : la disparition d'une opération parce qu'elle est
+    déjà satisfaite (par exemple un runtime installé entre-temps) ;
+  - **toute différence inconnue ou impossible à classer** entraîne un refus
+    d'exécution et une nouvelle confirmation ;
+  - aucune opération non couverte par la confirmation de l'utilisateur n'est
+    exécutée silencieusement.
+- **Justification** :
+  - les décisions de sécurité ne dépendent pas de l'interface utilisée ;
+  - on évite les suppressions en cascade silencieuses ;
+  - la double passe laisse libres le thread et la file des transactions
+    Flatpak pendant que l'utilisateur réfléchit, ne garde aucune transaction
+    suspendue (question non testée pour `flatpak-system-helper`, D-011), et
+    suit le même modèle que PackageKit : planifier, confirmer, exécuter.
+- **Base expérimentale** : prototype 1, dépôt local
+  `~/Dev/cutefish-store-prototypes/flatpak-confirm/` (commit `352aeaf`,
+  documents `PROTOCOL.md`, `RESULTS-A.md`, `RESULTS-B.md`, `COMPARISON.md`).
+  Environnement : Debian 13, Flatpak 1.16.6, installation **utilisateur**
+  temporaire (`FLATPAK_USER_DIR`), dépôt local `file://` sans réseau ni GPG,
+  attentes courtes, un seul client simulé. Constats [MESURÉ dans cet
+  environnement] :
+  - les deux mécanismes ont fonctionné ;
+  - le mécanisme A (blocage dans `ready`) occupe le thread GLib des
+    transactions pendant toute l'attente ; le mécanisme B le laisse
+    disponible ;
+  - la seconde passe détecte un changement de commit et de permissions
+    survenu entre les passes ;
+  - une comparaison stricte produit une fausse alerte quand une dépendance
+    est déjà satisfaite entre les passes ;
+  - tous les signaux observés sont émis sur le thread qui appelle
+    `flatpak_transaction_run` ;
+  - aucun verrou de fichier n'a été observé pendant l'attente dans les
+    scénarios testés.
+- **Restant à tester** : réseau réel et coût de la seconde résolution sur
+  Flathub, remotes GPG et HTTP, plusieurs clients D-Bus, installation système
+  avec `flatpak-system-helper`.
+- **Alternative écartée** : mécanisme A, blocage dans `ready`. Il exécute
+  exactement le commit présenté, mais bloque toute la file Flatpak (P-009)
+  jusqu'à la décision ou au délai maximal, et laisse une transaction
+  suspendue dont le comportement avec le helper système n'est pas connu.
+- **Détails** : [ARCHITECTURE §7.3](ARCHITECTURE.md#73-backend-flatpak-libflatpak)
+  et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
+
 ---
 
 ## Décisions proposées (phase 0.2, à valider)
@@ -406,43 +480,6 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   privilégié (PackageKit ne sait pas ajouter un dépôt avec sa clé [CODE]),
   sont hors périmètre v1 (D-003). Sans eux, aucun code privilégié n'est
   nécessaire.
-
-### P-008 — Transactions en deux temps : plan, puis confirmation
-
-- **Statut** : Proposée. L'API (état `awaiting-confirmation`, propriété
-  `Plan`, méthodes `Confirm` et `Cancel`) et la politique de confirmation sont
-  soumises à validation ; le **mécanisme interne côté Flatpak n'est pas figé**
-  avant les prototypes de la phase 0.3.
-- **Décision** : toute transaction calcule d'abord un plan :
-  - pour PackageKit, `SIMULATE` ;
-  - pour Flatpak, le signal `ready` de `FlatpakTransaction`.
-  Le cœur applique une politique de confirmation commune. Une confirmation
-  explicite est exigée si le plan :
-  - supprime d'autres paquets ;
-  - ajoute des permissions Flatpak ;
-  - ajoute une source (remote) ;
-  - change de remote (fin de vie avec rebase) ;
-  - installe ou supprime dans l'installation Flatpak système (D-011).
-- **Justification** :
-  - les décisions de sécurité ne dépendent pas de l'interface utilisée ;
-  - on évite les suppressions en cascade silencieuses.
-- **Mécanisme Flatpak, deux candidats à prototyper** :
-  - **A. Blocage dans `ready`** (piste prioritaire) : le gestionnaire de
-    `ready` attend la décision de l'utilisateur sur le thread des transactions
-    Flatpak. Ce qui s'exécute est exactement ce qui a été confirmé. Risques :
-    thread et file Flatpak bloqués pendant l'attente ; réveil fiable par
-    `Confirm`, `Cancel`, le `GCancellable` et l'arrêt du service ; délai
-    maximal obligatoire ; verrous éventuellement tenus par libflatpak pendant
-    `ready` ; comportement du helper système pendant une longue attente ;
-  - **B. Double passe** (alternative) : `ready` retourne `FALSE` après avoir
-    copié le plan, puis une seconde transaction est lancée après `Confirm`, et
-    son plan doit être identique. Risques : métadonnées distantes résolues
-    deux fois, plan qui change entre les deux passes, interruption propre à
-    vérifier quand `ready` retourne `FALSE`.
-  - Les deux respectent la même API ; le choix est un détail
-    d'implémentation du backend Flatpak.
-- **Détails** : [ARCHITECTURE §7.3](ARCHITECTURE.md#73-backend-flatpak-libflatpak)
-  et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
 
 ### P-009 — Transactions sérialisées par backend, parallèles entre backends
 
