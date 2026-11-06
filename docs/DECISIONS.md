@@ -96,6 +96,60 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   (P-001) ; seul son transport D-Bus, dans la couche hôte, utilise
   `ToolkitBase` (P-006).
 
+### D-008 — Nom D-Bus `org.cutefish.Store` (tranche O-002)
+
+- **Statut** : Validée (propriétaire, après la matrice de validation de la
+  phase 0.2).
+- **Décision** : le nom de bus est `org.cutefish.Store`, l'objet principal
+  `/org/cutefish/Store`, les interfaces `org.cutefish.Store1` et
+  `org.cutefish.Store1.Transaction` ; le même préfixe sert d'identifiant
+  d'application (`org.cutefish.Store`).
+- **Portée** : ce choix **anticipe** une intégration dans l'écosystème
+  Cutefish. Il ne signifie pas que CutefishOS a adopté le projet : aucune
+  adoption officielle n'est acquise à ce jour.
+- **Conséquence** : si l'intégration ne se faisait pas, un renommage serait
+  nécessaire ; il est peu coûteux avant la première publication et coûteux
+  après (clients, fichiers `.service`, identifiant AppStream).
+
+### D-009 — Flatpak est la source privilégiée (tranche O-004)
+
+- **Statut** : Validée (propriétaire, après la matrice de validation de la
+  phase 0.2).
+- **Décision** :
+  - quand une application existe à la fois en paquet de la distribution (DEB)
+    et sur Flathub, l'offre Flatpak est proposée par défaut ;
+  - l'utilisateur peut toujours choisir explicitement le paquet DEB : toutes
+    les offres sont affichées sur la page de l'application, et l'API installe
+    l'offre que le client désigne ;
+  - une offre déjà installée reste l'offre mise en avant pour cette
+    application ;
+  - sans remote Flathub activée, il n'y a pas d'offre Flatpak et le paquet DEB
+    est proposé.
+- **Ce que la préférence ne signifie pas** : elle n'affirme pas que la version
+  Flatpak est plus récente ni meilleure. Les versions diffèrent selon la
+  source, et un paquet Debian peut recevoir des correctifs de sécurité sans
+  changer de version amont. L'interface affiche la version et la provenance de
+  chaque offre, sans comparer les versions entre formats.
+- **Détails** : ARCHITECTURE §6.4.
+
+### D-010 — Mises à jour : applications seulement (tranche O-005)
+
+- **Statut** : Validée (propriétaire, après la matrice de validation de la
+  phase 0.2).
+- **Décision** :
+  - la boutique gère les mises à jour des **applications** qu'elle connaît :
+    paquets de la distribution qui portent une application du catalogue, et
+    applications Flatpak (avec les runtimes dont elles dépendent) ;
+  - elle ne propose **pas** de gestion générale des mises à jour système APT :
+    ni mise à jour complète du système, ni bibliothèques, noyau ou paquets
+    sans application, ni mises à jour hors ligne ;
+  - mettre à jour une application installée via APT n'est pas une mise à jour
+    du système : seuls ses paquets, et les dépendances que PackageKit doit
+    mettre à jour pour eux, figurent dans le plan.
+- **Conséquence** : les mises à jour système restent du ressort de l'outil de
+  la distribution (APT, mises à jour automatiques ou autre).
+- **Détails** : ARCHITECTURE §5.4 et §7.2.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de
@@ -357,17 +411,17 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ## Questions ouvertes
 
-| Id | Question | Pourquoi elle compte | Quand trancher |
-|---|---|---|---|
-| O-001 | **Licence** du projet (le dépôt n'a pas de `LICENSE`). L'écosystème Cutefish est en BSD-3-Clause [CODE]. | En-têtes SPDX, contributions, compatibilité avec libflatpak/libappstream (LGPL-2.1+, liaison dynamique) | Avant le premier fichier source |
-| O-002 | **Espace de noms D-Bus et identifiant d'application** : `org.cutefish.Store` suppose un projet adopté par CutefishOS. Sinon, un nom en DNS inverse sous le contrôle du projet (par ex. `io.github.sachagrdc.CutefishStore`). | Nom de bus, chemins d'objets, fichiers `.service`, identifiant AppStream de la boutique | Avant la phase 0.3 |
-| O-003 | **Packaging** : dans `cutefishos/packaging` (convention Cutefish [CODE]) ou dans un dossier `packaging/` propre au dépôt ? | Arborescence, CI, publication | Avant la première publication |
-| O-004 | **Source préférée par défaut** quand une application existe en DEB et en Flatpak. | Ce que propose le bouton « Installer » | Avant l'implémentation de la page de détail |
-| O-005 | **Mises à jour système APT** : la boutique les montre-t-elle toutes (paquets sans AppStream compris) ? Mises à jour hors ligne (`org.freedesktop.PackageKit.Offline`) ? | Périmètre de l'écran « Mises à jour », risque de casser le système | Avant l'implémentation des mises à jour |
-| O-006 | **Flatpaks déjà installés en système** (présents sur la machine d'audit) : affichage seul, ou gestion complète (polkit via `flatpak-system-helper`) dès la v1 ? | Éviter de proposer un doublon utilisateur ; périmètre polkit | Avant l'implémentation du backend Flatpak |
-| O-007 | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
-| O-008 | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
-| O-009 | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation | Pendant le prototype de l'indexeur |
-| O-010 | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
-| O-011 | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
-| O-012 | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
+| Id | Statut | Question | Pourquoi elle compte | Quand trancher |
+|---|---|---|---|---|
+| O-001 | Ouverte | **Licence** du projet (le dépôt n'a pas de `LICENSE`). L'écosystème Cutefish est en BSD-3-Clause [CODE]. Le choix revient au propriétaire. | En-têtes SPDX, contributions, compatibilité avec libflatpak/libappstream (LGPL-2.1+, liaison dynamique) | Avant le premier fichier source |
+| O-002 | Tranchée → D-008 | **Espace de noms D-Bus et identifiant d'application**. | Nom de bus, chemins d'objets, fichiers `.service`, identifiant AppStream de la boutique | — |
+| O-003 | Ouverte | **Packaging** : dans `cutefishos/packaging` (convention Cutefish [CODE]) ou dans un dossier `packaging/` propre au dépôt ? | Arborescence, CI, publication | Avant la première publication |
+| O-004 | Tranchée → D-009 | **Source préférée par défaut** quand une application existe en DEB et en Flatpak. | Ce que propose le bouton « Installer » | — |
+| O-005 | Tranchée → D-010 | **Mises à jour système APT**. | Périmètre de l'écran « Mises à jour » | — |
+| O-006 | Ouverte | **Flatpaks déjà installés en système** (présents sur la machine d'audit) : affichage seul, ou gestion complète (polkit via `flatpak-system-helper`) dès la v1 ? | Éviter de proposer un doublon utilisateur ; périmètre polkit | Avant l'implémentation du backend Flatpak |
+| O-007 | Ouverte | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
+| O-008 | Ouverte | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
+| O-009 | Ouverte | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation | Pendant le prototype de l'indexeur |
+| O-010 | Ouverte | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
+| O-011 | Ouverte | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
+| O-012 | Ouverte | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |

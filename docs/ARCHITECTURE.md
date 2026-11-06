@@ -86,7 +86,8 @@ Flatpak (D-003).
 
 - Snap, AppImage, RPM, dépôts éditeurs.
 - Notes et avis, comptes utilisateurs, paiements.
-- Mises à jour hors ligne du système (O-005).
+- Gestion générale des mises à jour système APT : ni mise à jour complète, ni
+  bibliothèques ou noyau, ni mises à jour hors ligne (D-010).
 - Installation Flatpak système (D-005, O-006).
 - Sessions X11.
 
@@ -460,9 +461,10 @@ Cette spécification sert de contrat entre l'interface et le service. Elle sera
 traduite en XML d'introspection (`data/org.cutefish.Store1.xml`) au début de
 l'implémentation. Les signatures suivent la notation D-Bus.
 
-> **Nom provisoire.** `org.cutefish.Store` suppose que le projet est adopté par
-> CutefishOS. Sinon, il faudra un nom en DNS inverse contrôlé par le projet
-> (O-002). Seul le préfixe changerait ; la structure reste la même.
+> **Nom retenu : `org.cutefish.Store`** (D-008). Ce choix anticipe une
+> intégration dans l'écosystème Cutefish ; il ne signifie pas qu'une adoption
+> officielle par CutefishOS est acquise. Si elle ne se faisait pas, seul le
+> préfixe changerait, de préférence avant la première publication.
 
 ### 5.1 Principes
 
@@ -503,7 +505,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `Backends` | `aa{sv}` | Par backend : `id` (`packagekit`, `flatpak`), `available` (`b`), `reason` (`s`), `scopes` (`as`), `formats` (`as`, par exemple `deb` pour le profil Debian) |
 | `Refreshing` | `b` | Un rafraîchissement est en cours |
 | `LastRefresh` | `t` | Horodatage (secondes UNIX) du dernier rafraîchissement réussi |
-| `UpdateCount` | `u` | Nombre de mises à jour disponibles |
+| `UpdateCount` | `u` | Nombre de mises à jour d'applications disponibles (D-010) |
 
 #### Lecture du catalogue
 
@@ -515,7 +517,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `GetSummaries` | `as app_ids` | `t generation, aa{sv} summaries` | ≤ 200 identifiants ; utilisé pour remplir les lignes visibles |
 | `GetDetails` | `s app_id` | `t generation, a{sv} details` | Voir §5.4 |
 | `GetInstalled` | `a{sv} options` | `aa{sv} items` | Options : `backend` |
-| `GetUpdates` | — | `aa{sv} updates` | Voir §5.4 |
+| `GetUpdates` | — | `aa{sv} updates` | Mises à jour d'applications seulement (D-010) ; voir §5.4 |
 | `GetPermissions` | `s offer_id` | `a{sv} permissions` | Flatpak seulement ; `NotSupported` pour PackageKit |
 | `ListSources` | — | `aa{sv} sources` | Voir §5.4 |
 | `ListTransactions` | — | `ao paths` | Transactions encore publiées sur le bus |
@@ -528,7 +530,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `Install` | `s offer_id, a{sv} options` | `o transaction` |
 | `Remove` | `s offer_id, a{sv} options` | `o transaction` |
 | `Update` | `as offer_ids, a{sv} options` | `o transaction` |
-| `UpdateAll` | `a{sv} options` | `o transaction` |
+| `UpdateAll` | `a{sv} options` | `o transaction` (toutes les mises à jour d'applications, jamais une mise à jour complète du système) |
 | `Refresh` | `a{sv} options` | `o transaction` (option `force`, `b`) |
 | `EnableSource` | `s source_id` | `o transaction` |
 | `DisableSource` | `s source_id` | `o transaction` |
@@ -574,7 +576,7 @@ Chemin `/org/cutefish/Store/Transactions/<n>`, où `<n>` est un compteur propre
 | `Id` | `s` | UUID stable, conservé dans le journal (le chemin, lui, ne survit pas à un redémarrage) |
 | `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source` |
 | `Backend` | `s` | `packagekit`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
-| `AppIds` | `as` | Applications concernées (peut être vide pour des paquets système) |
+| `AppIds` | `as` | Applications concernées (vide seulement pour `refresh` et les transactions de source) |
 | `OfferIds` | `as` | Offres concernées |
 | `State` | `s` | `queued`, `planning`, `awaiting-confirmation`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted` (§3.5) |
 | `Phase` | `s` | Pendant `running` : `waiting-for-auth`, `waiting-for-lock`, `downloading`, `installing`, `removing`, `finishing` ; vide sinon |
@@ -622,11 +624,13 @@ vide), `icon-url` `s` (si l'icône n'est que distante), `backends` `as`,
   (dépôt ou remote), `scope`
   (`system`, `user`), `version`, `installed` `b`, `installed-version`,
   `download-size` `t`, `installed-size` `t`, `sandboxed` `b`, `verified` `b`,
-  `default` `b`.
+  `default` `b` (offre proposée par défaut selon D-009 ; le client peut en
+  installer une autre).
 
-**Mise à jour** (`GetUpdates`) : `offer-id`, `app-id` (vide pour un paquet
-système sans AppStream), `name`, `from-version`, `to-version`,
-`download-size`, `kind` (`app`, `runtime`, `system`).
+**Mise à jour** (`GetUpdates`) : `offer-id`, `app-id`, `name`,
+`from-version`, `to-version`, `download-size`, `kind` (`app`, ou `runtime`
+pour un runtime Flatpak utilisé par une application installée). Il n'existe
+pas de type « système » (D-010).
 
 **Source** (`ListSources`) : `id`, `backend`, `name`, `url`, `scope`,
 `enabled` `b`, `kind` (`distribution`, `flathub`, `third-party`),
@@ -887,9 +891,17 @@ résultats de recherche sans aller-retour supplémentaire.
 - un champ vide est complété par les autres sources, dans l'ordre de
   priorité des sources ;
 - la règle de choix de l'offre par défaut est une fonction de `core`, testée
-  isolément. Sa politique reste à décider (O-004) ; en attendant, la règle
-  provisoire est : offre installée, sinon préférence de l'utilisateur, sinon
-  la source de priorité la plus haute.
+  isolément. Politique retenue (D-009) :
+  1. une offre déjà installée ;
+  2. sinon l'offre Flatpak, si une remote Flathub est activée ;
+  3. sinon le paquet de la distribution.
+
+  L'utilisateur peut toujours installer une autre offre, en particulier le
+  paquet DEB : la page de l'application liste toutes les offres avec leur
+  version et leur provenance, et `Install` prend l'offre désignée par le
+  client. La préférence pour Flatpak n'implique pas que sa version soit plus
+  récente ou meilleure : les versions ne sont jamais comparées entre
+  formats.
 
 ### 6.5 Langues
 
@@ -995,7 +1007,7 @@ nécessaires manquent, le backend se déclare indisponible.
 | Installation | `InstallPackages(ONLY_TRUSTED)`, hint `interactive=true` | |
 | Plan de suppression | `RemovePackages(ONLY_TRUSTED \| SIMULATE, ids, allow_deps=true, autoremove=false)` | Toute suppression d'un autre paquet ⇒ confirmation (P-008) |
 | Suppression | Même appel sans `SIMULATE` | Simulation refaite juste avant (§5.5). Une petite fenêtre de concurrence subsiste : PackageKit n'offre pas de « exécuter exactement ce plan ». Elle est acceptée et documentée |
-| Mises à jour | `GetUpdates`, puis `UpdatePackages(ONLY_TRUSTED, ids)` | Les paquets sans offre dans le catalogue sont de type `system` (périmètre : O-005) |
+| Mises à jour d'applications | `GetUpdates`, filtré sur les paquets qui portent une offre d'application du catalogue ; puis `UpdatePackages(ONLY_TRUSTED \| SIMULATE)` et `UpdatePackages(ONLY_TRUSTED)` pour **ces paquets seulement** | D-010 : les autres mises à jour (bibliothèques seules, noyau, paquets sans application) ne sont ni listées ni appliquées. Les dépendances que PackageKit doit mettre à jour pour l'application apparaissent dans le plan. L'action polkit demandée est probablement `system-update` [HYPOTHÈSE], ce qui influe sur le texte du dialogue d'authentification |
 | Rafraîchissement | `RefreshCache(force=false)`, hint `background=true` | polkit `system-sources-refresh` : `yes` pour l'utilisateur actif [MESURÉ] |
 | Sources | `GetRepoList` puis signaux `RepoDetail` | Lecture seule en v1 |
 
@@ -1697,8 +1709,8 @@ avant chaque version, puis automatisation éventuelle avec
 
 - APT et Flatpak utilisateur seulement ; pas de fichiers `.deb` locaux, de
   `.flatpakref`, de remotes authentifiées ni de dépôts éditeurs.
-- Pas de mises à jour hors ligne ; le périmètre des mises à jour système est
-  à décider (O-005).
+- Pas de gestion des mises à jour système : seules les applications sont
+  mises à jour (D-010).
 - Interface Wayland uniquement, liée à Cutefish ; seul le service vise la
   portabilité.
 - Dédoublonnage par identifiant et alias seulement : deux paquets de la même
@@ -1714,9 +1726,10 @@ avant chaque version, puis automatisation éventuelle avec
 | Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
 | Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype ; lecture source par source |
 | Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
-| Mises à jour système via la boutique | Système cassé par une mise à jour partielle | O-005 ; `ONLY_TRUSTED` ; simulation et confirmation |
+| Mise à jour d'une application APT qui entraîne celle de dépendances partagées | Effet sur d'autres programmes | Simulation, dépendances visibles dans le plan, `ONLY_TRUSTED` ; la boutique ne lance jamais de mise à jour complète (D-010) |
+| Utilisateurs qui attendent les mises à jour système dans la boutique | Système non mis à jour | Message clair dans l'écran « Mises à jour » : le système se met à jour par l'outil de la distribution (D-010) |
 | Politique `auth_admin_keep` de PackageKit | Fenêtre où d'autres processus de la session profitent d'une autorisation récente | Hors du contrôle de la boutique ; documenté |
-| Nom de bus `org.cutefish.Store` (O-002) | Changement de nom tardif | Trancher avant la phase 0.3 |
+| Nom `org.cutefish.Store` retenu sans adoption officielle (D-008) | Renommage si l'intégration à Cutefish ne se fait pas | Renommer avant la première publication si nécessaire |
 | Croissance du catalogue Flathub (50 Mo de XML aujourd'hui) | Indexation plus longue | Indexation en arrière-plan ; réindexation seulement si une empreinte change |
 
 ### 14.3 Évolutions prévues par la conception
@@ -1750,5 +1763,5 @@ avant chaque version, puis automatisation éventuelle avec
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.
-6. Décisions O-001 (licence) et O-002 (nom de bus) avant le premier fichier
-   source.
+6. Décision O-001 (licence), qui appartient au propriétaire, avant le premier
+   fichier source.
