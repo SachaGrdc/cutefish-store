@@ -92,6 +92,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - PackageKit fournit déjà le démon privilégié, polkit, la file de
     transactions et la gestion des verrous ;
   - le parler en D-Bus évite GLib dans ce backend.
+- **Précisions ultérieures** : le backend s'appelle `backend-packagekit`
+  (P-001) ; seul son transport D-Bus, dans la couche hôte, utilise
+  `ToolkitBase` (P-006).
 
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
@@ -141,13 +144,19 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-001 — Un seul service, bibliothèques internes statiques, pas de plugins
 
-- **Statut** : Proposée.
+- **Statut** : Proposée, corrigée après la matrice de validation.
 - **Décision** :
   - un seul service (`cutefish-store-service`) ;
   - le code est découpé en bibliothèques statiques internes : `common`,
-    `core`, `backend-apt`, `backend-flatpak`, `service` ;
+    `core`, `backend-packagekit`, `backend-flatpak`, `service` ;
   - les backends sont enregistrés à la compilation (options CMake), sans
-    chargement dynamique ni ABI de plugin.
+    chargement dynamique ni ABI de plugin ;
+  - **correction** : le backend autrefois nommé `backend-apt` devient
+    `backend-packagekit`. PackageKit ne dépend pas de la distribution ; les
+    particularités Debian (catalogue DEP-11, champ « données » des
+    `package_id`, classement des dépôts, paquets protégés, format `deb`) sont
+    isolées dans un **profil de distribution**. Le code générique ne contient
+    aucune donnée propre à Debian (ARCHITECTURE §7.2).
 - **Justification** :
   - il n'y a que deux backends en v1 ;
   - un système de plugins `dlopen` imposerait une ABI stable, du versionnage
@@ -158,7 +167,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     (`calculator-engine`, `calculator-ui`) [CODE].
 - **Alternatives écartées** :
   - un service par backend : plus d'IPC, plus de cycles de vie, aucun gain ;
-  - des plugins dynamiques : complexité prématurée.
+  - des plugins dynamiques : complexité prématurée ;
+  - un backend « APT » mêlant PackageKit et Debian : il aurait fallu le
+    réécrire pour une autre distribution.
 
 ### P-002 — Indexation AppStream dans un sous-processus éphémère
 
@@ -259,7 +270,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 - **Statut** : Proposée.
 - **Décision** : toute transaction calcule d'abord un plan :
-  - pour APT, `SIMULATE` de PackageKit ;
+  - pour PackageKit, `SIMULATE` ;
   - pour Flatpak, le signal `ready` de `FlatpakTransaction`.
   Le cœur applique une politique de confirmation commune. Une confirmation
   explicite est exigée si le plan :
@@ -279,7 +290,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Décision** :
   - au plus une transaction modificatrice active par backend et par
     installation ;
-  - APT et Flatpak peuvent s'exécuter en parallèle ;
+  - PackageKit et Flatpak peuvent s'exécuter en parallèle ;
   - les lectures (recherche, détails) ne sont jamais bloquées par une
     transaction.
 - **Justification** :

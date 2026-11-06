@@ -26,7 +26,7 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 4. [Responsabilités des composants](#4-responsabilités-des-composants)
 5. [Spécification préliminaire de l'API D-Bus](#5-spécification-préliminaire-de-lapi-d-bus)
 6. [Catalogue et index](#6-catalogue-et-index)
-7. [Backends APT et Flatpak](#7-backends-apt-et-flatpak)
+7. [Backends PackageKit et Flatpak](#7-backends-packagekit-et-flatpak)
 8. [Threads et GLib](#8-threads-et-glib)
 9. [Modèle de sécurité](#9-modèle-de-sécurité)
 10. [Performances et caches](#10-performances-et-caches)
@@ -106,7 +106,7 @@ Composants extérieurs utilisés (aucun n'est modifié) :
 
 | Composant | Utilisé pour | Bus ou mécanisme |
 |---|---|---|
-| PackageKit (`packagekitd`, root) + backend `apt` | Tout ce qui touche APT : état installé, plan, installation, suppression, mises à jour, rafraîchissement | Bus système, `org.freedesktop.PackageKit` |
+| PackageKit (`packagekitd`, root) + son backend `apt` sous Debian | Paquets de la distribution (APT/DEB sous Debian) : état installé, plan, installation, suppression, mises à jour, rafraîchissement | Bus système, `org.freedesktop.PackageKit` |
 | polkit et agent polkit de Cutefish (`cutefish-core/polkit-agent`) | Authentifications demandées par PackageKit | Bus système |
 | libflatpak (dans le service) | Installation utilisateur : remotes, refs, transactions, métadonnées AppStream de Flathub | Bibliothèque ; aucun démon pour l'installation utilisateur |
 | `flatpak-system-helper` | Seulement si l'installation système est activée plus tard (O-006) | Bus système, via libflatpak |
@@ -134,8 +134,8 @@ services. Le choix retenu (P-001, P-002) :
 
 - **un seul service résident** : un seul nom de bus, un seul cycle de vie, une
   seule file de transactions ;
-- **des bibliothèques statiques internes** (`common`, `core`, `backend-apt`,
-  `backend-flatpak`, `service`), testables séparément, sans ABI de plugin,
+- **des bibliothèques statiques internes** (`common`, `core`,
+  `backend-packagekit`, `backend-flatpak`, `service`), testables séparément, sans ABI de plugin,
   réparties en couches (ci-dessous) ;
 - **un seul processus annexe, l'indexeur**, justifié par deux faits :
   1. [MESURÉ] parser tout Flathub avec libappstream monte à 459 Mo RSS de
@@ -152,7 +152,7 @@ services. Le choix retenu (P-001, P-002) :
 |---|---|---|---|
 | **Cœur métier** | `core` | C++20, SQLite, libcurl | Cutefish (toolkit et `ToolkitBase`), GLib, D-Bus, boucle d'événements, threads |
 | **Adaptateur Flatpak** | `backend-flatpak` | `core`, libflatpak (GLib), threads standard | Cutefish |
-| **Logique PackageKit** | `backend-apt` (partie logique) | `core` | Cutefish, D-Bus |
+| **Logique PackageKit** | `backend-packagekit` (logique générique et profil de distribution) | `core` | Cutefish, D-Bus |
 | **Indexeur** | `indexer` | `core`, libappstream (GLib) | Cutefish, D-Bus |
 | **Couche hôte Cutefish** | `service`, transport D-Bus de PackageKit | `core`, adaptateurs, `Cutefish::ToolkitBase` (D-Bus, boucle, threads, `FileWatch`, `Process`, `Settings`, `SessionLanguage`, journaux) | `Cutefish::Toolkit` |
 | **Interface** | `ui` | `common`, `Cutefish::Toolkit` | `core`, adaptateurs, GLib, SQLite, libcurl |
@@ -198,7 +198,7 @@ flowchart LR
         Api["service : couche hôte Cutefish<br/>D-Bus org.cutefish.Store1, boucle, threads"]
         Core["core (C++20, SQLite) : catalogue,<br/>recherche, état, transactions, politique"]
         Img["core : cache d'images<br/>(libcurl, sur les threads de l'hôte)"]
-        Apt["backend-apt<br/>(PackageKit via sd-bus)"]
+        Apt["backend-packagekit<br/>(logique + profil Debian ;<br/>transport sd-bus de l'hôte)"]
         Fp["backend-flatpak<br/>(libflatpak, threads GLib)"]
         Api --> Core
         Core --> Img
@@ -257,7 +257,7 @@ sequenceDiagram
     participant P as PackageKit
     participant I as Indexeur
     T->>S: Refresh()
-    par sources APT
+    par sources de la distribution
         S->>P: RefreshCache(force=false), hint background=true
         P-->>S: Finished
     and Flathub
@@ -277,7 +277,7 @@ sequenceDiagram
     S-->>S: signaux InstalledChanged, UpdatesChanged
 ```
 
-### 3.4 Installation d'un paquet APT
+### 3.4 Installation d'un paquet de la distribution (PackageKit)
 
 ```mermaid
 sequenceDiagram
@@ -372,7 +372,8 @@ Les opérations sont synchrones ; l'hôte les exécute sur les threads de son
 choix.
 
 - **Modèle** : `App` (composant AppStream fusionné), `Offer` (une façon de
-  l'installer : un paquet APT ou une ref Flatpak), `InstalledItem`,
+  l'installer : un paquet de la distribution via PackageKit, ou une ref
+  Flatpak), `InstalledItem`,
   `UpdateItem`, `Plan`, `Transaction`.
 - **Catalogue** : ouverture de l'instantané en lecture seule, requêtes de
   navigation et de détail, génération courante, remplacement atomique.
@@ -387,18 +388,23 @@ choix.
 - **Images** : politique de planification (priorité, déduplication,
   annulation), cache disque borné, et téléchargement synchrone d'une image
   (libcurl) que l'hôte exécute sur ses threads.
-- **Sources** : liste unifiée des sources (dépôts APT en lecture, remotes
+- **Sources** : liste unifiée des sources (dépôts de la distribution en lecture, remotes
   Flatpak), activation de Flathub (P-011).
 - **Erreurs** : taxonomie commune (§5.6) et traduction des erreurs des
   backends.
 - **Interface `Backend`** (§7.1), avec deux implémentations.
 
-### 4.4 `backend-apt`
+### 4.4 `backend-packagekit`
 
-- Deux parties :
-  - une **logique** sans dépendance à Cutefish ni à D-Bus : traduction des
-    énumérations, des `package_id` et des signaux en modèle commun,
-    construction du plan ;
+(Appelé `backend-apt` dans les premières versions de ce document : il parle à
+PackageKit, qui ne dépend pas de la distribution.)
+
+- Trois parties :
+  - une **logique PackageKit générique**, sans dépendance à Cutefish ni à
+    D-Bus : traduction des énumérations, des `package_id` et des signaux en
+    modèle commun, construction du plan ;
+  - un **profil de distribution** qui isole tout ce qui est propre à la
+    distribution (§7.2). En v1, un seul profil : Debian ;
   - un **transport** D-Bus vers `org.freedesktop.PackageKit` sur le bus
     système, fourni par la couche hôte avec `base::dbus` [CODE] (D-007).
 - Correspondance entre noms de paquets et `package_id`, état installé,
@@ -473,7 +479,7 @@ l'implémentation. Les signatures suivent la notation D-Bus.
 - **Identifiants opaques.**
   - `app-id` : identifiant AppStream du composant fusionné (§6.4).
   - `offer-id` : identifiant d'une offre, construit par le service, par
-    exemple `apt:firefox-esr` ou
+    exemple `packagekit:firefox-esr` ou
     `flatpak:user:flathub:app/org.mozilla.firefox/x86_64/stable`.
   - Le client ne doit jamais les construire ni les analyser. Le service ne
     les exécute jamais tels quels : il les **recherche** dans le catalogue ou
@@ -494,7 +500,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `Version` | `s` | Version du service |
 | `State` | `s` | `starting`, `indexing` (aucun catalogue encore disponible), `ready`, `degraded` (un backend indisponible) |
 | `CatalogGeneration` | `t` | Génération de l'instantané en service ; 0 tant qu'il n'y en a pas |
-| `Backends` | `aa{sv}` | Par backend : `id` (`apt`, `flatpak`), `available` (`b`), `reason` (`s`), `scopes` (`as`) |
+| `Backends` | `aa{sv}` | Par backend : `id` (`packagekit`, `flatpak`), `available` (`b`), `reason` (`s`), `scopes` (`as`), `formats` (`as`, par exemple `deb` pour le profil Debian) |
 | `Refreshing` | `b` | Un rafraîchissement est en cours |
 | `LastRefresh` | `t` | Horodatage (secondes UNIX) du dernier rafraîchissement réussi |
 | `UpdateCount` | `u` | Nombre de mises à jour disponibles |
@@ -510,7 +516,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `GetDetails` | `s app_id` | `t generation, a{sv} details` | Voir §5.4 |
 | `GetInstalled` | `a{sv} options` | `aa{sv} items` | Options : `backend` |
 | `GetUpdates` | — | `aa{sv} updates` | Voir §5.4 |
-| `GetPermissions` | `s offer_id` | `a{sv} permissions` | Flatpak seulement ; `NotSupported` pour APT |
+| `GetPermissions` | `s offer_id` | `a{sv} permissions` | Flatpak seulement ; `NotSupported` pour PackageKit |
 | `ListSources` | — | `aa{sv} sources` | Voir §5.4 |
 | `ListTransactions` | — | `ao paths` | Transactions encore publiées sur le bus |
 | `GetTransactionHistory` | `u limit` | `aa{sv} entries` | Lu dans le journal (`state.sqlite`) |
@@ -532,8 +538,8 @@ refusées avec `InvalidArgs`, pour éviter qu'un client croie une option prise e
 compte alors qu'elle ne l'est pas).
 
 En v1, `EnableSource` et `DisableSource` ne concernent que la remote Flathub de
-l'installation utilisateur (P-011). Les dépôts APT sont listés en lecture
-seule (`can-toggle = false`).
+l'installation utilisateur (P-011). Les dépôts de la distribution sont listés en
+lecture seule (`can-toggle = false`).
 
 #### Images
 
@@ -567,7 +573,7 @@ Chemin `/org/cutefish/Store/Transactions/<n>`, où `<n>` est un compteur propre
 |---|---|---|
 | `Id` | `s` | UUID stable, conservé dans le journal (le chemin, lui, ne survit pas à un redémarrage) |
 | `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source` |
-| `Backend` | `s` | `apt`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
+| `Backend` | `s` | `packagekit`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
 | `AppIds` | `as` | Applications concernées (peut être vide pour des paquets système) |
 | `OfferIds` | `as` | Offres concernées |
 | `State` | `s` | `queued`, `planning`, `awaiting-confirmation`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted` (§3.5) |
@@ -612,7 +618,8 @@ vide), `icon-url` `s` (si l'icône n'est que distante), `backends` `as`,
 - `categories` `as`, `license` `s`, `content-rating` `a{ss}` ;
 - `launchable` `s` : identifiant du fichier desktop, pour
   `org.cutefish.AppRuntime.launchApplication` [CODE] ;
-- `offers` `aa{sv}` : `id`, `backend`, `origin` (dépôt ou remote), `scope`
+- `offers` `aa{sv}` : `id`, `backend`, `format` (`deb`, `flatpak`), `origin`
+  (dépôt ou remote), `scope`
   (`system`, `user`), `version`, `installed` `b`, `installed-version`,
   `download-size` `t`, `installed-size` `t`, `sandboxed` `b`, `verified` `b`,
   `default` `b`.
@@ -631,7 +638,7 @@ comme Flathub au premier lancement).
 - communs : `requires-confirmation` `b`, `reasons` `as` (`removes-packages`,
   `new-permissions`, `new-source`, `rebase`, `untrusted`),
   `download-size` `t`, `installed-size-change` `x` ;
-- `apt` `a{sv}` : `install`, `remove`, `upgrade`, `downgrade` (chacun `as`
+- `packagekit` `a{sv}` : `install`, `remove`, `upgrade`, `downgrade` (chacun `as`
   de noms de paquets avec version) ;
 - `flatpak` `a{sv}` : `operations` `aa{sv}` (`ref`, `type` = install, update
   ou uninstall, `remote`, `download-size`, `permissions` `a{sv}`,
@@ -703,7 +710,7 @@ dans `details`.
   en mode WAL ; les écritures sont rares et courtes.
 - Au démarrage, toute transaction du journal qui n'est pas dans un état
   terminal est traitée selon son backend :
-  - **APT** : la transaction PackageKit vit dans `packagekitd`, pas dans le
+  - **PackageKit** : la transaction vit dans `packagekitd`, pas dans le
     service. Le journal conserve son chemin (`tid`). Si
     `GetTransactionList()` le contient encore, le service s'y rattache
     (abonnement aux signaux, lecture des propriétés) [À VALIDER : rattachement
@@ -847,8 +854,9 @@ résultats de recherche sans aller-retour supplémentaire.
 
 **Correspondance entre composant AppStream et gestionnaire** :
 
-- APT : champ `Package:` du DEP-11 (`as_component_get_pkgname` [SYMBOLE]),
-  et donc offre `apt:<paquet>`. L'architecture native est résolue par
+- PackageKit (profil Debian) : champ `Package:` du DEP-11
+  (`as_component_get_pkgname` [SYMBOLE]), et donc offre
+  `packagekit:<paquet>`. L'architecture native est résolue par
   PackageKit au moment du plan.
 - Flatpak : `<bundle type="flatpak">app/ID/arch/branche</bundle>`
   (`as_component_get_bundle` [SYMBOLE]) et nom de la remote, donc offre
@@ -900,7 +908,7 @@ résultats de recherche sans aller-retour supplémentaire.
 
 ---
 
-## 7. Backends APT et Flatpak
+## 7. Backends PackageKit et Flatpak
 
 ### 7.1 Interface commune
 
@@ -908,10 +916,10 @@ Une classe abstraite C++ dans `core`, implémentée deux fois. Tous les rappels
 arrivent sur le thread principal de la couche hôte, par la fonction `post`
 qu'elle fournit, quel que soit le thread qui a fait le travail.
 
-| Opération | Rôle | APT | Flatpak |
+| Opération | Rôle | PackageKit | Flatpak |
 |---|---|---|---|
 | `availability()` | Backend utilisable, et sinon pourquoi | Nom `org.freedesktop.PackageKit` activable et `BackendName` connu | Installation utilisateur ouvrable |
-| `catalogSources()` | Fichiers à donner à l'indexeur | Fichiers DEP-11 | Dossier appstream de chaque remote activée |
+| `catalogSources()` | Fichiers à donner à l'indexeur | Fournis par le profil de distribution (fichiers DEP-11 sous Debian) | Dossier appstream de chaque remote activée |
 | `refresh(cancel)` | Rafraîchir les métadonnées | `RefreshCache` | Mise à jour de l'appstream des remotes |
 | `queryInstalled()` | Ce qui est installé | `Resolve(installed)` sur les paquets du catalogue | Refs d'applications installées |
 | `queryUpdates()` | Mises à jour disponibles | `GetUpdates` | `list_installed_refs_for_update` |
@@ -927,7 +935,7 @@ Le `sink` reçoit des événements normalisés (phase, progression, octets,
 
 **Différences volontairement visibles** (pas cachées par l'abstraction) :
 
-| Sujet | APT | Flatpak (utilisateur) |
+| Sujet | PackageKit (profil Debian) | Flatpak (utilisateur) |
 |---|---|---|
 | Authentification | polkit via PackageKit (`package-install` : `auth_admin_keep`, `package-remove` : `auth_admin`, `system-update` : `auth_admin_keep` [MESURÉ]) | Aucune |
 | Contenu du plan | Paquets installés, supprimés, mis à jour | Refs, runtimes, permissions anciennes et nouvelles |
@@ -935,7 +943,29 @@ Le `sink` reçoit des événements normalisés (phase, progression, octets,
 | Isolation | Aucune (`sandboxed = false`) | Bac à sable, permissions affichées |
 | Vérification | Signature des dépôts par APT (`sqv` sur Debian 13 [MESURÉ]) | Signature GPG des commits OSTree |
 
-### 7.2 Backend APT (PackageKit)
+### 7.2 Backend PackageKit et profil de distribution
+
+**Séparation** (P-001) : le code générique ne contient aucun chemin, nom de
+paquet ou convention propre à une distribution ; tout cela vit dans le profil.
+
+| Partie générique PackageKit | Profil de distribution (v1 : Debian) |
+|---|---|
+| Cycle de vie des transactions, hints, drapeaux (`ONLY_TRUSTED`, `SIMULATE`) | Format affiché (`deb`) |
+| Appels `Resolve`, `InstallPackages`, `RemovePackages`, `UpdatePackages`, `GetUpdates`, `RefreshCache`, `GetRepoList` | Emplacement et format du catalogue AppStream de la distribution (DEP-11 YAML dans `/var/lib/swcatalog`, icônes) et correspondance composant → paquet (champ `Package:`) |
+| Traduction de `Status`, `ErrorCode`, `Package` en modèle commun | Interprétation du champ « données » des `package_id` (`installed`, `manual:<origine>`, `auto:<origine>` [MESURÉ : `manual:debian-stable-main`]) |
+| Construction du plan à partir des signaux `Package` | Classement des dépôts (`distribution` ou `third-party`) à partir de `GetRepoList` |
+| Rattachement et réconciliation | Liste des paquets protégés (méta-paquet `cutefish-desktop`, la boutique) |
+
+**Choix du profil** au démarrage, d'après `/etc/os-release` (`ID`,
+`ID_LIKE`) et les propriétés `BackendName` et `DistroId` de PackageKit. Les
+dérivées de Debian (`ID_LIKE=debian`) utilisent le profil Debian
+[HYPOTHÈSE : compatibilité réelle à vérifier distribution par distribution].
+Sans profil reconnu, le backend se déclare indisponible (`reason` :
+distribution non prise en charge) : il ne devine rien.
+
+Un futur profil (Fedora, openSUSE) n'ajoutera qu'un module de profil ; la
+partie générique et le transport ne changent pas.
+
 
 **Connexion** : bus système, objet `/org/freedesktop/PackageKit`, via
 `base::dbus` [CODE]. Au démarrage, lecture de `BackendName`, `Roles`,
@@ -1009,7 +1039,7 @@ les journaux et affichée sous une phase générique.
 | `not-found` | paquet introuvable |
 | `cancelled` | transaction annulée |
 
-**Ce que le backend APT ne fait jamais en v1** :
+**Ce que le backend PackageKit ne fait jamais en v1** :
 
 - `InstallFiles` (fichiers `.deb` locaux) ;
 - transactions sans `ONLY_TRUSTED` ;
@@ -1019,8 +1049,8 @@ les journaux et affichée sous une phase générique.
 - ajout de dépôts.
 
 **Paquets protégés** : la suppression d'un paquet indispensable au bureau
-(méta-paquet `cutefish-desktop`, la boutique elle-même) est refusée par une
-liste de protection dans `core`, en plus des protections d'APT
+(méta-paquet `cutefish-desktop`, la boutique elle-même) est refusée d'après
+la liste du profil de distribution, en plus des protections d'APT
 [À VALIDER : comportement du backend apt de PackageKit face aux paquets
 `Essential` et `Priority: required`].
 
@@ -1185,7 +1215,7 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 
 | Ressource | Limite | Au-delà |
 |---|---|---|
-| Transaction APT modificatrice | 1 active | File `queued` |
+| Transaction PackageKit modificatrice | 1 active | File `queued` |
 | `FlatpakTransaction` | 1 active | File `queued` |
 | Requêtes de lecture SQLite | 2 en parallèle | File du pool |
 | Requêtes Flatpak (hors transactions) | 1 à la fois | File du `GlibWorker` |
@@ -1483,7 +1513,8 @@ cutefish-store/
 │   │   ├── images/                 (planification, cache disque, téléchargement)
 │   │   └── sources/
 │   ├── backends/
-│   │   ├── apt/                    (client PackageKit, backend APT)
+│   │   ├── packagekit/             (logique PackageKit générique, profils de distribution :
+│   │   │                            debian/ en v1 ; transport D-Bus dans service/)
 │   │   └── flatpak/                (GlibWorker, backend Flatpak, permissions)
 │   ├── indexer/                    (main.cpp, lecture AppStream)
 │   ├── service/                    (couche hôte Cutefish : main.cpp, D-Bus, objets Transaction,
@@ -1515,7 +1546,7 @@ Règles de dépendance entre dossiers, vérifiées par CMake (aucun
 | `ui` | `common`, `Cutefish::Toolkit` | `core`, backends, GLib, SQLite, libcurl |
 | `common` | `Cutefish::ToolkitBase` | `core`, adaptateurs, GLib, SQLite |
 | `core` | SQLite, libcurl | `common`, `Cutefish::ToolkitBase`, `Cutefish::Toolkit`, GLib, D-Bus |
-| `backends/apt` (logique) | `core` | GLib, `Cutefish::ToolkitBase` |
+| `backends/packagekit` (logique et profils) | `core` | GLib, D-Bus, `Cutefish::ToolkitBase` |
 | `backends/flatpak` | `core`, libflatpak (GLib) | `Cutefish::ToolkitBase` |
 | `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib) | backends, D-Bus, `Cutefish::ToolkitBase` |
 | `service` (couche hôte) | `core`, adaptateurs, `common`, `Cutefish::ToolkitBase` | `Cutefish::Toolkit`, libappstream |
@@ -1571,8 +1602,8 @@ aucune bibliothèque Cutefish ; seule la couche hôte actuelle a besoin de
 
 | Composant | Pourquoi |
 |---|---|
-| `packagekit` et son backend `apt` | Backend APT (1.3.1 mesuré) |
-| `polkitd` et un agent polkit | Autorisations des opérations APT |
+| `packagekit` et son backend `apt` | Backend PackageKit, profil Debian (1.3.1 mesuré) |
+| `polkitd` et un agent polkit | Autorisations des opérations PackageKit |
 | `appstream` | Hook APT qui télécharge les catalogues DEP-11 (`50appstream` [MESURÉ]) |
 | `flatpak` | Exécution des applications Flatpak installées ; `flatpak-system-helper` pour un éventuel scope système |
 | Bus de session D-Bus, systemd utilisateur | Activation du service, timer |
@@ -1594,7 +1625,7 @@ JSON de SQLite si besoin), Boost, moteur de recherche externe.
 | `BUILD_TESTING` | `OFF` | Tests GoogleTest (convention Cutefish [CODE]) |
 | `CUTEFISH_STORE_BUILD_UI` | `ON` | Interface ; `OFF` pour construire seulement le service et l'indexeur |
 | `CUTEFISH_STORE_BUILD_SERVICE` | `ON` | Couche hôte Cutefish ; `OFF` pour construire seulement le cœur, l'indexeur et les adaptateurs, **sans aucune bibliothèque Cutefish** (portage, tests du cœur) |
-| `CUTEFISH_STORE_APT` | `ON` | Backend APT |
+| `CUTEFISH_STORE_PACKAGEKIT` | `ON` | Backend PackageKit |
 | `CUTEFISH_STORE_FLATPAK` | `ON` | Backend Flatpak (sans libflatpak si `OFF`) |
 | `CUTEFISH_STORE_SANITIZERS` | `OFF` | ASan et UBSan pour les tests |
 
@@ -1602,7 +1633,7 @@ JSON de SQLite si besoin), Boost, moteur de recherche externe.
 
 | Cible | Type | Installée dans |
 |---|---|---|
-| `store-common`, `store-core`, `store-backend-apt`, `store-backend-flatpak`, `store-ui` | `STATIC` | — |
+| `store-common`, `store-core`, `store-backend-packagekit`, `store-backend-flatpak`, `store-ui` | `STATIC` | — |
 | `cutefish-store` | exécutable | `bin/` |
 | `cutefish-store-service` | exécutable | `libexec/` |
 | `cutefish-store-indexer` | exécutable | `libexec/` |
@@ -1630,10 +1661,10 @@ GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
 | Cœur (sans boucle d'événements ni bibliothèque Cutefish) | Normalisation des identifiants, fusion et alias, offre par défaut, construction des requêtes FTS5 (échappement), classement, politique de confirmation, machine d'états, file par backend, journal et reprise, planification des images (LIFO, annulation), traduction des erreurs | Tests unitaires purs ; catalogues produits par l'écriture de `core` | Non |
 | Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
 | Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
-| Backend APT | Résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
+| Backend PackageKit | Séparation générique / profil (aucune donnée Debian dans le code générique), résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
 | Backend Flatpak | Plans, double passe, permissions et leurs différences, annulation, erreurs | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
 | API D-Bus | Méthodes, validation des entrées, erreurs, signaux, regroupement de la progression, `Busy`, reconnexion (arrêt et relance du service), journal `interrupted` | Service lancé sur un bus de session privé avec un **backend de test compilé** (un double de test, pas un plugin) | Non |
-| Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme APT et Flatpak | Backends de test | Non |
+| Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme PackageKit et Flatpak | Backends de test | Non |
 | Interface headless | Mise en page des pages, liaison des modèles, états vides et d'erreur, mode sombre, échelles | `Application::Platform::Headless` [CODE], faux service sur bus privé, outil de capture comme `calculator-capture` [CODE] | Non |
 | Performances | Recherche (p50, p95) sur le catalogue complet, durée et pic mémoire de l'indexeur, aller-retour D-Bus, coût de liaison des lignes de grille, frames pendant le défilement | Benchmarks dédiés, tests de coût à la manière du toolkit [CODE] ; seuils larges et machine fixe pour éviter les faux positifs | Non (headless), oui pour les mesures de frames réelles |
 | Sécurité | Fuzzing du constructeur de requêtes, du convertisseur de descriptions, de la lecture des permissions et de la validation D-Bus ; catalogues malveillants ; refus des URL hors catalogue ; noms de cache ; absence de GLib dans l'interface ; `ONLY_TRUSTED` toujours présent | libFuzzer, tests dédiés | Non |
