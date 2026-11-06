@@ -54,27 +54,32 @@ Flatpak (D-003).
    - L'interface ne connaît ni PackageKit, ni libflatpak, ni AppStream, ni le
      schéma SQLite (D-002, P-004).
    - Toute autre interface future utilise le même contrat.
-3. **GLib reste là où elle est indispensable.**
+3. **Un cœur indépendant de Cutefish** (P-006).
+   - `store-core` ne dépend que de C++20, de SQLite et de libcurl : ni
+     toolkit, ni `ToolkitBase`, ni GLib, ni D-Bus.
+   - Il ne crée ni boucle d'événements ni thread. La couche hôte les fournit,
+     et peut être remplacée sans réécrire le cœur.
+4. **GLib reste là où elle est indispensable.**
    - libflatpak est confinée au service, sur des threads dédiés.
    - libappstream est confinée à l'indexeur, un processus éphémère (D-004,
      P-002).
    - L'interface ne charge jamais GLib.
-4. **Aucun privilège propre.**
+5. **Aucun privilège propre.**
    - Les opérations système passent par PackageKit, qui applique polkit.
    - Flatpak s'installe dans l'espace utilisateur (D-005, P-007).
-5. **Les différences entre backends restent visibles.**
+6. **Les différences entre backends restent visibles.**
    - L'abstraction commune couvre le cycle de vie (rechercher, planifier,
      exécuter, suivre, annuler).
    - Les détails propres à chaque format (paquets supprimés par APT,
      permissions Flatpak) restent dans le plan, sans être aplatis.
-6. **Mesurer avant d'optimiser, mais concevoir pour la vitesse.** Les
+7. **Mesurer avant d'optimiser, mais concevoir pour la vitesse.** Les
    structures (index FTS5, vues virtualisées, caches) sont choisies d'après les
    mesures de la phase 0.1. Les objectifs chiffrés (§10) sont vérifiés en CI.
-7. **Simplicité.**
+8. **Simplicité.**
    - Pas de plugins dynamiques, pas d'abstraction pour des formats
      hypothétiques (P-001).
    - Une seule couche entre le service et chaque gestionnaire.
-8. **Conventions Cutefish.** C++20, CMake, conventions de nommage, GoogleTest,
+9. **Conventions Cutefish.** C++20, CMake, conventions de nommage, GoogleTest,
    gettext, activation D-Bus et polkit comme dans cutefish-core (P-013).
 
 ### Hors périmètre v1
@@ -94,8 +99,8 @@ Flatpak (D-003).
 | Processus | Rôle | Durée de vie | Privilèges | Dépendances notables |
 |---|---|---|---|---|
 | `cutefish-store` | Interface graphique | Tant que la fenêtre est ouverte | Utilisateur | `Cutefish::Toolkit` ; **pas** de GLib |
-| `cutefish-store-service` | Cœur : catalogue, recherche, état, transactions, images, sources | Activé par D-Bus ou par timer ; s'arrête sur inactivité (P-010) | Utilisateur | `Cutefish::ToolkitBase`, SQLite, libcurl, libflatpak (GLib) |
-| `cutefish-store-indexer` | Lit les catalogues AppStream et produit un instantané du catalogue | Lancé par le service, se termine après l'écriture | Utilisateur | libappstream (GLib), SQLite |
+| `cutefish-store-service` | Héberge le cœur : catalogue, recherche, état, transactions, images, sources | Activé par D-Bus ou par timer ; s'arrête sur inactivité (P-010) | Utilisateur | `store-core` (SQLite, libcurl), libflatpak (GLib) ; couche hôte : `Cutefish::ToolkitBase` |
+| `cutefish-store-indexer` | Lit les catalogues AppStream et produit un instantané du catalogue | Lancé par le service, se termine après l'écriture | Utilisateur | `store-core`, libappstream (GLib), SQLite ; **pas** de toolkit |
 
 Composants extérieurs utilisés (aucun n'est modifié) :
 
@@ -130,7 +135,8 @@ services. Le choix retenu (P-001, P-002) :
 - **un seul service résident** : un seul nom de bus, un seul cycle de vie, une
   seule file de transactions ;
 - **des bibliothèques statiques internes** (`common`, `core`, `backend-apt`,
-  `backend-flatpak`, `service`), testables séparément, sans ABI de plugin ;
+  `backend-flatpak`, `service`), testables séparément, sans ABI de plugin,
+  réparties en couches (ci-dessous) ;
 - **un seul processus annexe, l'indexeur**, justifié par deux faits :
   1. [MESURÉ] parser tout Flathub avec libappstream monte à 459 Mo RSS de
      pic ; cette mémoire n'a rien à faire dans un processus résident ;
@@ -139,6 +145,40 @@ services. Le choix retenu (P-001, P-002) :
 
   Les transactions et les backends restent dans le service : ils ont besoin
   d'un état partagé (file, verrous, journal) et d'une durée de vie longue.
+
+### Couches et dépendance à Cutefish
+
+| Couche | Bibliothèques | Dépend de | Ne dépend jamais de |
+|---|---|---|---|
+| **Cœur métier** | `core` | C++20, SQLite, libcurl | Cutefish (toolkit et `ToolkitBase`), GLib, D-Bus, boucle d'événements, threads |
+| **Adaptateur Flatpak** | `backend-flatpak` | `core`, libflatpak (GLib), threads standard | Cutefish |
+| **Logique PackageKit** | `backend-apt` (partie logique) | `core` | Cutefish, D-Bus |
+| **Indexeur** | `indexer` | `core`, libappstream (GLib) | Cutefish, D-Bus |
+| **Couche hôte Cutefish** | `service`, transport D-Bus de PackageKit | `core`, adaptateurs, `Cutefish::ToolkitBase` (D-Bus, boucle, threads, `FileWatch`, `Process`, `Settings`, `SessionLanguage`, journaux) | `Cutefish::Toolkit` |
+| **Interface** | `ui` | `common`, `Cutefish::Toolkit` | `core`, adaptateurs, GLib, SQLite, libcurl |
+
+**Contrat entre le cœur et l'hôte** :
+
+- les objets du cœur ne sont pas partagés entre threads, sauf mention
+  contraire ; l'hôte choisit sur quel thread il les utilise ;
+- les opérations du cœur sont synchrones (requête SQLite, téléchargement d'une
+  image, transition d'état d'une transaction). L'hôte décide si elles
+  s'exécutent sur son thread principal ou sur un pool ;
+- les adaptateurs asynchrones (Flatpak, transport PackageKit) livrent leurs
+  résultats par une fonction `post(std::function<void()>)` donnée par l'hôte,
+  qui les exécute sur son thread principal. C'est le **seul** point
+  d'injection ;
+- la journalisation passe par une fonction de rappel installée par l'hôte
+  (sortie d'erreur par défaut) ; les réglages sont passés au cœur sous forme de
+  valeurs.
+
+**Remplacer la couche hôte** (autre environnement, client en ligne de
+commande, banc de test) demande de fournir : une boucle exécutant `post`,
+l'export de l'API (D-Bus ou autre), un pool pour les lectures SQLite et les
+téléchargements, le lancement de l'indexeur, des timers, la surveillance des
+fichiers de catalogue, un transport D-Bus vers PackageKit, le stockage des
+réglages et la langue de session. Le cœur, l'indexeur et l'adaptateur Flatpak
+sont repris tels quels.
 
 ---
 
@@ -155,9 +195,9 @@ flowchart LR
     end
 
     subgraph SVC["cutefish-store-service (bus de session)"]
-        Api["service : adaptateur D-Bus<br/>org.cutefish.Store1"]
-        Core["core : catalogue, recherche,<br/>état, transactions, politique"]
-        Img["core : cache d'images<br/>(libcurl)"]
+        Api["service : couche hôte Cutefish<br/>D-Bus org.cutefish.Store1, boucle, threads"]
+        Core["core (C++20, SQLite) : catalogue,<br/>recherche, état, transactions, politique"]
+        Img["core : cache d'images<br/>(libcurl, sur les threads de l'hôte)"]
         Apt["backend-apt<br/>(PackageKit via sd-bus)"]
         Fp["backend-flatpak<br/>(libflatpak, threads GLib)"]
         Api --> Core
@@ -319,10 +359,17 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
   énumérations sérialisées (états, phases, types de backend).
 - Conversions entre ces dictionnaires et des structures C++ simples
   (`AppSummary`, `TransactionInfo`, …).
-- Aucune logique métier et aucune dépendance au-delà de `Cutefish::ToolkitBase`
-  (pour `dbus::Variant`).
+- Aucune logique métier. Les constantes du contrat ne dépendent de rien ; les
+  conversions utilisent `dbus::Variant` de `Cutefish::ToolkitBase`, ce qui
+  place `common` du côté Cutefish (interface et couche hôte), jamais dans le
+  cœur.
 
 ### 4.3 `core`
+
+Contraintes (P-006) : C++20, SQLite et libcurl seulement ; aucune boucle
+d'événements, aucun thread créé, aucun D-Bus, aucune bibliothèque Cutefish.
+Les opérations sont synchrones ; l'hôte les exécute sur les threads de son
+choix.
 
 - **Modèle** : `App` (composant AppStream fusionné), `Offer` (une façon de
   l'installer : un paquet APT ou une ref Flatpak), `InstalledItem`,
@@ -337,8 +384,9 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
   avec les backends.
 - **Transactions** : file par backend, machine d'états (§3.5), politique de
   confirmation (P-008), journal, reprise après redémarrage.
-- **Images** : planification des téléchargements (priorité, déduplication,
-  annulation), cache disque borné.
+- **Images** : politique de planification (priorité, déduplication,
+  annulation), cache disque borné, et téléchargement synchrone d'une image
+  (libcurl) que l'hôte exécute sur ses threads.
 - **Sources** : liste unifiée des sources (dépôts APT en lecture, remotes
   Flatpak), activation de Flathub (P-011).
 - **Erreurs** : taxonomie commune (§5.6) et traduction des erreurs des
@@ -347,14 +395,18 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
 
 ### 4.4 `backend-apt`
 
-- Client asynchrone de `org.freedesktop.PackageKit` sur le bus système, via
-  `base::dbus` [CODE].
+- Deux parties :
+  - une **logique** sans dépendance à Cutefish ni à D-Bus : traduction des
+    énumérations, des `package_id` et des signaux en modèle commun,
+    construction du plan ;
+  - un **transport** D-Bus vers `org.freedesktop.PackageKit` sur le bus
+    système, fourni par la couche hôte avec `base::dbus` [CODE] (D-007).
 - Correspondance entre noms de paquets et `package_id`, état installé,
   simulation, installation, suppression, mises à jour, rafraîchissement,
   liste des dépôts.
 - Traduction de `Status`, `Percentage`, `ItemProgress` et `ErrorCode` vers le
   modèle commun.
-- Aucun thread propre : tout passe par la boucle principale du service.
+- Aucun thread propre : le transport vit sur la boucle principale de l'hôte.
 
 ### 4.5 `backend-flatpak`
 
@@ -364,9 +416,16 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
   métadonnées de permissions, transactions, mise à jour de l'appstream de
   Flathub.
 - Fournit à l'indexeur les chemins des catalogues AppStream des remotes.
+- Indépendant de Cutefish : ses threads sont des threads standard, et ses
+  résultats repartent vers l'hôte par la fonction `post`.
 
-### 4.6 `service` (`cutefish-store-service`)
+### 4.6 `service` (`cutefish-store-service`) : la couche hôte Cutefish
 
+- Seule partie du service qui utilise `Cutefish::ToolkitBase` : boucle
+  d'événements, connexions D-Bus, pools de threads, timers, `FileWatch`,
+  `Process`, `Settings`, `SessionLanguage`, journaux.
+- Fournit au cœur et aux adaptateurs la fonction `post` et le transport
+  PackageKit.
 - Exporte l'API `org.cutefish.Store1` (§5) avec `base::dbus::Object` [CODE].
 - Valide toutes les entrées D-Bus avant de les transmettre à `core`.
 - Gère le cycle de vie : activation, arrêt sur inactivité, rafraîchissement
@@ -376,8 +435,11 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
 
 ### 4.7 `cutefish-store-indexer`
 
-- Entrée : la liste des sources (chemins des catalogues, origine, priorité,
-  langue) passée par le service en arguments ou sur l'entrée standard.
+- Entrée : une option `--source` par source (backend, origine, scope, chemin,
+  priorité) et la langue, passées en arguments par le service. Pas de format
+  JSON, donc pas de bibliothèque JSON.
+- Sans toolkit : `store-core` et libappstream seulement ; journaux sur la
+  sortie d'erreur, recueillis par le service.
 - Lecture avec libappstream (DEP-11 YAML, XML Flathub, métadonnées locales des
   applications installées).
 - Normalisation, dédoublonnage, écriture de l'instantané SQLite avec l'index
@@ -685,17 +747,16 @@ exactes, permissions Flatpak.
    fichier source (chemin, taille, `mtime`, puis SHA-256 si les deux premiers
    ont changé). Il la compare à celle enregistrée dans l'instantané en
    service. Rien ne change ⇒ pas d'indexation.
-   - Déclencheurs : fin d'un `Refresh`, signal `RepoListChanged` de
-     PackageKit, `base::FileWatch` (inotify) [CODE] sur les dossiers des catalogues
+   - Déclencheurs (gérés par la couche hôte) : fin d'un `Refresh`, signal
+     `RepoListChanged` de PackageKit, `base::FileWatch` (inotify) [CODE] sur les dossiers des catalogues
      (pour un `apt update` lancé en ligne de commande), changement de langue
      de session.
    - Les déclencheurs sont regroupés sur 30 s.
-2. **Lancement de l'indexeur** (`base::Process` [CODE]) :
+2. **Lancement de l'indexeur** par la couche hôte (`base::Process` [CODE]) :
    - arguments : chemin de sortie temporaire dans le même dossier que
      `catalog.sqlite` (pour que le renommage soit atomique), langues
-     (O-009) ;
-   - entrée standard : description JSON des sources (chemins, origine,
-     backend, priorité, empreintes).
+     (O-009), et une option `--source` par source (backend, origine, scope,
+     chemin, priorité, empreinte).
    - Une seule indexation à la fois. Une nouvelle demande pendant
      l'indexation est mémorisée et relancée une fois à la fin.
 3. **Dans l'indexeur** :
@@ -740,7 +801,7 @@ exactes, permissions Flatpak.
 | `meta` | Version de schéma (aussi dans `PRAGMA user_version`), génération, date, langues, empreintes des sources |
 | `sources` | `id`, `backend`, `origin` (suite Debian ou nom de remote), `scope`, `label`, `priority` |
 | `apps` | Une ligne par application fusionnée : `rowid`, `app_id` (unique), `name`, `summary`, `developer`, `icon_path`, `icon_url`, `verified`, `license`, `flags`. Volontairement étroite : c'est la table lue pour remplir les listes |
-| `app_details` | `app_id`, puis description (blocs), captures, versions, URL, classification du contenu, en JSON compact. Lue seulement par `GetDetails` |
+| `app_details` | `app_id`, puis description (blocs), captures, versions, URL, classification du contenu. Lue seulement par `GetDetails`. Format : tables annexes ou JSON produit et lu par les fonctions JSON intégrées à SQLite, pour ne pas ajouter de bibliothèque JSON au cœur [À VALIDER] |
 | `app_categories` | `(app_id, category)`, indexée par catégorie |
 | `offers` | `offer_id`, `app_id`, `backend`, `source_id`, `ref` (nom de paquet, ou ref Flatpak `app/ID/arch/branche`), `is_default` |
 | `aliases` | Identifiants alternatifs (`<provides><id>`, ancien identifiant en `.desktop`) vers `app_id` |
@@ -831,9 +892,11 @@ résultats de recherche sans aller-retour supplémentaire.
   (`as_component_set_context_locale` [SYMBOLE] ou le réglage de langue
   d'`AsMetadata`) [À VALIDER : sélection effective des traductions en
   YAML DEP-11 et en XML Flathub].
-- Un changement de langue de session (suivi par `base::SessionLanguage` [CODE], qui
-  dépend de cutefish-services ; ailleurs, la langue est lue au démarrage) déclenche une nouvelle indexation. L'ancien instantané reste servi
-  en attendant.
+- Un changement de langue de session déclenche une nouvelle indexation ;
+  l'ancien instantané reste servi en attendant. Le suivi de la langue
+  appartient à la couche hôte : sous Cutefish, `base::SessionLanguage` [CODE],
+  qui dépend de cutefish-services ; une autre couche hôte peut se contenter de
+  lire la langue au démarrage.
 
 ---
 
@@ -842,8 +905,8 @@ résultats de recherche sans aller-retour supplémentaire.
 ### 7.1 Interface commune
 
 Une classe abstraite C++ dans `core`, implémentée deux fois. Tous les rappels
-arrivent sur la boucle principale du service, quel que soit le thread qui a
-fait le travail.
+arrivent sur le thread principal de la couche hôte, par la fonction `post`
+qu'elle fournit, quel que soit le thread qui a fait le travail.
 
 | Opération | Rôle | APT | Flatpak |
 |---|---|---|---|
@@ -1059,6 +1122,10 @@ minimale retenue].
 
 ## 8. Threads et GLib
 
+Le cœur ne crée aucun thread (P-006). Les threads ci-dessous appartiennent à
+la couche hôte (lecteurs SQLite, téléchargements) ou à l'adaptateur Flatpak
+(threads GLib).
+
 ### 8.1 Interface (`cutefish-store`)
 
 | Contexte | Rôle |
@@ -1073,11 +1140,11 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 
 | Contexte | Nombre | Rôle | Possède |
 |---|---|---|---|
-| Thread principal (`base::EventLoop`) | 1 | API D-Bus de session, client PackageKit sur le bus système, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexions sd-bus, état des transactions, connexion d'écriture SQLite |
-| Lecteurs SQLite (`base::ThreadPool`) | 2 | Recherche, navigation, détails | Une connexion en lecture seule par thread (`catalog.sqlite` avec `state.sqlite` attachée), jamais partagée |
+| Thread principal de l'hôte (`base::EventLoop`) | 1 | API D-Bus de session, client PackageKit sur le bus système, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexions sd-bus, état des transactions, connexion d'écriture SQLite |
+| Lecteurs SQLite (`base::ThreadPool` de l'hôte) | 2 | Recherche, navigation, détails, par les fonctions synchrones du cœur | Une connexion en lecture seule par thread (`catalog.sqlite` avec `state.sqlite` attachée), jamais partagée |
 | Thread GLib « requêtes Flatpak » | 1 | Liste des installées, mises à jour, métadonnées des refs, mise à jour de l'appstream, remotes | Son `GMainContext`, son `FlatpakInstallation` |
 | Thread GLib « transactions Flatpak » | 1 | Une `FlatpakTransaction` à la fois (P-009) | Son `GMainContext`, son `FlatpakInstallation`, la transaction en cours |
-| Téléchargements d'images | jusqu'à 4 | libcurl en mode bloquant, comme `calendar/src/download.cpp` [CODE] | Un handle curl par téléchargement |
+| Téléchargements d'images (pool de l'hôte) | jusqu'à 4 | Fonction de téléchargement synchrone du cœur (libcurl en mode bloquant, comme `calendar/src/download.cpp` [CODE]) | Un handle curl par téléchargement |
 | Indexeur | 0 ou 1 processus | §6.2 | — |
 
 **Règles** :
@@ -1092,8 +1159,9 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
      tourner un `GMainLoop` ;
    - reçoit les tâches par `g_main_context_invoke_full` (sûr entre threads
      [DOC GLib]) ;
-   - renvoie les résultats sur la boucle principale par `base::LoopHandle::post`
-     [CODE], qui abandonne le résultat si la boucle n'existe plus ;
+   - renvoie les résultats par la fonction `post` de l'hôte. Sous Cutefish,
+     elle s'appuie sur `base::LoopHandle::post` [CODE], qui abandonne le
+     résultat si la boucle n'existe plus ;
    - à l'arrêt : annule les `GCancellable`, quitte la boucle, attend le thread.
 
    C'est la seule abstraction autour de GLib, et elle est privée au backend.
@@ -1418,7 +1486,8 @@ cutefish-store/
 │   │   ├── apt/                    (client PackageKit, backend APT)
 │   │   └── flatpak/                (GlibWorker, backend Flatpak, permissions)
 │   ├── indexer/                    (main.cpp, lecture AppStream)
-│   ├── service/                    (main.cpp, adaptateur D-Bus, objets Transaction, cycle de vie)
+│   ├── service/                    (couche hôte Cutefish : main.cpp, D-Bus, objets Transaction,
+│   │                                cycle de vie, pools, transport PackageKit)
 │   └── ui/
 │       ├── main.cpp
 │       ├── client/                 (proxy D-Bus asynchrone, modèles, caches)
@@ -1444,12 +1513,12 @@ Règles de dépendance entre dossiers, vérifiées par CMake (aucun
 | Cible | Peut dépendre de | Ne dépend jamais de |
 |---|---|---|
 | `ui` | `common`, `Cutefish::Toolkit` | `core`, backends, GLib, SQLite, libcurl |
-| `common` | `Cutefish::ToolkitBase` | Tout le reste |
-| `core` | `common`, `Cutefish::ToolkitBase`, SQLite, libcurl | GLib, `Cutefish::Toolkit` |
-| `backends/apt` | `core` | GLib |
-| `backends/flatpak` | `core`, libflatpak (GLib) | — |
-| `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib) | backends, D-Bus |
-| `service` | `core`, backends | `Cutefish::Toolkit`, libappstream |
+| `common` | `Cutefish::ToolkitBase` | `core`, adaptateurs, GLib, SQLite |
+| `core` | SQLite, libcurl | `common`, `Cutefish::ToolkitBase`, `Cutefish::Toolkit`, GLib, D-Bus |
+| `backends/apt` (logique) | `core` | GLib, `Cutefish::ToolkitBase` |
+| `backends/flatpak` | `core`, libflatpak (GLib) | `Cutefish::ToolkitBase` |
+| `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib) | backends, D-Bus, `Cutefish::ToolkitBase` |
+| `service` (couche hôte) | `core`, adaptateurs, `common`, `Cutefish::ToolkitBase` | `Cutefish::Toolkit`, libappstream |
 
 L'écriture du catalogue (schéma, insertion, construction FTS5) est dans `core`
 et n'utilise que SQLite : l'indexeur l'appelle, et les tests de `core` peuvent
@@ -1473,9 +1542,9 @@ Les versions « mesurées » sont celles de la machine d'audit (Debian 13).
 |---|---|---|---|---|
 | CMake, Ninja ou Make, pkg-config | Tout | Build | CMake ≥ 3.22, comme le toolkit [CODE] | — |
 | Compilateur C++20 (GCC ou Clang) | Tout | — | C++20 complet | — |
-| `Cutefish::ToolkitBase` | `common`, `core`, backends, indexeur, service | Boucle d'événements, pool de threads, sd-bus, JSON, journaux, réglages, `FileWatch`, `Process` | 1.x (`SameMajorVersion` [CODE]) | 1.0 |
+| `Cutefish::ToolkitBase` | Couche hôte (`service`, transport PackageKit), `common`, interface. **Pas** le cœur, l'indexeur ni l'adaptateur Flatpak (P-006) | Boucle d'événements, pool de threads, sd-bus, journaux, réglages, `FileWatch`, `Process`, langue de session | 1.x (`SameMajorVersion` [CODE]) | 1.0 |
 | `Cutefish::Toolkit` | `ui` | Interface | 1.x | 1.0 |
-| libsystemd (sd-bus) | Indirecte, via `ToolkitBase` | D-Bus | Celle exigée par le toolkit | systemd 257 |
+| libsystemd (sd-bus) | Indirecte, via `ToolkitBase` (couche hôte) | D-Bus | Celle exigée par le toolkit | systemd 257 |
 | SQLite 3 avec FTS5 | `core` | Catalogue, état, recherche | ≥ 3.34 si l'index `trigram` est adopté, sinon FTS5 suffit. FTS5 doit être compilé (vérifié au démarrage par `PRAGMA compile_options`) | 3.46.1, FTS5 et trigram disponibles |
 | libcurl | `core` (images) | HTTPS | ≥ 7.85 pour `CURLOPT_PROTOCOLS_STR`, déjà utilisé par `calendar` [CODE] | 8.14.1 |
 | libflatpak | `backends/flatpak` | Backend Flatpak | Version minimale à fixer après revue de l'API utilisée ; ≥ 1.14 visé [HYPOTHÈSE] | 1.16.6 |
@@ -1494,7 +1563,9 @@ Les versions « mesurées » sont celles de la machine d'audit (Debian 13).
 **Spécifiques à Cutefish** : `cutefish-toolkit` (les deux bibliothèques), et à
 l'exécution `cutefish-core` pour l'agent polkit, `org.cutefish.AppRuntime` et
 `Services.Appearance` [CODE]. Hors Cutefish, l'interface n'est pas visée
-(D-001) ; le service n'a besoin que de `ToolkitBase` (O-008).
+(D-001). Le cœur, l'indexeur et l'adaptateur Flatpak se construisent sans
+aucune bibliothèque Cutefish ; seule la couche hôte actuelle a besoin de
+`ToolkitBase` (P-006, O-008).
 
 **À l'exécution seulement** :
 
@@ -1509,7 +1580,8 @@ l'exécution `cutefish-core` pour l'agent polkit, `org.cutefish.AppRuntime` et
 | Serveur `org.freedesktop.Notifications` | Notifications (facultatif, O-010) |
 
 **Volontairement absents** : Qt, packagekit-glib2, libsoup, bibliothèque JSON
-externe (`base::json` suffit [CODE]), Boost, moteur de recherche externe.
+(le cœur s'en passe : arguments en ligne de commande pour l'indexeur, fonctions
+JSON de SQLite si besoin), Boost, moteur de recherche externe.
 
 ### 12.2 Organisation CMake
 
@@ -1520,7 +1592,8 @@ externe (`base::json` suffit [CODE]), Boost, moteur de recherche externe.
 | Option | Défaut | Effet |
 |---|---|---|
 | `BUILD_TESTING` | `OFF` | Tests GoogleTest (convention Cutefish [CODE]) |
-| `CUTEFISH_STORE_BUILD_UI` | `ON` | Interface ; `OFF` pour construire seulement le service et l'indexeur (portage) |
+| `CUTEFISH_STORE_BUILD_UI` | `ON` | Interface ; `OFF` pour construire seulement le service et l'indexeur |
+| `CUTEFISH_STORE_BUILD_SERVICE` | `ON` | Couche hôte Cutefish ; `OFF` pour construire seulement le cœur, l'indexeur et les adaptateurs, **sans aucune bibliothèque Cutefish** (portage, tests du cœur) |
 | `CUTEFISH_STORE_APT` | `ON` | Backend APT |
 | `CUTEFISH_STORE_FLATPAK` | `ON` | Backend Flatpak (sans libflatpak si `OFF`) |
 | `CUTEFISH_STORE_SANITIZERS` | `OFF` | ASan et UBSan pour les tests |
@@ -1554,7 +1627,7 @@ GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
 
 | Domaine | Ce qui est testé | Comment | Session Cutefish ? |
 |---|---|---|---|
-| Cœur | Normalisation des identifiants, fusion et alias, offre par défaut, construction des requêtes FTS5 (échappement), classement, politique de confirmation, machine d'états, file par backend, journal et reprise, planification des images (LIFO, annulation), traduction des erreurs | Tests unitaires purs ; catalogues produits par l'écriture de `core` | Non |
+| Cœur (sans boucle d'événements ni bibliothèque Cutefish) | Normalisation des identifiants, fusion et alias, offre par défaut, construction des requêtes FTS5 (échappement), classement, politique de confirmation, machine d'états, file par backend, journal et reprise, planification des images (LIFO, annulation), traduction des erreurs | Tests unitaires purs ; catalogues produits par l'écriture de `core` | Non |
 | Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
 | Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
 | Backend APT | Résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
@@ -1605,7 +1678,7 @@ avant chaque version, puis automatisation éventuelle avec
 | Risque | Impact | Atténuation |
 |---|---|---|
 | API de cutefish-toolkit jeune, un seul mainteneur visible [CODE] | Ruptures à absorber | Épingler la révision du toolkit en CI, dépendre de peu d'API, contribuer en amont (grille virtualisée) |
-| `ToolkitBase` livrée et construite avec le toolkit graphique (P-006) | Portage du service plus lourd | O-008 : demande d'option « base seule » en amont |
+| `ToolkitBase` livrée et construite avec le toolkit graphique | Seule la couche hôte est concernée (P-006) : un portage réécrit ou reconstruit cette couche, pas le cœur | O-008 : demande d'option « base seule » en amont |
 | Comportement de `ready` retournant `FALSE`, et threads d'émission des signaux de libflatpak | La double passe (§7.3) pourrait ne pas fonctionner comme prévu | Prototype en phase 0.3, avant tout le reste ; repli : attendre la confirmation dans `ready` en bloquant le thread des transactions Flatpak |
 | Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
 | Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype ; lecture source par source |
@@ -1625,6 +1698,9 @@ avant chaque version, puis automatisation éventuelle avec
 - **Snap, AppImage, RPM** : de nouvelles implémentations de l'interface
   `Backend`. Elles l'étendront si nécessaire ; elles ne sont pas anticipées
   aujourd'hui.
+- **Autre couche hôte** : pour un autre environnement, une nouvelle couche
+  hôte réutilise le cœur, l'indexeur et l'adaptateur Flatpak sans les
+  modifier (§2).
 - **Autres interfaces** : un client en ligne de commande sur l'API D-Bus
   serait la preuve la moins coûteuse de l'ambition hybride (D-001), et un bon
   outil de test.

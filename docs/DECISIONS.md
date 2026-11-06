@@ -37,6 +37,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   Linux. X11 n'est pas exigé en v1.
 - **Conséquences** :
   - aucune dépendance graphique (Wayland, Skia, EGL) hors de l'interface ;
+  - le cœur ne dépend d'aucune bibliothèque Cutefish (P-006) ;
   - le contrat entre interface et cœur est l'API D-Bus, pas un en-tête C++.
 
 ### D-002 — Service utilisateur séparé dès la v1
@@ -91,6 +92,48 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - PackageKit fournit déjà le démon privilégié, polkit, la file de
     transactions et la gestion des verrous ;
   - le parler en D-Bus évite GLib dans ce backend.
+
+### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
+
+- **Statut** : Validée avec modification (propriétaire, après la matrice de
+  validation de la phase 0.2). L'identifiant `P-006` est conservé.
+- **Décision** :
+  - le cœur métier (`store-core`) ne dépend ni de `Cutefish::ToolkitBase`, ni
+    de Cutefish, ni d'aucune bibliothèque graphique. Il repose sur C++20 et
+    SQLite, plus libcurl pour le téléchargement des images ; aucune autre
+    dépendance sans justification ;
+  - le cœur ne crée ni boucle d'événements, ni thread, ni connexion D-Bus. Il
+    expose des opérations synchrones ; les opérations asynchrones des backends
+    lui rendent leurs résultats par une fonction `post` fournie par l'hôte ;
+  - la **couche hôte** (`service`) porte la boucle d'événements, D-Bus, les
+    pools de threads, les timers, la surveillance de fichiers, le lancement de
+    l'indexeur, les réglages et les intégrations propres à Cutefish. C'est
+    elle, et elle seule, qui utilise `Cutefish::ToolkitBase` (avec `common`
+    pour ses conversions D-Bus, et l'interface) ;
+  - l'indexeur ne dépend pas du toolkit : `store-core` et libappstream ;
+  - l'adaptateur Flatpak ne dépend pas du toolkit : `store-core`, libflatpak et
+    ses propres threads GLib ;
+  - l'interface reste native Cutefish avec `Cutefish::Toolkit` (D-006).
+- **Ce que la décision ne crée pas** : pas de couche d'abstraction générique
+  (ni « plateforme », ni bus abstrait). Le seul point d'injection est la
+  fonction `post` ; tout le reste est appelé directement par l'hôte.
+- **Justification** :
+  - `ToolkitBase` ne se construit pas sans Wayland, EGL et Skia, et elle est
+    livrée dans le même paquet Debian que le toolkit graphique [CODE] : en
+    dépendre aurait lié le portage du cœur à une décision de l'amont ;
+  - l'API du toolkit est jeune (1.0, un seul mainteneur visible [CODE]) ; le
+    cœur est la partie qui doit durer le plus ;
+  - changer d'avis plus tard aurait touché chaque fichier du cœur ; le
+    trancher maintenant ne coûte presque rien.
+- **Conséquences** :
+  - une autre couche hôte (autre environnement, client en ligne de commande,
+    tests) se branche sur le cœur sans le modifier (ARCHITECTURE §2) ;
+  - quelques utilitaires simples (cache LRU, journalisation par fonction de
+    rappel) sont écrits dans le cœur au lieu d'être repris de `ToolkitBase` ;
+  - O-008 n'est plus bloquante : elle ne concerne que la couche hôte.
+- **Version initiale, remplacée** : le cœur, les backends, l'indexeur et le
+  service devaient tous utiliser `ToolkitBase` (`EventLoop`, `ThreadPool`,
+  `dbus`, `json`, `logging`, `Settings`).
 
 ---
 
@@ -198,29 +241,6 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Contrepartie** : une API d'annulation est nécessaire pour ne pas
   télécharger les images d'une liste qu'on a quittée
   ([ARCHITECTURE §5.2, Images](ARCHITECTURE.md#images)).
-
-### P-006 — Le cœur et le service s'appuient sur `Cutefish::ToolkitBase`
-
-- **Statut** : Proposée.
-- **Décision** : `core`, les backends, l'indexeur et le service utilisent
-  `Cutefish::ToolkitBase` (`EventLoop`, `ThreadPool`, `Signal`, `dbus`,
-  `json`, `logging`, `Settings`). Seule l'interface lie `Cutefish::Toolkit`.
-- **Justification** [CODE] :
-  - `ToolkitBase` est une bibliothèque distincte du toolkit graphique. Elle
-    ne dépend que d'ICU et de libsystemd (« for services and daemons as well
-    as applications ») ;
-  - les services de cutefish-core (`privacy`, `applicationsfolder`) la lient
-    déjà seule ;
-  - la réutiliser évite de réécrire une boucle d'événements, un pool de
-    threads et un wrapper sd-bus.
-- **Risque pour la portabilité** [CODE] :
-  - le paquet Debian `cutefish-toolkit` livre les deux bibliothèques
-    ensemble ;
-  - le `CMakeLists.txt` du toolkit exige Wayland, EGL et Skia même pour
-    construire `ToolkitBase`.
-  - Porter le service hors de Cutefish demande donc soit de construire le
-    toolkit entier, soit d'obtenir en amont une option « base seule »
-    (voir O-008).
 
 ### P-007 — Aucun composant privilégié propre en v1
 
@@ -335,7 +355,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 | O-005 | **Mises à jour système APT** : la boutique les montre-t-elle toutes (paquets sans AppStream compris) ? Mises à jour hors ligne (`org.freedesktop.PackageKit.Offline`) ? | Périmètre de l'écran « Mises à jour », risque de casser le système | Avant l'implémentation des mises à jour |
 | O-006 | **Flatpaks déjà installés en système** (présents sur la machine d'audit) : affichage seul, ou gestion complète (polkit via `flatpak-system-helper`) dès la v1 ? | Éviter de proposer un doublon utilisateur ; périmètre polkit | Avant l'implémentation du backend Flatpak |
 | O-007 | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
-| O-008 | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Portabilité du service (D-001) | Avant tout travail de portage |
+| O-008 | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
 | O-009 | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation | Pendant le prototype de l'indexeur |
 | O-010 | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
 | O-011 | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
