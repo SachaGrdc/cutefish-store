@@ -12,8 +12,10 @@ décision est remplacée.
 | Statut | Signification |
 |---|---|
 | **Validée** | Décidée par le porteur du projet. Ne se remet en cause que sur un problème technique concret et argumenté. |
+| **Validée avec modification** | Proposition validée par le porteur du projet sous une forme modifiée ; l'ancienne version est résumée dans la décision. |
 | **Proposée** | Recommandée par la phase 0.2, en attente de validation. |
 | **Ouverte** | Question identifiée, sans décision. |
+| **Tranchée** | Question ouverte résolue par une décision validée, dont l'identifiant est indiqué. |
 | **Remplacée** | Conservée pour l'historique ; renvoie à la décision qui la remplace. |
 
 Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
@@ -21,8 +23,12 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **[CODE]** : vérifié dans le code des dépôts CutefishOS ;
 - **[DOC]** : documentation officielle ;
 - **[MESURÉ]** : mesuré sur une Debian 13 (AppStream 1.0.5, PackageKit 1.3.1,
-  libflatpak 1.16.6, SQLite 3.46.1) ;
-- **[HYPOTHÈSE]** : non vérifié, à confirmer.
+  libflatpak 1.16.6, SQLite 3.46.1, polkit 126) ;
+- **[SYMBOLE]** : symbole présent dans la bibliothèque installée ; signature
+  et sémantique à confirmer ;
+- **[HYPOTHÈSE]** : non vérifié, à confirmer ;
+- **[À VALIDER]** : point de conception à confirmer par un prototype ou une
+  mesure.
 
 ---
 
@@ -304,7 +310,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     argument : les points 1 et 2 suffisent à justifier le processus séparé.
 - **Correction sur `AsPool`** : la version précédente affirmait qu'`AsPool`
   masquerait la provenance des composants. C'est **faux** dans le cas
-  vérifié : [MESURÉ] `appstreamcli get app.drey.Dialect` renvoie deux
+  vérifié : [MESURÉ] `appstreamcli get app.drey.Dialect`, qui interroge le
+  pool de métadonnées, renvoie deux
   composants distincts portant le même identifiant, celui de Debian (paquet
   `dialect`) et celui de Flathub (bundle
   `flatpak:app/app.drey.Dialect/x86_64/stable`). L'API expose aussi
@@ -384,6 +391,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Contrepartie** : une API d'annulation est nécessaire pour ne pas
   télécharger les images d'une liste qu'on a quittée
   ([ARCHITECTURE §5.2, Images](ARCHITECTURE.md#images)).
+- **Détails du contrat d'accès** :
+  [ARCHITECTURE §5.8](ARCHITECTURE.md#58-accès-des-clients-aux-fichiers-images-et-icônes).
 
 ### P-007 — Aucun composant privilégié propre en v1
 
@@ -527,7 +536,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   validation) :
   - [CODE, API GitHub, 6 novembre 2026] aucun des 25 dépôts de
     l'organisation `cutefishos` n'a de `.clang-format` à la racine ;
-  - [CODE, clones locaux de 18 dépôts, `cutefish-webkit` exclu car c'est un
+  - [CODE, clones locaux de 19 dépôts, `cutefish-webkit` exclu car c'est un
     portage de WebKit] aucun `.clang-format`, `_clang-format`, `.clang-tidy`
     ni `.editorconfig` dans les trois premiers niveaux d'arborescence ;
   - la CI partagée (`cutefishos/.github`) ne contient aucune vérification de
@@ -539,7 +548,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ---
 
-## Questions ouvertes
+## Questions ouvertes et tranchées
 
 | Id | Statut | Question | Pourquoi elle compte | Quand trancher |
 |---|---|---|---|---|

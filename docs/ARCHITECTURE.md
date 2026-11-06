@@ -1,8 +1,10 @@
 # Cutefish Store — Architecture technique
 
-Statut : **référence de conception, phase 0.2**. Aucune ligne de code n'existe
-encore. Ce document décrit ce qui sera construit. Les décisions qu'il applique,
-et celles qui restent ouvertes, sont tenues à jour dans
+Statut : **référence de conception, phase 0.2**, mise à jour après la
+validation partielle par le propriétaire (P-006 et D-008 à D-011 validées,
+corrections de la matrice de validation intégrées). Aucune ligne de code
+n'existe encore. Ce document décrit ce qui sera construit. Les décisions qu'il
+applique, et celles qui restent ouvertes, sont tenues à jour dans
 [DECISIONS.md](DECISIONS.md) (identifiants `D-`, `P-`, `O-`).
 
 Niveau de preuve, comme dans l'audit de la phase 0.1 :
@@ -10,7 +12,7 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 - **[CODE]** : vérifié dans le code des dépôts CutefishOS ;
 - **[DOC]** : documentation officielle ;
 - **[MESURÉ]** : mesuré sur la machine d'audit (Debian 13, AppStream 1.0.5,
-  PackageKit 1.3.1, libflatpak 1.16.6, SQLite 3.46.1) ;
+  PackageKit 1.3.1, libflatpak 1.16.6, SQLite 3.46.1, polkit 126) ;
 - **[SYMBOLE]** : symbole présent dans la bibliothèque installée ; la
   signature et la sémantique restent à confirmer dans la documentation de
   l'API ;
@@ -113,7 +115,7 @@ Composants extérieurs utilisés (aucun n'est modifié) :
 | Composant | Utilisé pour | Bus ou mécanisme |
 |---|---|---|
 | PackageKit (`packagekitd`, root) + son backend `apt` sous Debian | Paquets de la distribution (APT/DEB sous Debian) : état installé, plan, installation, suppression, mises à jour, rafraîchissement | Bus système, `org.freedesktop.PackageKit` |
-| polkit et agent polkit de Cutefish (`cutefish-core/polkit-agent`) | Authentifications demandées par PackageKit | Bus système |
+| polkit et agent polkit de Cutefish (`cutefish-core/polkit-agent`) | Authentifications demandées par PackageKit et par `flatpak-system-helper` | Bus système |
 | libflatpak (dans le service) | Installations utilisateur et système : remotes, refs, transactions, métadonnées AppStream des remotes | Bibliothèque ; aucun démon pour l'installation utilisateur |
 | `flatpak-system-helper` (root) | Écritures sur l'installation système : mises à jour, suppressions, catalogue des remotes système (D-011) | Bus système, appelé par libflatpak, contrôlé par polkit |
 | `org.cutefish.AppRuntime` (cutefish-core) | Lancer une application installée | Bus de session [CODE] |
@@ -302,7 +304,7 @@ sequenceDiagram
     participant S as Service
     participant P as PackageKit
     participant A as Agent polkit
-    U->>S: Install(appId, offerId, {})
+    U->>S: Install(offerId, {})
     S-->>U: chemin de l'objet Transaction (état: planning)
     S->>P: Resolve(nom du paquet), puis InstallPackages(SIMULATE | ONLY_TRUSTED)
     P-->>S: Package(...) × n, Finished
@@ -359,7 +361,10 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
   écrire (§10) ;
 - thème, mode sombre, couleur d'accent via `AppearanceWatcher` [CODE] ;
 - affichage de la progression des transactions à partir des propriétés D-Bus ;
-- confirmation des plans (suppressions, permissions) ;
+- confirmation des plans (suppressions, permissions, périmètre système) ;
+- choix explicite de l'offre à installer, par exemple le paquet DEB plutôt que
+  l'offre Flatpak proposée par défaut (D-009) ;
+- affichage distinct des périmètres Flatpak `user` et `system` (D-011) ;
 - lancement d'une application installée via `org.cutefish.AppRuntime` [CODE].
 
 **Ne fait pas** :
@@ -598,7 +603,7 @@ Chemin `/org/cutefish/Store/Transactions/<n>`, où `<n>` est un compteur propre
 | `Id` | `s` | UUID stable, conservé dans le journal (le chemin, lui, ne survit pas à un redémarrage) |
 | `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source` |
 | `Backend` | `s` | `packagekit`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
-| `AppIds` | `as` | Applications concernées (vide seulement pour `refresh` et les transactions de source) |
+| `AppIds` | `as` | Applications concernées (vide pour `refresh`, les transactions de source et une mise à jour de runtime seule) |
 | `OfferIds` | `as` | Offres concernées |
 | `State` | `s` | `queued`, `planning`, `awaiting-confirmation`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted` (§3.5) |
 | `Phase` | `s` | Pendant `running` : `waiting-for-auth`, `waiting-for-lock`, `downloading`, `installing`, `removing`, `finishing` ; vide sinon |
@@ -650,7 +655,8 @@ distante), `backends` `as`,
   `default` `b` (offre proposée par défaut selon D-009 ; le client peut en
   installer une autre).
 
-**Mise à jour** (`GetUpdates`) : `offer-id`, `app-id`, `name`,
+**Mise à jour** (`GetUpdates`) : `offer-id`, `app-id` (vide pour un runtime),
+`name`,
 `from-version`, `to-version`, `download-size`, `kind` (`app`, ou `runtime`
 pour un runtime Flatpak utilisé par une application installée). Il n'existe
 pas de type « système » (D-010).
@@ -1401,8 +1407,8 @@ Chaque connexion appartient à un seul thread (ouverture avec
 ### 9.2 Privilèges
 
 - **Aucun binaire privilégié, aucune règle polkit propre en v1** (P-007).
-- Les opérations APT demandent l'autorisation à polkit **par l'intermédiaire
-  de PackageKit**. Le dialogue est affiché par l'agent polkit de Cutefish
+- Les opérations sur les paquets de la distribution demandent l'autorisation
+  à polkit **par l'intermédiaire de PackageKit**. Le dialogue est affiché par l'agent polkit de Cutefish
   (`cutefish-core/polkit-agent` [CODE]). Le service passe `interactive=true`
   seulement pour une action déclenchée par l'utilisateur ; un rafraîchissement
   en arrière-plan passe `interactive=false` et ne peut donc pas faire
