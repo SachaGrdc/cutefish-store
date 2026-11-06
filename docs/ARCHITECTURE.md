@@ -454,8 +454,8 @@ PackageKit, qui ne dépend pas de la distribution.)
   PackageKit.
 - Exporte l'API `org.cutefish.Store1` (§5) avec `base::dbus::Object` [CODE].
 - Valide toutes les entrées D-Bus avant de les transmettre à `core`.
-- Gère le cycle de vie : activation, arrêt sur inactivité, rafraîchissement
-  par timer, suivi des clients.
+- Gère le cycle de vie : activation, suivi des clients connus, arrêt sur
+  inactivité selon la règle de P-010 (§5.7), rafraîchissement par timer.
 - Lance l'indexeur et met en place ses instantanés.
 - Envoie les notifications de bureau.
 
@@ -752,8 +752,18 @@ dans `details`.
     avec lui. Elle passe en `interrupted`, puis l'état installé est
     réconcilié avec libflatpak. Une reprise automatique n'est pas tentée en
     v1 ; l'utilisateur relance l'action.
-- Le service ne s'arrête jamais sur inactivité tant qu'une transaction n'est
-  pas terminale.
+- **Règle d'inactivité** (P-010) :
+  - un client connu est une connexion qui a appelé au moins une méthode du
+    service, lecture des propriétés comprise ; le service suit sa disparition
+    (`NameOwnerChanged`) ;
+  - le service reste actif tant qu'au moins un client connu est connecté ;
+  - il ne s'arrête jamais pendant une transaction non terminale (y compris
+    `queued` et `awaiting-confirmation`), une indexation ou un
+    rafraîchissement ;
+  - il s'arrête après un délai défini suivant la disparition du dernier
+    client, quand plus rien n'est en cours : 5 minutes proposées
+    [À VALIDER]. Un démarrage par le timer, sans client, suit la même règle
+    une fois le travail terminé.
 
 ### 5.8 Accès des clients aux fichiers (images et icônes)
 

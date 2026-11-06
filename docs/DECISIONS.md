@@ -452,18 +452,35 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-010 — Cycle de vie du service : activation D-Bus, timer, arrêt sur inactivité
 
-- **Statut** : Proposée.
+- **Statut** : Proposée, règle d'inactivité précisée après la matrice de
+  validation.
 - **Décision** :
   - le service est activé par D-Bus (bus de session) et décrit par une unité
     systemd utilisateur (`Type=dbus`) ;
   - un timer systemd utilisateur le démarre périodiquement pour rafraîchir
     les catalogues et vérifier les mises à jour ;
-  - il s'arrête après une période d'inactivité (aucune transaction en cours,
-    aucun client depuis N minutes).
+  - **règle d'inactivité** :
+    1. un *client connu* est une connexion D-Bus (nom unique) qui a appelé au
+       moins une méthode du service, lecture des propriétés comprise. Le
+       service suit sa disparition (`NameOwnerChanged`). Un simple abonné aux
+       signaux n'est pas compté : l'interface lit les propriétés dès son
+       démarrage ;
+    2. le service reste actif tant qu'au moins un client connu est connecté ;
+    3. il ne s'arrête jamais pendant une transaction non terminale (y compris
+       `queued` et `awaiting-confirmation`), une indexation ou un
+       rafraîchissement ;
+    4. il s'arrête après un délai défini suivant la disparition du dernier
+       client, quand plus rien n'est en cours : 5 minutes proposées
+       [À VALIDER]. Un démarrage par le timer, sans client, suit la même
+       règle une fois le travail terminé ;
+    5. les téléchargements d'images en file sont abandonnés à l'arrêt ; un
+       fichier en cours d'écriture est supprimé (§5.8).
 - **Justification** :
   - zéro mémoire consommée quand la boutique ne sert pas ;
   - modèle identique aux services de cutefish-core et de l'installeur
-    (activation D-Bus et arrêt sur inactivité [CODE]).
+    (activation D-Bus et arrêt sur inactivité [CODE]) ;
+  - une fenêtre ouverte garde le service actif : elle continue de recevoir
+    les signaux de progression et de catalogue.
 
 ### P-011 — Remote Flathub utilisateur créée depuis un fichier embarqué
 
