@@ -400,7 +400,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-008 — Transactions en deux temps : plan, puis confirmation
 
-- **Statut** : Proposée.
+- **Statut** : Proposée. L'API (état `awaiting-confirmation`, propriété
+  `Plan`, méthodes `Confirm` et `Cancel`) et la politique de confirmation sont
+  soumises à validation ; le **mécanisme interne côté Flatpak n'est pas figé**
+  avant les prototypes de la phase 0.3.
 - **Décision** : toute transaction calcule d'abord un plan :
   - pour PackageKit, `SIMULATE` ;
   - pour Flatpak, le signal `ready` de `FlatpakTransaction`.
@@ -414,8 +417,23 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Justification** :
   - les décisions de sécurité ne dépendent pas de l'interface utilisée ;
   - on évite les suppressions en cascade silencieuses.
+- **Mécanisme Flatpak, deux candidats à prototyper** :
+  - **A. Blocage dans `ready`** (piste prioritaire) : le gestionnaire de
+    `ready` attend la décision de l'utilisateur sur le thread des transactions
+    Flatpak. Ce qui s'exécute est exactement ce qui a été confirmé. Risques :
+    thread et file Flatpak bloqués pendant l'attente ; réveil fiable par
+    `Confirm`, `Cancel`, le `GCancellable` et l'arrêt du service ; délai
+    maximal obligatoire ; verrous éventuellement tenus par libflatpak pendant
+    `ready` ; comportement du helper système pendant une longue attente ;
+  - **B. Double passe** (alternative) : `ready` retourne `FALSE` après avoir
+    copié le plan, puis une seconde transaction est lancée après `Confirm`, et
+    son plan doit être identique. Risques : métadonnées distantes résolues
+    deux fois, plan qui change entre les deux passes, interruption propre à
+    vérifier quand `ready` retourne `FALSE`.
+  - Les deux respectent la même API ; le choix est un détail
+    d'implémentation du backend Flatpak.
 - **Détails** : [ARCHITECTURE §7.3](ARCHITECTURE.md#73-backend-flatpak-libflatpak)
-  (double passe Flatpak) et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
+  et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
 
 ### P-009 — Transactions sérialisées par backend, parallèles entre backends
 

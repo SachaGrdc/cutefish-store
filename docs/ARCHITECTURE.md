@@ -327,7 +327,7 @@ stateDiagram-v2
     planning --> awaiting_confirmation: le plan exige un accord
     planning --> running: plan sans effet notable
     awaiting_confirmation --> running: Confirm()
-    awaiting_confirmation --> cancelled: Cancel()
+    awaiting_confirmation --> cancelled: Cancel() ou délai expiré
     running --> succeeded
     running --> failed
     running --> cancelled: Cancel() accepté
@@ -686,11 +686,17 @@ pour un affichage cohérent.
   transaction existante.
 - `Cancel` est accepté depuis n'importe quel client de la session : tous les
   clients appartiennent au même utilisateur.
-- `Confirm` n'a pas de délai : une transaction en `awaiting-confirmation`
-  n'occupe pas la file de son backend. Elle y rentre au moment de la
-  confirmation, et son plan est **recalculé** si le catalogue ou l'état ont
-  changé entre-temps. Si le nouveau plan exige une confirmation différente,
-  elle revient en `awaiting-confirmation`.
+- Une transaction en `awaiting-confirmation` attend au plus un délai
+  maximal (10 minutes proposées [À VALIDER]), puis passe en `cancelled`. Le
+  même délai s'applique quel que soit le backend, pour que le comportement de
+  l'API ne dépende pas du mécanisme interne.
+- PackageKit : une transaction en attente de confirmation n'occupe pas la
+  file. Elle y entre à la confirmation, et sa simulation est refaite si le
+  catalogue ou l'état ont changé ; si le nouveau plan exige une confirmation
+  différente, elle revient en `awaiting-confirmation`.
+- Flatpak : selon le mécanisme retenu après prototype (§7.3), l'attente occupe
+  le thread et la file des transactions Flatpak (blocage dans `ready`), ou ne
+  les occupe pas (double passe). Le délai maximal borne le premier cas.
 
 ### 5.6 Erreurs
 
@@ -1180,24 +1186,26 @@ particularités de l'installation système sont décrites au §7.4.
 - `run` est **bloquant** : il s'exécute sur le thread des transactions
   Flatpak (§8).
 
-**Plan en deux passes** (P-008) :
+**Plan et confirmation** (P-008) : dans les deux cas, le plan est construit
+dans le signal `ready` [SYMBOLE : chaîne présente dans la bibliothèque], en
+recopiant les opérations dans une structure C++ (type, ref, remote,
+`get_download_size`, `get_metadata`, `get_old_metadata` [SYMBOLE]). Le
+mécanisme qui relie ce plan à la confirmation **n'est pas figé** : deux
+candidats seront prototypés en phase 0.3, sans effet sur l'API.
 
-1. *Passe de planification* : la transaction est lancée. Dans le signal
-   `ready` [SYMBOLE : chaîne présente dans la bibliothèque], le backend
-   recopie les opérations dans une structure C++ (type, ref, remote,
-   `get_download_size`, `get_metadata`, `get_old_metadata` [SYMBOLE]), puis
-   **retourne `FALSE` pour interrompre** la transaction. Aucun thread ne reste
-   bloqué en attendant l'utilisateur.
-2. *Passe d'exécution*, après `Confirm()` ou si aucune confirmation n'est
-   requise : une nouvelle transaction identique est lancée. Dans `ready`, le
-   backend vérifie que les opérations et les permissions sont **identiques**
-   au plan confirmé. Si elles diffèrent (une mise à jour a été publiée
-   entre-temps), il interrompt la transaction et la remet en
-   `awaiting-confirmation` avec le nouveau plan.
+| | A. Blocage dans `ready` (piste prioritaire) | B. Double passe (alternative) |
+|---|---|---|
+| Principe | Si une confirmation est requise, le gestionnaire de `ready` attend la décision (variable de condition), puis retourne `TRUE` ou `FALSE` | `ready` retourne `FALSE` après la copie du plan ; après `Confirm`, une nouvelle transaction est lancée et son plan doit être identique au plan confirmé |
+| Exactitude | Ce qui s'exécute est exactement ce qui a été confirmé | Le plan peut changer entre les deux passes (nouvelle version publiée) : retour en `awaiting-confirmation` |
+| Thread et file | Le thread des transactions Flatpak et la file Flatpak sont bloqués pendant l'attente | Aucun thread bloqué |
+| Réseau | Une seule résolution | Métadonnées distantes résolues deux fois |
+| Annulation | L'attente doit être réveillée par `Cancel`, par le `GCancellable`, par le délai maximal et par l'arrêt du service | Simple : aucune transaction ne tourne pendant l'attente |
+| Points à vérifier [À VALIDER] | Verrous éventuellement tenus par libflatpak pendant `ready` ; comportement de `flatpak-system-helper` pendant une longue attente (installation système) | Interruption propre, sans effet de bord, quand `ready` retourne `FALSE` |
 
-[À VALIDER] le coût de cette double résolution (métadonnées distantes
-interrogées deux fois) et le comportement exact de `ready` quand le gestionnaire
-retourne `FALSE` (interruption propre, sans effet de bord).
+Risques communs à surveiller : délai maximal (§5.5), cohérence du journal si
+le service s'arrête pendant l'attente (la transaction passe en
+`interrupted`), et absence de tout dialogue bloquant sur le thread principal
+de l'hôte.
 
 **Autres signaux de `FlatpakTransaction`** [SYMBOLE : noms présents] :
 
@@ -1324,10 +1332,12 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
    C'est la seule abstraction autour de GLib, et elle est privée au backend.
 3. **Les signaux de `FlatpakTransaction`** sont reçus sur le thread qui
    exécute `run` [HYPOTHÈSE : émission sur le thread appelant, à confirmer].
-   Les gestionnaires copient les données et les postent vers la boucle
-   principale. Ils ne prennent aucune décision qui demande l'utilisateur ; la
-   seule décision synchrone (retourner `FALSE` dans `ready`) compare des
-   données déjà présentes dans le thread.
+   Les gestionnaires copient les données et les postent vers l'hôte par
+   `post`. Le seul gestionnaire qui peut attendre est `ready`, si le
+   mécanisme A est retenu (§7.3) : il attend sur une variable de condition,
+   jamais sur le thread principal de l'hôte, et toujours avec un délai
+   maximal ; `Cancel`, le `GCancellable` et l'arrêt du service le
+   réveillent.
 4. **Le thread principal ne bloque jamais** :
    - aucune lecture du catalogue sur ce thread ;
    - les écritures dans `state.sqlite` sont petites (une ligne de journal ou
@@ -1343,7 +1353,7 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 | Ressource | Limite | Au-delà |
 |---|---|---|
 | Transaction PackageKit modificatrice | 1 active | File `queued` |
-| `FlatpakTransaction` | 1 active | File `queued` |
+| `FlatpakTransaction` | 1 active (y compris pendant une attente de confirmation si le mécanisme A est retenu) | File `queued` |
 | Requêtes de lecture SQLite | 2 en parallèle | File du pool |
 | Requêtes Flatpak (hors transactions) | 1 à la fois | File du `GlibWorker` |
 | Téléchargements d'images | 4 au total | Pile LIFO pour `visible`, file FIFO pour `prefetch` ; annulables tant qu'ils n'ont pas commencé |
@@ -1795,7 +1805,7 @@ GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
 | Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
 | Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
 | Backend PackageKit | Séparation générique / profil (aucune donnée Debian dans le code générique), résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
-| Backend Flatpak | Plans, double passe, permissions et leurs différences, annulation, erreurs, séparation des périmètres `user` et `system` | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
+| Backend Flatpak | Plans, mécanisme de confirmation (A et B pendant le prototype), délai maximal, réveil sur annulation, permissions et leurs différences, annulation, erreurs, séparation des périmètres `user` et `system` | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
 | API D-Bus | Méthodes, validation des entrées, erreurs, signaux, regroupement de la progression, `Busy`, reconnexion (arrêt et relance du service), journal `interrupted` | Service lancé sur un bus de session privé avec un **backend de test compilé** (un double de test, pas un plugin) | Non |
 | Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme PackageKit et Flatpak | Backends de test | Non |
 | Interface headless | Mise en page des pages, liaison des modèles, états vides et d'erreur, mode sombre, échelles | `Application::Platform::Headless` [CODE], faux service sur bus privé, outil de capture comme `calculator-capture` [CODE] | Non |
@@ -1848,7 +1858,7 @@ avant chaque version, puis automatisation éventuelle avec
 |---|---|---|
 | API de cutefish-toolkit jeune, un seul mainteneur visible [CODE] | Ruptures à absorber | Épingler la révision du toolkit en CI, dépendre de peu d'API, contribuer en amont (grille virtualisée) |
 | `ToolkitBase` livrée et construite avec le toolkit graphique | Seule la couche hôte est concernée (P-006) : un portage réécrit ou reconstruit cette couche, pas le cœur | O-008 : demande d'option « base seule » en amont |
-| Comportement de `ready` retournant `FALSE`, et threads d'émission des signaux de libflatpak | La double passe (§7.3) pourrait ne pas fonctionner comme prévu | Prototype en phase 0.3, avant tout le reste ; repli : attendre la confirmation dans `ready` en bloquant le thread des transactions Flatpak |
+| Mécanisme de confirmation Flatpak non validé (§7.3) | Ni le blocage dans `ready` ni la double passe ne sont prouvés ; threads d'émission des signaux inconnus | Prototyper les deux en phase 0.3, avant tout le reste ; l'API ne dépend pas du choix |
 | Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
 | Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype, avec `AsPool` et avec `AsMetadata` ; lecture source par source |
 | Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
@@ -1880,8 +1890,9 @@ avant chaque version, puis automatisation éventuelle avec
 
 ### 14.4 Vérifications à faire avant l'implémentation (phase 0.3)
 
-1. Prototype libflatpak : double passe avec `ready`, threads d'émission des
-   signaux, annulation, installation utilisateur temporaire pour les tests.
+1. Prototype libflatpak : mécanismes A (blocage dans `ready`) et B (double
+   passe), threads d'émission des signaux, réveil et délai maximal,
+   annulation, installation utilisateur temporaire pour les tests.
 2. Prototype PackageKit sur sd-bus : `Resolve` par lots, simulation,
    correspondance des `Status` et `ErrorCode`, signaux après un `apt` en ligne
    de commande, rattachement à une transaction existante.
