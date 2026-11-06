@@ -74,6 +74,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Justification** :
   - aucune élévation de privilèges n'est nécessaire ;
   - c'est cohérent avec un service sans privilèges.
+- **Précision ultérieure** : les Flatpaks déjà installés au niveau système sont
+  gérés dès la v1 (D-011) ; les **nouvelles** installations restent en
+  utilisateur par défaut.
 
 ### D-006 — Interface en C++20 avec cutefish-toolkit
 
@@ -149,6 +152,45 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Conséquence** : les mises à jour système restent du ressort de l'outil de
   la distribution (APT, mises à jour automatiques ou autre).
 - **Détails** : ARCHITECTURE §5.4 et §7.2.
+
+### D-011 — Flatpaks système détectés, affichés et gérés en v1 (tranche O-006)
+
+- **Statut** : Validée (propriétaire, après la matrice de validation de la
+  phase 0.2).
+- **Décision** :
+  - la v1 détecte, affiche et gère les applications Flatpak de l'installation
+    **système** par défaut (`/var/lib/flatpak`), en plus de l'installation
+    utilisateur ;
+  - les deux périmètres restent distincts partout : identifiant d'offre
+    (`flatpak:user:…`, `flatpak:system:…`), affichage, plan, journal ;
+  - « gérer » couvre la mise à jour et la suppression des applications
+    installées en système, et la mise à jour du catalogue de leurs remotes ;
+  - les nouvelles installations se font en utilisateur (D-005) ; proposer une
+    nouvelle installation en système reste une question ouverte (O-013) ;
+  - les remotes système sont en lecture seule en v1 (les modifier demande
+    l'action `configure-remote`, `auth_admin_keep`).
+- **Mécanisme** : libflatpak, dans le service sans privilège, délègue les
+  écritures sur l'installation système à `flatpak-system-helper` (root,
+  activé par D-Bus sur le bus système), qui interroge polkit [MESURÉ :
+  binaire, fichier d'activation et actions polkit présents].
+- **Les autorisations ne sont pas uniformes** [MESURÉ sur Debian 13] :
+  - sans mot de passe pour l'utilisateur actif : `app-update`,
+    `runtime-update`, `appstream-update`, `metadata-update`, `update-remote`,
+    `modify-repo` ;
+  - `auth_admin_keep` par défaut : `app-install`, `runtime-install`,
+    `app-uninstall`, `runtime-uninstall`, `configure-remote`, `configure`,
+    `install-bundle` ;
+  - mais une règle Debian (`org.freedesktop.Flatpak.rules`) accorde sans mot
+    de passe l'installation, la désinstallation et `modify-repo` aux membres
+    actifs et locaux du groupe `sudo`.
+  - Conséquence : le même geste demande un mot de passe à un utilisateur et
+    pas à un autre. La boutique ne présume jamais d'une autorisation et traite
+    les refus et annulations d'authentification.
+- **Politique propre à la boutique** : une installation ou une suppression en
+  système touche tous les utilisateurs. Le plan porte alors la raison
+  `system-scope` et exige une confirmation explicite, même si polkit n'affiche
+  aucun dialogue (P-008).
+- **Détails** : ARCHITECTURE §7.4.
 
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
@@ -313,8 +355,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Décision** : la v1 ne livre aucun helper root. Les opérations
   privilégiées sont entièrement déléguées :
   - à PackageKit (APT) ;
-  - à libflatpak et `flatpak-system-helper` (seulement si l'installation
-    système est activée plus tard).
+  - à libflatpak et `flatpak-system-helper` pour l'installation Flatpak
+    système (D-011).
 - **Justification** : les dépôts éditeurs, qui nécessitent un helper
   privilégié (PackageKit ne sait pas ajouter un dépôt avec sa clé [CODE]),
   sont hors périmètre v1 (D-003). Sans eux, aucun code privilégié n'est
@@ -331,7 +373,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - supprime d'autres paquets ;
   - ajoute des permissions Flatpak ;
   - ajoute une source (remote) ;
-  - change de remote (fin de vie avec rebase).
+  - change de remote (fin de vie avec rebase) ;
+  - installe ou supprime dans l'installation Flatpak système (D-011).
 - **Justification** :
   - les décisions de sécurité ne dépendent pas de l'interface utilisée ;
   - on évite les suppressions en cascade silencieuses.
@@ -418,10 +461,11 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 | O-003 | Ouverte | **Packaging** : dans `cutefishos/packaging` (convention Cutefish [CODE]) ou dans un dossier `packaging/` propre au dépôt ? | Arborescence, CI, publication | Avant la première publication |
 | O-004 | Tranchée → D-009 | **Source préférée par défaut** quand une application existe en DEB et en Flatpak. | Ce que propose le bouton « Installer » | — |
 | O-005 | Tranchée → D-010 | **Mises à jour système APT**. | Périmètre de l'écran « Mises à jour » | — |
-| O-006 | Ouverte | **Flatpaks déjà installés en système** (présents sur la machine d'audit) : affichage seul, ou gestion complète (polkit via `flatpak-system-helper`) dès la v1 ? | Éviter de proposer un doublon utilisateur ; périmètre polkit | Avant l'implémentation du backend Flatpak |
+| O-006 | Tranchée → D-011 | **Flatpaks déjà installés en système**. | Éviter de proposer un doublon utilisateur ; périmètre polkit | — |
 | O-007 | Ouverte | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
 | O-008 | Ouverte | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
 | O-009 | Ouverte | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation | Pendant le prototype de l'indexeur |
 | O-010 | Ouverte | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
 | O-011 | Ouverte | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
 | O-012 | Ouverte | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
+| O-013 | Ouverte | **Nouvelles installations Flatpak en système** : la boutique doit-elle permettre de choisir l'installation système pour une nouvelle application, et pour qui ? | Effet sur tous les utilisateurs ; autorisations différentes selon le groupe `sudo` (D-011) | Après la v1, ou avant si le propriétaire le souhaite |

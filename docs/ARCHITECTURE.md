@@ -65,8 +65,11 @@ Flatpak (D-003).
      P-002).
    - L'interface ne charge jamais GLib.
 5. **Aucun privilège propre.**
-   - Les opérations système passent par PackageKit, qui applique polkit.
-   - Flatpak s'installe dans l'espace utilisateur (D-005, P-007).
+   - Les opérations système passent par PackageKit, ou par
+     `flatpak-system-helper` pour l'installation Flatpak système ; tous deux
+     appliquent polkit.
+   - Les nouvelles applications Flatpak s'installent dans l'espace utilisateur
+     (D-005, P-007) ; celles déjà installées en système sont gérées (D-011).
 6. **Les différences entre backends restent visibles.**
    - L'abstraction commune couvre le cycle de vie (rechercher, planifier,
      exécuter, suivre, annuler).
@@ -88,7 +91,8 @@ Flatpak (D-003).
 - Notes et avis, comptes utilisateurs, paiements.
 - Gestion générale des mises à jour système APT : ni mise à jour complète, ni
   bibliothèques ou noyau, ni mises à jour hors ligne (D-010).
-- Installation Flatpak système (D-005, O-006).
+- Nouvelles installations Flatpak au niveau système (O-013). Les applications
+  déjà installées en système sont, elles, gérées (D-011).
 - Sessions X11.
 
 ---
@@ -109,8 +113,8 @@ Composants extérieurs utilisés (aucun n'est modifié) :
 |---|---|---|
 | PackageKit (`packagekitd`, root) + son backend `apt` sous Debian | Paquets de la distribution (APT/DEB sous Debian) : état installé, plan, installation, suppression, mises à jour, rafraîchissement | Bus système, `org.freedesktop.PackageKit` |
 | polkit et agent polkit de Cutefish (`cutefish-core/polkit-agent`) | Authentifications demandées par PackageKit | Bus système |
-| libflatpak (dans le service) | Installation utilisateur : remotes, refs, transactions, métadonnées AppStream de Flathub | Bibliothèque ; aucun démon pour l'installation utilisateur |
-| `flatpak-system-helper` | Seulement si l'installation système est activée plus tard (O-006) | Bus système, via libflatpak |
+| libflatpak (dans le service) | Installations utilisateur et système : remotes, refs, transactions, métadonnées AppStream des remotes | Bibliothèque ; aucun démon pour l'installation utilisateur |
+| `flatpak-system-helper` (root) | Écritures sur l'installation système : mises à jour, suppressions, catalogue des remotes système (D-011) | Bus système, appelé par libflatpak, contrôlé par polkit |
 | `org.cutefish.AppRuntime` (cutefish-core) | Lancer une application installée | Bus de session [CODE] |
 | `org.freedesktop.Notifications` | Notifier les mises à jour et la fin des transactions en arrière-plan | Bus de session ; serveur Cutefish non vérifié (O-010) |
 | systemd utilisateur | Unité du service et timer de rafraîchissement | — |
@@ -127,6 +131,7 @@ n'est écrit dans `/etc` ou `/var` par la boutique elle-même.
 | État et journal des transactions | `$XDG_STATE_HOME/cutefish-store/state.sqlite` | Mutable, propriété du service |
 | Préférences | `$XDG_CONFIG_HOME/cutefish-store/settings.ini` | INI au format de `base::Settings` [CODE] |
 | Installation Flatpak utilisateur | `~/.local/share/flatpak` | Gérée par libflatpak |
+| Installation Flatpak système | `/var/lib/flatpak` | Gérée par libflatpak et `flatpak-system-helper` ; la boutique n'y écrit jamais directement |
 
 ### Pourquoi un service, plusieurs bibliothèques et un indexeur séparé
 
@@ -217,10 +222,16 @@ flowchart LR
     FH[("Flathub (réseau)")]
     DEB[("Catalogues DEP-11<br/>/var/lib/swcatalog")]
     FPS[("~/.local/share/flatpak")]
+    FSH["flatpak-system-helper (root)"]
+    FPSYS[("/var/lib/flatpak")]
 
     Apt <-- "D-Bus système" --> PK
     PK --> POL
     Fp --> FPS
+    Fp <-- "D-Bus système" --> FSH
+    FSH --> POL
+    FSH --> FPSYS
+    IDX --> FPSYS
     Fp <--> FH
     IDX --> DEB
     IDX --> FPS
@@ -261,8 +272,8 @@ sequenceDiagram
     par sources de la distribution
         S->>P: RefreshCache(force=false), hint background=true
         P-->>S: Finished
-    and Flathub
-        S->>F: mise à jour de l'appstream de la remote utilisateur
+    and Remotes Flatpak
+        S->>F: mise à jour de l'appstream des remotes (utilisateur et système)
         F-->>S: terminé (commit OSTree signé)
     end
     S->>S: empreintes des fichiers sources (taille, mtime, hash)
@@ -418,8 +429,11 @@ PackageKit, qui ne dépend pas de la distribution.)
 ### 4.5 `backend-flatpak`
 
 - Deux threads GLib dédiés (requêtes et transactions), chacun avec son propre
-  `GMainContext` et son propre `FlatpakInstallation` (§8).
-- Remotes de l'installation utilisateur, refs installées, mises à jour,
+  `GMainContext` et ses propres objets `FlatpakInstallation` : un pour
+  l'installation utilisateur, un pour l'installation système (§8).
+- Deux périmètres distincts, `user` et `system` (D-011), portés par chaque
+  offre et chaque transaction.
+- Remotes des deux installations, refs installées, mises à jour,
   métadonnées de permissions, transactions, mise à jour de l'appstream de
   Flathub.
 - Fournit à l'indexeur les chemins des catalogues AppStream des remotes.
@@ -482,7 +496,8 @@ l'implémentation. Les signatures suivent la notation D-Bus.
   - `app-id` : identifiant AppStream du composant fusionné (§6.4).
   - `offer-id` : identifiant d'une offre, construit par le service, par
     exemple `packagekit:firefox-esr` ou
-    `flatpak:user:flathub:app/org.mozilla.firefox/x86_64/stable`.
+    `flatpak:user:flathub:app/org.mozilla.firefox/x86_64/stable` (le
+    périmètre `user` ou `system` fait partie de l'identifiant, D-011).
   - Le client ne doit jamais les construire ni les analyser. Le service ne
     les exécute jamais tels quels : il les **recherche** dans le catalogue ou
     l'état, et refuse tout identifiant inconnu (§9.4).
@@ -540,7 +555,8 @@ refusées avec `InvalidArgs`, pour éviter qu'un client croie une option prise e
 compte alors qu'elle ne l'est pas).
 
 En v1, `EnableSource` et `DisableSource` ne concernent que la remote Flathub de
-l'installation utilisateur (P-011). Les dépôts de la distribution sont listés en
+l'installation utilisateur (P-011). Les remotes de l'installation système sont
+listées en lecture seule (D-011). Les dépôts de la distribution sont listés en
 lecture seule (`can-toggle = false`).
 
 #### Images
@@ -640,7 +656,7 @@ comme Flathub au premier lancement).
 **Plan** (propriété `Plan` d'une transaction) :
 
 - communs : `requires-confirmation` `b`, `reasons` `as` (`removes-packages`,
-  `new-permissions`, `new-source`, `rebase`, `untrusted`),
+  `new-permissions`, `new-source`, `rebase`, `untrusted`, `system-scope`),
   `download-size` `t`, `installed-size-change` `x` ;
 - `packagekit` `a{sv}` : `install`, `remove`, `upgrade`, `downgrade` (chacun `as`
   de noms de paquets avec version) ;
@@ -736,14 +752,13 @@ dans `details`.
 | Source | Fichiers | Mis à jour par | Volume mesuré |
 |---|---|---|---|
 | Debian (DEP-11) | `/var/lib/swcatalog/yaml/*_dep11_Components-<arch>.yml.gz`, icônes dans `/var/lib/swcatalog/icons/<origine>/<taille>/` [MESURÉ] | `apt update`, donc `RefreshCache` de PackageKit. Les cibles DEP-11 sont déclarées dans `/etc/apt/apt.conf.d/50appstream` [MESURÉ] | 2 045 `desktop-application` dans `main` ; 2 515 composants au total ; 1 843 noms de paquets distincts [MESURÉ] |
+| Remotes de l'installation système (Flathub sur la machine d'audit) | Même structure sous `/var/lib/flatpak/appstream/<remote>/<arch>/active/` [MESURÉ] | `appstream-update` via `flatpak-system-helper` ; autorisé sans mot de passe pour l'utilisateur actif [MESURÉ : politique polkit] | Identique à Flathub utilisateur quand la même remote est configurée dans les deux installations |
 | Flathub, installation utilisateur | `appstream.xml.gz` et `icons/64x64`, `icons/128x128` dans le dossier appstream de la remote, obtenu par `flatpak_remote_get_appstream_dir` [SYMBOLE] (`~/.local/share/flatpak/appstream/flathub/<arch>/active/` [MESURÉ]) | `flatpak_installation_update_appstream_full_sync` [SYMBOLE], exécuté par le service | 4 827 composants, 3 345 applications de bureau, XML de 50 Mo (11 Mo compressé), 14 460 captures d'écran, 4 826 `<bundle type="flatpak">` [MESURÉ] |
 
 Ce qui n'est **pas** indexé en v1 :
 
 - les `console-application`, runtimes et extensions, sauf pour décrire les
   dépendances d'un plan ;
-- le catalogue Flathub de l'installation système (voir O-006 : elle ne sert
-  qu'à détecter les applications déjà installées) ;
 - les métadonnées locales (`/usr/share/metainfo`) d'applications installées
   hors de tout catalogue. Elles pourraient compléter la page « Installées »
   [À VALIDER : intérêt réel, coût].
@@ -863,8 +878,11 @@ résultats de recherche sans aller-retour supplémentaire.
   `packagekit:<paquet>`. L'architecture native est résolue par
   PackageKit au moment du plan.
 - Flatpak : `<bundle type="flatpak">app/ID/arch/branche</bundle>`
-  (`as_component_get_bundle` [SYMBOLE]) et nom de la remote, donc offre
-  `flatpak:user:<remote>:<ref>`.
+  (`as_component_get_bundle` [SYMBOLE]), nom de la remote et périmètre, donc
+  offre `flatpak:user:<remote>:<ref>` ou `flatpak:system:<remote>:<ref>`.
+  Quand la même remote est configurée dans les deux installations, une
+  application a deux offres Flatpak ; seule l'offre installée, ou à défaut
+  l'offre utilisateur (D-005), est proposée par défaut.
 
 **Normalisation des identifiants** [MESURÉ] :
 
@@ -930,7 +948,7 @@ qu'elle fournit, quel que soit le thread qui a fait le travail.
 
 | Opération | Rôle | PackageKit | Flatpak |
 |---|---|---|---|
-| `availability()` | Backend utilisable, et sinon pourquoi | Nom `org.freedesktop.PackageKit` activable et `BackendName` connu | Installation utilisateur ouvrable |
+| `availability()` | Backend utilisable, et sinon pourquoi | Nom `org.freedesktop.PackageKit` activable et `BackendName` connu | Par périmètre : installation utilisateur ouvrable ; installation système présente |
 | `catalogSources()` | Fichiers à donner à l'indexeur | Fournis par le profil de distribution (fichiers DEP-11 sous Debian) | Dossier appstream de chaque remote activée |
 | `refresh(cancel)` | Rafraîchir les métadonnées | `RefreshCache` | Mise à jour de l'appstream des remotes |
 | `queryInstalled()` | Ce qui est installé | `Resolve(installed)` sur les paquets du catalogue | Refs d'applications installées |
@@ -947,13 +965,13 @@ Le `sink` reçoit des événements normalisés (phase, progression, octets,
 
 **Différences volontairement visibles** (pas cachées par l'abstraction) :
 
-| Sujet | PackageKit (profil Debian) | Flatpak (utilisateur) |
-|---|---|---|
-| Authentification | polkit via PackageKit (`package-install` : `auth_admin_keep`, `package-remove` : `auth_admin`, `system-update` : `auth_admin_keep` [MESURÉ]) | Aucune |
-| Contenu du plan | Paquets installés, supprimés, mis à jour | Refs, runtimes, permissions anciennes et nouvelles |
-| Annulation | Possible seulement quand PackageKit l'autorise (`AllowCancel`) | Possible à tout moment ; effet à la prochaine étape interruptible |
-| Isolation | Aucune (`sandboxed = false`) | Bac à sable, permissions affichées |
-| Vérification | Signature des dépôts par APT (`sqv` sur Debian 13 [MESURÉ]) | Signature GPG des commits OSTree |
+| Sujet | PackageKit (profil Debian) | Flatpak (utilisateur) | Flatpak (système) |
+|---|---|---|---|
+| Authentification | polkit via PackageKit (`package-install` : `auth_admin_keep`, `package-remove` : `auth_admin`, `system-update` : `auth_admin_keep` [MESURÉ]) | Aucune | polkit via `flatpak-system-helper`, variable selon l'action et le groupe de l'utilisateur (§7.4) |
+| Contenu du plan | Paquets installés, supprimés, mis à jour | Refs, runtimes, permissions anciennes et nouvelles | Idem, plus la raison `system-scope` pour une suppression |
+| Annulation | Possible seulement quand PackageKit l'autorise (`AllowCancel`) | Possible à tout moment ; effet à la prochaine étape interruptible | Idem [À VALIDER : annulation pendant une opération du helper] |
+| Isolation | Aucune (`sandboxed = false`) | Bac à sable, permissions affichées | Idem |
+| Vérification | Signature des dépôts par APT (`sqv` sur Debian 13 [MESURÉ]) | Signature GPG des commits OSTree | Idem, vérifiée par le helper |
 
 ### 7.2 Backend PackageKit et profil de distribution
 
@@ -1068,11 +1086,10 @@ la liste du profil de distribution, en plus des protections d'APT
 
 ### 7.3 Backend Flatpak (libflatpak)
 
-**Installation** : `flatpak_installation_new_user` [SYMBOLE]. Une installation
-système (`flatpak_installation_new_system` [SYMBOLE]) s'ajoutera comme une
-seconde instance du même backend, avec `scope = system` (D-005, O-006). Toutes
-les offres portent leur scope, donc ce changement n'affecte ni l'API ni le
-modèle.
+**Installations** : `flatpak_installation_new_user` et
+`flatpak_installation_new_system` [SYMBOLE]. Les deux sont ouvertes dès la v1
+(D-011) ; chaque offre et chaque transaction portent leur périmètre. Les
+particularités de l'installation système sont décrites au §7.4.
 
 **Remotes** :
 
@@ -1084,7 +1101,9 @@ modèle.
   `flatpak_installation_modify_remote` [SYMBOLE] ;
 - les remotes déjà configurées par l'utilisateur sont affichées et
   utilisées. Elles sont marquées `third-party` sauf Flathub, reconnue par
-  son URL et sa clé.
+  son URL et sa clé ;
+- les remotes de l'installation système sont affichées et utilisées pour les
+  applications système, en lecture seule (D-011).
 
 **Résolution d'une offre** :
 
@@ -1097,7 +1116,8 @@ modèle.
 **État** :
 
 - installées : `flatpak_installation_list_installed_refs_by_kind(APP)`
-  [SYMBOLE], mises en correspondance avec le catalogue par la ref ;
+  [SYMBOLE] sur chacune des deux installations, mises en correspondance avec
+  le catalogue par la ref et le périmètre ;
 - mises à jour : `flatpak_installation_list_installed_refs_for_update`
   [SYMBOLE]. Cet appel interroge le réseau : il s'exécute sur le thread de
   requêtes et son résultat est mis en cache dans `state.sqlite` ;
@@ -1108,7 +1128,14 @@ modèle.
 
 - `flatpak_transaction_new_for_installation`, `add_install`, `add_update`,
   `add_uninstall`, `add_default_dependency_sources`,
-  `set_no_interaction(TRUE)`, puis `flatpak_transaction_run` [SYMBOLE] ;
+  `set_no_interaction`, puis `flatpak_transaction_run` [SYMBOLE]. Une
+  transaction ne porte que sur une installation : une opération qui touche
+  les deux périmètres donne deux transactions ;
+- interaction : `TRUE` pour l'installation utilisateur et pour tout travail en
+  arrière-plan sur l'installation système (qui doit échouer plutôt que faire
+  apparaître un dialogue) ; `FALSE` pour une action de l'utilisateur sur
+  l'installation système, afin que polkit puisse demander une authentification
+  (§7.4) ;
 - `run` est **bloquant** : il s'exécute sur le thread des transactions
   Flatpak (§8).
 
@@ -1160,6 +1187,53 @@ réconciliation silencieuse, `OUT_OF_SPACE` vers `no-space`, `UNTRUSTED` vers
 [À VALIDER : liste exacte des codes de `FlatpakError` dans la version
 minimale retenue].
 
+### 7.4 Installation Flatpak système (D-011)
+
+**Qui fait quoi** : le service, sans privilège, appelle libflatpak ; pour
+l'installation système, libflatpak délègue les écritures à
+`flatpak-system-helper` (root, activé par D-Bus, unité
+`flatpak-system-helper.service`) [MESURÉ : binaire et fichier d'activation
+présents], qui interroge polkit avant chaque opération.
+
+**Autorisations réelles** (Debian 13, polkit 126) [MESURÉ] :
+
+| Action polkit | Opération | `allow_active` par défaut | Règle Debian (groupe `sudo`, session active et locale) |
+|---|---|---|---|
+| `org.freedesktop.Flatpak.app-update`, `runtime-update` | Mettre à jour | `yes` | — |
+| `org.freedesktop.Flatpak.appstream-update`, `metadata-update`, `update-remote` | Catalogue et métadonnées des remotes | `yes` | — |
+| `org.freedesktop.Flatpak.modify-repo` | Maintenance du dépôt | `yes` | `YES` |
+| `org.freedesktop.Flatpak.app-uninstall`, `runtime-uninstall` | Supprimer | `auth_admin_keep` | `YES` (sans mot de passe) |
+| `org.freedesktop.Flatpak.app-install`, `runtime-install` | Installer | `auth_admin_keep` | `YES` (sans mot de passe) |
+| `org.freedesktop.Flatpak.configure-remote`, `configure` | Modifier les remotes ou la configuration | `auth_admin_keep` | — |
+| `org.freedesktop.Flatpak.install-bundle` | Installer un fichier `.flatpak` | `auth_admin_keep` | — (non utilisé) |
+
+**Vérification du contexte du service** [MESURÉ] : avec `pkcheck` (sans
+déclencher aucune action), un processus lancé comme service systemd
+utilisateur (hors du scope de la session logind) obtient les **mêmes**
+réponses qu'un shell de la session active : autorisé pour
+`Flatpak.app-update` et `Flatpak.app-uninstall` (règle `sudo`), défi
+d'authentification pour `packagekit.package-install`. Le service peut donc
+bénéficier des règles « utilisateur actif ».
+[À VALIDER] : que l'agent polkit de Cutefish affiche bien le dialogue
+d'authentification pour une demande issue de ce service.
+
+**Conséquences pour la conception** :
+
+- une même opération peut demander un mot de passe à un utilisateur et pas à
+  un autre (groupe `sudo`, configuration locale de polkit). La boutique ne
+  suppose jamais une autorisation : `auth-denied` et `auth-cancelled` sont
+  des issues normales ;
+- l'absence de dialogue polkit ne vaut pas consentement : toute installation
+  ou suppression en système exige la confirmation de la boutique (raison
+  `system-scope`, P-008) ; les mises à jour suivent la politique commune ;
+- les remotes système ne sont pas modifiées en v1 (lecture seule) ;
+- seule l'installation système par défaut est gérée. Les installations
+  système supplémentaires (`/etc/flatpak/installations.d`,
+  `flatpak_get_system_installations` [SYMBOLE]) sont détectées et signalées
+  comme non gérées en v1 [À VALIDER : fréquence réelle] ;
+- la sémantique exacte de l'option « no-interaction » transmise au helper
+  [MESURÉ : chaîne présente dans le binaire] reste à confirmer par prototype.
+
 ---
 
 ## 8. Threads et GLib
@@ -1184,8 +1258,8 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 |---|---|---|---|
 | Thread principal de l'hôte (`base::EventLoop`) | 1 | API D-Bus de session, client PackageKit sur le bus système, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexions sd-bus, état des transactions, connexion d'écriture SQLite |
 | Lecteurs SQLite (`base::ThreadPool` de l'hôte) | 2 | Recherche, navigation, détails, par les fonctions synchrones du cœur | Une connexion en lecture seule par thread (`catalog.sqlite` avec `state.sqlite` attachée), jamais partagée |
-| Thread GLib « requêtes Flatpak » | 1 | Liste des installées, mises à jour, métadonnées des refs, mise à jour de l'appstream, remotes | Son `GMainContext`, son `FlatpakInstallation` |
-| Thread GLib « transactions Flatpak » | 1 | Une `FlatpakTransaction` à la fois (P-009) | Son `GMainContext`, son `FlatpakInstallation`, la transaction en cours |
+| Thread GLib « requêtes Flatpak » | 1 | Liste des installées, mises à jour, métadonnées des refs, mise à jour de l'appstream, remotes, pour les deux installations | Son `GMainContext`, ses deux `FlatpakInstallation` (utilisateur et système) |
+| Thread GLib « transactions Flatpak » | 1 | Une `FlatpakTransaction` à la fois, quel que soit le périmètre (P-009) | Son `GMainContext`, ses deux `FlatpakInstallation`, la transaction en cours |
 | Téléchargements d'images (pool de l'hôte) | jusqu'à 4 | Fonction de téléchargement synchrone du cœur (libcurl en mode bloquant, comme `calendar/src/download.cpp` [CODE]) | Un handle curl par téléchargement |
 | Indexeur | 0 ou 1 processus | §6.2 | — |
 
@@ -1257,6 +1331,7 @@ Chaque connexion appartient à un seul thread (ouverture avec
 | Interface, autres clients de la session | Même utilisateur que le service | Validation de toutes les entrées (§9.4) ; aucune autorisation propre |
 | Service, indexeur | Utilisateur, sans privilège | Aucun accès en écriture hors des dossiers XDG de l'utilisateur et de l'installation Flatpak utilisateur |
 | `packagekitd` | root | polkit, appliqué par PackageKit lui-même |
+| `flatpak-system-helper` | root | polkit, appliqué par le helper lui-même (§7.4) |
 | Catalogues DEP-11 | Écrits par APT après vérification de signature des dépôts | Traités malgré tout comme des données non fiables (parsing isolé) |
 | Catalogue Flathub | Commit OSTree signé, vérifié par libflatpak | Idem |
 | Captures d'écran, icônes distantes | Non fiables (serveurs tiers, URL issues des métadonnées) | HTTPS, tailles bornées, décodage avec plafond (§9.5) |
@@ -1275,6 +1350,9 @@ Chaque connexion appartient à un seul thread (ouverture avec
   autorisation quelques minutes pour la session. C'est un comportement de
   polkit et de la politique de la distribution, pas de la boutique ; il est
   documenté et non contourné.
+- Flatpak système : autorisations demandées par `flatpak-system-helper`, qui
+  diffèrent selon l'action et l'utilisateur (§7.4). La boutique exige sa
+  propre confirmation pour toute installation ou suppression en système.
 - Flatpak utilisateur : aucune élévation. Conséquence assumée : un autre
   processus de la même session peut demander une installation Flatpak au
   service sans dialogue. Il pourrait faire la même chose avec `flatpak
@@ -1615,9 +1693,9 @@ aucune bibliothèque Cutefish ; seule la couche hôte actuelle a besoin de
 | Composant | Pourquoi |
 |---|---|
 | `packagekit` et son backend `apt` | Backend PackageKit, profil Debian (1.3.1 mesuré) |
-| `polkitd` et un agent polkit | Autorisations des opérations PackageKit |
+| `polkitd` et un agent polkit | Autorisations des opérations PackageKit et Flatpak système |
 | `appstream` | Hook APT qui télécharge les catalogues DEP-11 (`50appstream` [MESURÉ]) |
-| `flatpak` | Exécution des applications Flatpak installées ; `flatpak-system-helper` pour un éventuel scope système |
+| `flatpak` | Exécution des applications Flatpak installées ; `flatpak-system-helper` pour l'installation système (D-011) |
 | Bus de session D-Bus, systemd utilisateur | Activation du service, timer |
 | `ca-certificates` | HTTPS |
 | Serveur `org.freedesktop.Notifications` | Notifications (facultatif, O-010) |
@@ -1674,7 +1752,7 @@ GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
 | Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
 | Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
 | Backend PackageKit | Séparation générique / profil (aucune donnée Debian dans le code générique), résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
-| Backend Flatpak | Plans, double passe, permissions et leurs différences, annulation, erreurs | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
+| Backend Flatpak | Plans, double passe, permissions et leurs différences, annulation, erreurs, séparation des périmètres `user` et `system` | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
 | API D-Bus | Méthodes, validation des entrées, erreurs, signaux, regroupement de la progression, `Busy`, reconnexion (arrêt et relance du service), journal `interrupted` | Service lancé sur un bus de session privé avec un **backend de test compilé** (un double de test, pas un plugin) | Non |
 | Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme PackageKit et Flatpak | Backends de test | Non |
 | Interface headless | Mise en page des pages, liaison des modèles, états vides et d'erreur, mode sombre, échelles | `Application::Platform::Headless` [CODE], faux service sur bus privé, outil de capture comme `calculator-capture` [CODE] | Non |
@@ -1687,7 +1765,11 @@ avant chaque version, puis automatisation éventuelle avec
 
 - rendu réel (flou, menu global, changement de thème en direct via
   `Services.Appearance`) ;
-- dialogue de l'agent polkit de Cutefish ;
+- dialogue de l'agent polkit de Cutefish, pour PackageKit et pour
+  `flatpak-system-helper` ;
+- opérations sur l'installation Flatpak système (le helper est root : machine
+  de test jetable ou conteneur privilégié), avec un utilisateur membre du
+  groupe `sudo` et un utilisateur qui ne l'est pas ;
 - lancement par `AppRuntime` ;
 - notifications ;
 - installation et suppression réelles sur une machine de test jetable.
@@ -1707,7 +1789,8 @@ avant chaque version, puis automatisation éventuelle avec
 
 ### 14.1 Limites assumées de la v1
 
-- APT et Flatpak utilisateur seulement ; pas de fichiers `.deb` locaux, de
+- PackageKit (profil Debian) et Flatpak ; nouvelles installations Flatpak en
+  utilisateur seulement (O-013) ; pas de fichiers `.deb` locaux, de
   `.flatpakref`, de remotes authentifiées ni de dépôts éditeurs.
 - Pas de gestion des mises à jour système : seules les applications sont
   mises à jour (D-010).
@@ -1734,8 +1817,9 @@ avant chaque version, puis automatisation éventuelle avec
 
 ### 14.3 Évolutions prévues par la conception
 
-- **Flatpak système** : seconde instance du backend Flatpak, `scope =
-  system` ; l'API et le modèle ne changent pas.
+- **Nouvelles installations Flatpak en système** (O-013) : l'API et le
+  modèle les permettent déjà ; il reste une décision de produit et de
+  sécurité.
 - **Dépôts éditeurs** : un helper root activé par D-Bus avec contrôle polkit,
   sur le modèle de `cutefish-installer-service` [CODE], et un manifeste signé
   (audit 0.1, §5).
@@ -1763,5 +1847,8 @@ avant chaque version, puis automatisation éventuelle avec
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.
-6. Décision O-001 (licence), qui appartient au propriétaire, avant le premier
+6. Installation Flatpak système : affichage du dialogue polkit depuis le
+   service, sémantique de « no-interaction », annulation pendant une opération
+   du helper.
+7. Décision O-001 (licence), qui appartient au propriétaire, avant le premier
    fichier source.
