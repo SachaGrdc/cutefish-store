@@ -28,8 +28,8 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 6. [Catalogue et index](#6-catalogue-et-index)
 7. [Backends APT et Flatpak](#7-backends-apt-et-flatpak)
 8. [Threads et GLib](#8-threads-et-glib)
-9. Modèle de sécurité (à rédiger)
-10. Performances et caches (à rédiger)
+9. [Modèle de sécurité](#9-modèle-de-sécurité)
+10. [Performances et caches](#10-performances-et-caches)
 11. Arborescence du projet (à rédiger)
 12. Dépendances et compilation (à rédiger)
 13. Stratégie de tests (à rédiger)
@@ -1135,3 +1135,245 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 
 Chaque connexion appartient à un seul thread (ouverture avec
 `SQLITE_OPEN_NOMUTEX`) ; aucune connexion n'est partagée.
+
+---
+
+## 9. Modèle de sécurité
+
+### 9.1 Frontières de confiance
+
+| Élément | Niveau de confiance | Contrôle appliqué |
+|---|---|---|
+| Interface, autres clients de la session | Même utilisateur que le service | Validation de toutes les entrées (§9.4) ; aucune autorisation propre |
+| Service, indexeur | Utilisateur, sans privilège | Aucun accès en écriture hors des dossiers XDG de l'utilisateur et de l'installation Flatpak utilisateur |
+| `packagekitd` | root | polkit, appliqué par PackageKit lui-même |
+| Catalogues DEP-11 | Écrits par APT après vérification de signature des dépôts | Traités malgré tout comme des données non fiables (parsing isolé) |
+| Catalogue Flathub | Commit OSTree signé, vérifié par libflatpak | Idem |
+| Captures d'écran, icônes distantes | Non fiables (serveurs tiers, URL issues des métadonnées) | HTTPS, tailles bornées, décodage avec plafond (§9.5) |
+
+### 9.2 Privilèges
+
+- **Aucun binaire privilégié, aucune règle polkit propre en v1** (P-007).
+- Les opérations APT demandent l'autorisation à polkit **par l'intermédiaire
+  de PackageKit**. Le dialogue est affiché par l'agent polkit de Cutefish
+  (`cutefish-core/polkit-agent` [CODE]). Le service passe `interactive=true`
+  seulement pour une action déclenchée par l'utilisateur ; un rafraîchissement
+  en arrière-plan passe `interactive=false` et ne peut donc pas faire
+  apparaître de dialogue.
+- Le service ne conserve aucune autorisation. Remarque : la politique
+  `auth_admin_keep` de PackageKit [MESURÉ] fait que polkit garde une
+  autorisation quelques minutes pour la session. C'est un comportement de
+  polkit et de la politique de la distribution, pas de la boutique ; il est
+  documenté et non contourné.
+- Flatpak utilisateur : aucune élévation. Conséquence assumée : un autre
+  processus de la même session peut demander une installation Flatpak au
+  service sans dialogue. Il pourrait faire la même chose avec `flatpak
+  --user` directement, donc le service n'élargit pas ce qu'un processus de
+  l'utilisateur peut déjà faire.
+- Durcissement de l'unité systemd utilisateur : `NoNewPrivileges=yes`,
+  `LockPersonality=yes`, `RestrictSUIDSGID=yes`, `SystemCallFilter=@system-service`
+  [À VALIDER : options effectives dans une unité utilisateur, et
+  compatibilité avec libflatpak].
+
+### 9.3 Signatures et sources
+
+- APT :
+  - `ONLY_TRUSTED` est **toujours** présent dans les transactions qui
+    modifient le système ;
+  - la vérification des dépôts reste celle d'APT (`sqv` sur Debian 13
+    [MESURÉ]) ;
+  - pas de fichiers `.deb` locaux, pas d'import de clés en v1 (§7.2).
+- Flatpak :
+  - la remote Flathub est créée depuis un fichier embarqué contenant la clé
+    (P-011) ;
+  - une remote dont la vérification GPG est désactivée
+    (`flatpak_remote_get_gpg_verify` [SYMBOLE]) n'est pas utilisée pour
+    installer en v1 : ses offres sont marquées et refusées avec `untrusted`.
+- Les sources sont classées `distribution`, `flathub` ou `third-party`.
+  L'interface affiche la provenance de chaque offre et le badge vérifié
+  (`flathub::verification::verified`, 2 548 applications [MESURÉ en 0.1]).
+- Ajouter une source exige un consentement explicite, passe par une
+  transaction (raison `new-source` dans le plan) et peut être annulé avec
+  `DisableSource`.
+
+### 9.4 Validation des entrées D-Bus
+
+| Entrée | Règle |
+|---|---|
+| Chaînes | UTF-8 valide (vérifié avant tout usage), longueur bornée (texte de recherche ≤ 256 octets, identifiants ≤ 255) |
+| Tableaux | ≤ 200 éléments |
+| `app_id`, `offer_id`, `source_id` | Recherchés dans le catalogue ou l'état ; inconnu ⇒ `NotFound`. Jamais transformés en commande ou en chemin |
+| URL d'images | Acceptées seulement si elles figurent dans le catalogue en service, et en `https` |
+| Options | Dictionnaire typé ; clé inconnue ou type inattendu ⇒ `InvalidArgs` |
+| Charge | File de lecture bornée (64 requêtes en attente) ; au-delà ⇒ `Busy` |
+
+### 9.5 Données non fiables
+
+- **Parsing AppStream** : uniquement dans l'indexeur, un processus séparé et
+  éphémère, sans connexion D-Bus. Le service ne fait confiance à son résultat
+  qu'après validation (§6.2).
+- **Texte** :
+  - noms et résumés sont affichés comme du texte brut ;
+  - les descriptions sont converties en blocs simples par l'indexeur (§5.4) :
+    l'interface ne reçoit jamais de HTML ;
+  - les URL des métadonnées ne sont ouvertes que si elles sont en `http` ou
+    `https`, et uniquement sur action de l'utilisateur.
+- **Images** :
+  - taille maximale téléchargée (5 Mo pour une capture, 1 Mo pour une icône
+    [À VALIDER]) ;
+  - redirections limitées à `https` ;
+  - le nom du fichier en cache est un hachage SHA-256 de l'URL, jamais dérivé
+    du chemin de l'URL ;
+  - le décodage par le toolkit refuse les images de plus de 256 Mio de pixels
+    [CODE].
+- **Requêtes FTS5** construites par le service, jamais à partir de la syntaxe
+  brute de l'utilisateur (§6.3).
+- **Métadonnées Flatpak** (`GKeyFile`) : lues par libflatpak et GLib ; seules
+  les clés connues sont exposées.
+
+### 9.6 Opérations concurrentes
+
+- **Une seule instance du service** : demande du nom de bus sans file
+  d'attente (`requestName`, sans mise en file [CODE]). Une seconde instance
+  se termine immédiatement.
+- File par backend (P-009), refus `Busy` sur une offre déjà engagée (§5.5).
+- Verrous APT : laissés à PackageKit, qui attend le verrou dpkg et le signale
+  (phase `waiting-for-lock`). La boutique n'ouvre ni ne supprime jamais de
+  fichier de verrou.
+- Base `state.sqlite` : un seul écrivain. Instantané du catalogue : jamais
+  modifié en place.
+
+### 9.7 Erreurs et journaux
+
+- Journaux via `base::logging` [CODE], vers le journal systemd de
+  l'utilisateur.
+- Ni identifiants, ni contenu de fichiers personnels, ni URL avec paramètres
+  d'authentification dans les journaux.
+- Les messages montrés à l'utilisateur sont traduits et compréhensibles ; le
+  texte brut du backend reste disponible dans `details` pour le diagnostic.
+
+---
+
+## 10. Performances et caches
+
+### 10.1 Objectifs initiaux
+
+Repris de l'audit 0.1 et précisés. Machine de référence : la machine d'audit,
+puis une machine modeste à définir [À DÉFINIR] avant d'en faire des seuils
+bloquants en CI.
+
+| Objectif | Valeur initiale | Statut |
+|---|---|---|
+| Lancement à froid jusqu'à la première frame utile | < 400 ms | À mesurer (`FrameStatistics.firstPresentedNs` [CODE]) |
+| Lancement à chaud | < 200 ms | À mesurer |
+| Service : activation jusqu'à `ready` avec un catalogue existant | < 300 ms | Nouvel objectif, à mesurer |
+| Recherche : frappe jusqu'à l'affichage des résultats | p95 < 50 ms | À mesurer ; la requête SQL elle-même vise < 5 ms [HYPOTHÈSE] |
+| Défilement des listes et grilles | 0 frame abandonnée, p99 < 16,7 ms | À mesurer (`FrameStatistics.discarded`) |
+| Page de détails depuis le cache | < 100 ms, images ensuite | À mesurer |
+| Pendant une installation | aucune frame > 50 ms | À mesurer |
+| RSS de l'interface au repos | < 100 Mo | À mesurer |
+| RSS du service au repos | < 60 Mo | **Révisé** (150 Mo dans l'audit) : le catalogue n'est plus chargé en mémoire par le service (P-002). À mesurer |
+| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Nouvel objectif. Référence : 1,7 s et 459 Mo pour `appstreamcli convert` sur Flathub seul [MESURÉ] |
+
+Références mesurées en 0.1 et 0.2, à ne pas reproduire sur le chemin
+interactif : `appstreamcli search` ≈ 330 ms, `pkcon search` ≈ 530 ms,
+`pkcon get-updates` ≈ 890 ms [MESURÉ].
+
+### 10.2 Démarrage rapide
+
+**Interface** :
+
+- la fenêtre et des squelettes de chargement s'affichent sans attendre le
+  service ;
+- l'appel `GetStatus`/`GetAll` part en parallèle (activation D-Bus du service
+  si besoin) ;
+- le toolkit attend déjà les réglages d'apparence avant la première frame
+  (`waitForSettings` [CODE]) : rien d'autre ne doit s'ajouter sur ce chemin.
+
+**Service** :
+
+- ouverture de SQLite (aucun parsing), publication du nom de bus, puis état
+  `ready` ;
+- l'état installé est servi immédiatement depuis `state.sqlite` et réconcilié
+  ensuite avec PackageKit et libflatpak, en arrière-plan ;
+- les backends s'initialisent à la première utilisation.
+
+### 10.3 Recherche instantanée
+
+- Index FTS5 local (§6.3). Aucun gestionnaire n'est interrogé pendant la
+  saisie.
+- Côté interface, la règle est « la dernière requête gagne » : une nouvelle
+  saisie remplace la requête en attente, sans délai artificiel, et une
+  réponse d'une requête périmée est ignorée.
+- 60 résultats par page, pagination au défilement. Les résultats contiennent
+  tout ce qu'il faut pour une ligne : pas de second aller-retour.
+
+### 10.4 Images
+
+- **Icônes : aucune requête réseau** dans le cas courant. Debian et Flathub
+  fournissent des icônes en cache local (`/var/lib/swcatalog/icons`, dossiers
+  `icons/64x64` et `icons/128x128` de l'appstream Flathub [MESURÉ]).
+- Captures d'écran : Flathub fournit des miniatures pré-redimensionnées (par
+  exemple 112, 224, 624, 752, 1 248 et 1 504 px de large [MESURÉ]).
+  L'interface demande la plus petite miniature qui couvre la taille
+  d'affichage multipliée par l'échelle.
+- Téléchargements : priorité aux images visibles (LIFO), annulation des
+  images sorties de l'écran (`CancelImages`), quatre téléchargements
+  simultanés (§8.3), revalidation par `ETag`/`If-Modified-Since` (comme
+  `calendar` [CODE]).
+- Cache disque : LRU borné à 200 Mo par défaut [À VALIDER], nettoyé par le
+  service.
+- Décodage : à la taille d'affichage, sur un thread, avec le cache partagé
+  d'`ImageView` [CODE].
+
+### 10.5 Rendu de l'interface
+
+- Listes : `ListView` du toolkit, virtualisée, à hauteur de ligne fixe [CODE].
+- Grilles : une grille virtualisée à écrire sur le même principe que la
+  `GridView` du gestionnaire de fichiers [CODE] (seules les rangées visibles
+  ont des vues, réutilisées au défilement). Si elle se révèle générique, la
+  proposer au toolkit en amont.
+- Cartes de taille fixe, donc pas de relayout pendant le défilement.
+  Animations sur des vues `setLayered()` (opacité et transformation sans
+  repeindre) [CODE].
+- En build de développement, tout gestionnaire d'événement de plus de 5 ms est
+  journalisé.
+
+### 10.6 Caches
+
+| Cache | Où | Clé | Taille ou durée | Invalidation |
+|---|---|---|---|---|
+| Résumés d'applications | Interface (`base::LruCache` [CODE]) | `(génération, app_id)` | 2 000 entrées | Changement de génération |
+| Détails | Interface | `(génération, app_id)` | 50 entrées | Génération, `InstalledChanged` |
+| Instantané du catalogue | Service (fichier) | — | ≈ quelques dizaines de Mo [À MESURER] | Nouvel instantané |
+| Cache de pages SQLite | Service | — | `cache_size` borné par connexion | — |
+| Requêtes préparées | Service, par connexion | Texte SQL | Toutes | Reconnexion |
+| État installé, mises à jour | `state.sqlite` | Offre | — | Signaux des backends |
+| Mises à jour Flatpak | `state.sqlite` | Offre | 1 h (appel réseau) [À VALIDER] | `Refresh`, fin de transaction |
+| Images | Disque | SHA-256 de l'URL | 200 Mo, LRU | `ETag` |
+
+### 10.7 Travail en arrière-plan
+
+- Rafraîchissement par timer systemd utilisateur avec délai aléatoire
+  (`RandomizedDelaySec`), fréquence et comportement sur connexion limitée à
+  décider (O-012).
+- `cache-age` transmis à PackageKit pour éviter les rafraîchissements
+  rapprochés.
+- L'indexeur tourne à priorité réduite, CPU et E/S.
+- Rien en arrière-plan ne bloque une action de l'utilisateur : une
+  installation passe avant une indexation (la file de l'indexeur ne touche pas
+  les files de transactions).
+
+### 10.8 Mesure
+
+- Interface : `Window::FrameStatistics` (rendues, présentées, abandonnées,
+  horodatages) [CODE], exportées par l'outil de capture headless et par une
+  option de diagnostic.
+- Service : durée de chaque méthode D-Bus et de chaque étape (indexation,
+  réconciliation), journalisée en mode diagnostic ; méthode D-Bus de
+  diagnostic `GetDiagnostics() → a{sv}` réservée aux builds de développement
+  [À VALIDER : utile ou non en production].
+- Jeux de données de référence : copies figées des catalogues Debian et
+  Flathub pour les benchmarks (§13).
+- Tests de coût sur le modèle du toolkit (`frame_cost_test`,
+  `layout_cost_test` [CODE]).
