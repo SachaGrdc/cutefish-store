@@ -519,7 +519,23 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - en-têtes SPDX, gettext, GoogleTest avec `BUILD_TESTING` désactivé par
     défaut.
 - **Justification** [CODE] : ce sont les conventions observées dans
-  calculator, filemanager et settings.
+  calculator, filemanager et settings. Les noms de fichiers suivent les
+  applications Cutefish ; le toolkit, lui, utilise le `snake_case`
+  (`list_view.h`) : c'est un choix assumé, pas une convention unique de
+  l'écosystème.
+- **Vérification du formatage automatique** (demandée après la matrice de
+  validation) :
+  - [CODE, API GitHub, 6 novembre 2026] aucun des 25 dépôts de
+    l'organisation `cutefishos` n'a de `.clang-format` à la racine ;
+  - [CODE, clones locaux de 18 dépôts, `cutefish-webkit` exclu car c'est un
+    portage de WebKit] aucun `.clang-format`, `_clang-format`, `.clang-tidy`
+    ni `.editorconfig` dans les trois premiers niveaux d'arborescence ;
+  - la CI partagée (`cutefishos/.github`) ne contient aucune vérification de
+    formatage ;
+  - **conclusion** : il n'existe pas de convention amont de formatage
+    automatique à reprendre. Ce document n'en invente pas. Ajouter un
+    `.clang-format` propre à Cutefish Store serait une décision du projet
+    (O-014), à présenter comme telle et non comme une règle de Cutefish.
 
 ---
 
@@ -540,3 +556,4 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 | O-011 | Ouverte | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
 | O-012 | Ouverte | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
 | O-013 | Ouverte | **Nouvelles installations Flatpak en système** : la boutique doit-elle permettre de choisir l'installation système pour une nouvelle application, et pour qui ? | Effet sur tous les utilisateurs ; autorisations différentes selon le groupe `sudo` (D-011) | Après la v1, ou avant si le propriétaire le souhaite |
+| O-014 | Ouverte | **Formatage automatique** : faut-il un `.clang-format` propre au projet, et lequel ? Cutefish n'en fournit aucun (P-013). | Homogénéité du code, vérification en CI | Avant le premier fichier source |

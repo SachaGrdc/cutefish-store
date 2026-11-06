@@ -1819,6 +1819,9 @@ JSON de SQLite si besoin), Boost, moteur de recherche externe.
 - Préfixe `/usr`, comme l'exige Cutefish pour ses composants [CODE :
   getting-started].
 - Avertissements `-Wall -Wextra` ; `-Werror` en CI seulement.
+- Formatage : Cutefish ne fournit pas de `.clang-format` [CODE] (P-013). Aucune
+  vérification de format n'est prévue en CI tant que O-014 n'est pas
+  tranchée.
 - Un test vérifie que `cutefish-store` ne dépend pas de `libglib-2.0`
   (lecture des entrées `NEEDED` de l'ELF), pour faire respecter D-004.
 
