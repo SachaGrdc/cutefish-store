@@ -269,8 +269,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-002 — Indexation AppStream dans un sous-processus éphémère
 
-- **Statut** : Proposée. C'est un écart par rapport à une lecture littérale
-  de « service seul écrivain », expliqué ci-dessous.
+- **Statut** : Proposée, justification corrigée après la matrice de
+  validation. C'est un écart par rapport à une lecture littérale de « service
+  seul écrivain », expliqué ci-dessous.
 - **Décision** :
   - le parsing AppStream est confié à `cutefish-store-indexer`, un exécutable
     lancé par le service à la demande ;
@@ -281,22 +282,41 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     renommage atomique.
   - Le service reste le seul écrivain de la base **en service** ; l'indexeur
     ne touche jamais la base en cours d'utilisation.
-- **Justification** :
-  - [MESURÉ] le parsing complet du catalogue Flathub par libappstream
-    (`appstreamcli convert`, 4 827 composants, XML de 50 Mo) atteint un pic de
-    **459 Mo RSS** en 1,7 s. Dans un service résident, la fragmentation du tas
-    glibc garderait une partie de cette mémoire après coup (le gestionnaire de
-    fichiers Cutefish appelle déjà `malloc_trim` pour cette raison [CODE]) ;
-  - ce sont des données réseau non fiables : un plantage du parseur ne tue pas
-    le service ;
-  - libappstream, et la GLib qu'elle tire, n'est chargée que dans l'indexeur ;
-  - l'indexeur peut tourner à basse priorité (`nice`, classe d'E/S idle).
+- **Justification**, par ordre d'importance :
+  1. ce sont des données venues du réseau, donc non fiables : un plantage du
+     parseur ne doit pas arrêter le service ni ses transactions ;
+  2. libappstream, et la GLib qu'elle tire, ne sont chargées que dans
+     l'indexeur ;
+  3. un processus qui se termine rend toute sa mémoire au système, quelle
+     qu'en soit la quantité ; dans un service résident, la fragmentation du
+     tas glibc en garderait une partie (le gestionnaire de fichiers Cutefish
+     appelle `malloc_trim` pour cette raison [CODE]) ;
+  4. l'indexeur peut tourner à basse priorité (`nice`, classe d'E/S idle).
+- **Ce que les mesures disent, et ne disent pas** :
+  - [MESURÉ] `appstreamcli convert` sur le catalogue Flathub (4 827
+    composants, XML de 50 Mo) atteint un pic de 459 Mo RSS en 1,7 s. Cette
+    commande analyse **et** sérialise en YAML : elle ne prouve pas que
+    l'analyse seule consomme autant ;
+  - [MESURÉ] `appstreamcli search`, qui passe par `AsPool` et son cache
+    libxmlb, culmine à 52 Mo ;
+  - la consommation réelle de l'indexeur est donc **inconnue** et sera
+    mesurée sur le prototype. L'argument mémoire n'est plus le premier
+    argument : les points 1 et 2 suffisent à justifier le processus séparé.
+- **Correction sur `AsPool`** : la version précédente affirmait qu'`AsPool`
+  masquerait la provenance des composants. C'est **faux** dans le cas
+  vérifié : [MESURÉ] `appstreamcli get app.drey.Dialect` renvoie deux
+  composants distincts portant le même identifiant, celui de Debian (paquet
+  `dialect`) et celui de Flathub (bundle
+  `flatpak:app/app.drey.Dialect/x86_64/stable`). L'API expose aussi
+  `as_component_get_origin` et `as_component_get_data_id` [SYMBOLE]. Le choix
+  entre `AsPool` (cache libxmlb) et `AsMetadata` (un fichier à la fois) est
+  laissé au prototype, selon la mémoire, la durée, la conservation de la
+  provenance et la sélection des langues.
 - **Détails** : [ARCHITECTURE §6.2](ARCHITECTURE.md#62-chaîne-dindexation).
 - **À mesurer** :
   - durée totale de l'indexation Debian + Flathub (objectif initial < 10 s en
     arrière-plan) ;
-  - pic mémoire réel de l'indexeur, qui peut différer de `appstreamcli
-    convert` [HYPOTHÈSE].
+  - pic mémoire réel de l'indexeur, avec `AsPool` et avec `AsMetadata`.
 
 ### P-003 — Deux bases SQLite : catalogue (instantané) et état
 

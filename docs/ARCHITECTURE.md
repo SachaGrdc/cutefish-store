@@ -143,11 +143,15 @@ services. Le choix retenu (P-001, P-002) :
 - **des bibliothèques statiques internes** (`common`, `core`,
   `backend-packagekit`, `backend-flatpak`, `service`), testables séparément, sans ABI de plugin,
   réparties en couches (ci-dessous) ;
-- **un seul processus annexe, l'indexeur**, justifié par deux faits :
-  1. [MESURÉ] parser tout Flathub avec libappstream monte à 459 Mo RSS de
-     pic ; cette mémoire n'a rien à faire dans un processus résident ;
-  2. le XML vient du réseau : un plantage de parseur ne doit pas emporter les
-     transactions en cours.
+- **un seul processus annexe, l'indexeur**, justifié d'abord par
+  l'isolation :
+  1. les catalogues viennent du réseau : un plantage de parseur ne doit pas
+     emporter les transactions en cours ;
+  2. libappstream et sa GLib restent hors du processus résident ;
+  3. la mémoire de l'analyse est rendue au système à la fin du processus.
+     Son volume réel est inconnu : la seule mesure disponible (459 Mo pour
+     `appstreamcli convert`, qui analyse **et** sérialise) ne mesure pas
+     l'analyse seule (§6.2, §10.1).
 
   Les transactions et les backends restent dans le service : ils ont besoin
   d'un état partagé (file, verrous, journal) et d'une durée de vie longue.
@@ -787,11 +791,20 @@ exactes, permissions Flatpak.
      l'indexation est mémorisée et relancée une fois à la fin.
 3. **Dans l'indexeur** :
    - abaisser sa propre priorité (`setpriority`, classe d'E/S idle) ;
-   - lire les sources **une par une** avec `AsMetadata`
-     (`as_metadata_parse_file` [SYMBOLE]) et libérer chaque source après
-     l'avoir écrite, pour limiter le pic mémoire. On n'utilise pas `AsPool`,
-     qui fusionne les origines et masquerait la provenance de chaque
-     composant ;
+   - lire les sources avec libappstream. Deux options, à départager par le
+     prototype :
+     - `AsMetadata` (`as_metadata_parse_file` [SYMBOLE]), une source à la
+       fois, libérée après écriture ;
+     - `AsPool`, limité aux emplacements explicitement fournis
+       (`as_pool_set_load_std_data_locations`,
+       `as_pool_add_extra_data_location` [SYMBOLE]), qui s'appuie sur le
+       cache libxmlb.
+
+     `AsPool` conserve la provenance : [MESURÉ] il renvoie deux composants
+     distincts pour `app.drey.Dialect`, l'un avec le paquet Debian, l'autre
+     avec le bundle Flathub, et `as_component_get_origin` existe [SYMBOLE].
+     Critères de choix : pic mémoire, durée, provenance, sélection des
+     langues ;
    - normaliser chaque composant (§6.4) et écrire toutes les lignes dans une
      seule transaction SQLite (`journal_mode=OFF`, `synchronous=OFF` : le
      fichier est temporaire) ;
@@ -815,8 +828,11 @@ exactes, permissions Flatpak.
    journalisée, `State` passe à `degraded` seulement s'il n'existe aucun
    catalogue.
 
-[À MESURER] durée et pic mémoire de l'indexeur sur Debian + Flathub
-(objectif initial : < 10 s, < 300 Mo, sur la machine d'audit).
+[À MESURER] durée et pic mémoire de l'indexeur sur Debian + Flathub, avec
+chacune des deux options (objectif initial : < 10 s, < 300 Mo, sur la machine
+d'audit). Repères existants, qui ne mesurent pas l'indexeur : 459 Mo pour
+`appstreamcli convert` (analyse et sérialisation), 52 Mo pour `appstreamcli
+search` (`AsPool` et cache libxmlb) [MESURÉ].
 
 ### 6.3 Schéma (préliminaire)
 
@@ -1461,7 +1477,7 @@ bloquants en CI.
 | Pendant une installation | aucune frame > 50 ms | À mesurer |
 | RSS de l'interface au repos | < 100 Mo | À mesurer |
 | RSS du service au repos | < 60 Mo | **Révisé** (150 Mo dans l'audit) : le catalogue n'est plus chargé en mémoire par le service (P-002). À mesurer |
-| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Nouvel objectif. Référence : 1,7 s et 459 Mo pour `appstreamcli convert` sur Flathub seul [MESURÉ] |
+| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Nouvel objectif, non mesuré. Repères qui ne mesurent pas l'indexeur : 1,7 s et 459 Mo pour `appstreamcli convert` sur Flathub seul (analyse **et** sérialisation YAML), 52 Mo pour `appstreamcli search` (`AsPool`) [MESURÉ] |
 
 Références mesurées en 0.1 et 0.2, à ne pas reproduire sur le chemin
 interactif : `appstreamcli search` ≈ 330 ms, `pkcon search` ≈ 530 ms,
@@ -1807,7 +1823,7 @@ avant chaque version, puis automatisation éventuelle avec
 | `ToolkitBase` livrée et construite avec le toolkit graphique | Seule la couche hôte est concernée (P-006) : un portage réécrit ou reconstruit cette couche, pas le cœur | O-008 : demande d'option « base seule » en amont |
 | Comportement de `ready` retournant `FALSE`, et threads d'émission des signaux de libflatpak | La double passe (§7.3) pourrait ne pas fonctionner comme prévu | Prototype en phase 0.3, avant tout le reste ; repli : attendre la confirmation dans `ready` en bloquant le thread des transactions Flatpak |
 | Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
-| Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype ; lecture source par source |
+| Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype, avec `AsPool` et avec `AsMetadata` ; lecture source par source |
 | Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
 | Mise à jour d'une application APT qui entraîne celle de dépendances partagées | Effet sur d'autres programmes | Simulation, dépendances visibles dans le plan, `ONLY_TRUSTED` ; la boutique ne lance jamais de mise à jour complète (D-010) |
 | Utilisateurs qui attendent les mises à jour système dans la boutique | Système non mis à jour | Message clair dans l'écran « Mises à jour » : le système se met à jour par l'outil de la distribution (D-010) |
@@ -1842,8 +1858,9 @@ avant chaque version, puis automatisation éventuelle avec
 2. Prototype PackageKit sur sd-bus : `Resolve` par lots, simulation,
    correspondance des `Status` et `ErrorCode`, signaux après un `apt` en ligne
    de commande, rattachement à une transaction existante.
-3. Prototype d'indexeur : durée, pic mémoire, taille de l'instantané,
-   sélection des langues, conversion des descriptions.
+3. Prototype d'indexeur : comparaison `AsPool` / `AsMetadata` (durée, pic
+   mémoire, provenance), taille de l'instantané, sélection des langues,
+   conversion des descriptions.
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.
