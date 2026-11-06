@@ -1,8 +1,8 @@
 # Cutefish Store — Registre des décisions
 
 Ce document conserve les décisions d'architecture de Cutefish Store, leur
-justification et les questions encore ouvertes. Il accompagne le document
-d'architecture (`docs/ARCHITECTURE.md`), qui décrit la conception elle-même.
+justification et les questions encore ouvertes. Il accompagne
+[ARCHITECTURE.md](ARCHITECTURE.md), qui décrit la conception elle-même.
 
 ## Conventions
 
@@ -141,6 +141,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     le service ;
   - libappstream, et la GLib qu'elle tire, n'est chargée que dans l'indexeur ;
   - l'indexeur peut tourner à basse priorité (`nice`, classe d'E/S idle).
+- **Détails** : [ARCHITECTURE §6.2](ARCHITECTURE.md#62-chaîne-dindexation).
 - **À mesurer** :
   - durée totale de l'indexation Debian + Flathub (objectif initial < 10 s en
     arrière-plan) ;
@@ -176,6 +177,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - un aller-retour D-Bus local coûte typiquement moins d'une milliseconde
     [HYPOTHÈSE, à mesurer], ce qui est négligeable devant l'objectif p95
     < 50 ms.
+- **Détails** : [ARCHITECTURE §5](ARCHITECTURE.md#5-spécification-préliminaire-de-lapi-d-bus).
 - **Condition de révision** : si la mesure montre que D-Bus empêche de tenir
   l'objectif de recherche, rouvrir la question (lecture directe en lecture
   seule).
@@ -194,7 +196,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     ligne) ;
   - l'interface n'a pas besoin de libcurl.
 - **Contrepartie** : une API d'annulation est nécessaire pour ne pas
-  télécharger les images d'une liste qu'on a quittée.
+  télécharger les images d'une liste qu'on a quittée
+  ([ARCHITECTURE §5.2, Images](ARCHITECTURE.md#images)).
 
 ### P-006 — Le cœur et le service s'appuient sur `Cutefish::ToolkitBase`
 
@@ -247,6 +250,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Justification** :
   - les décisions de sécurité ne dépendent pas de l'interface utilisée ;
   - on évite les suppressions en cascade silencieuses.
+- **Détails** : [ARCHITECTURE §7.3](ARCHITECTURE.md#73-backend-flatpak-libflatpak)
+  (double passe Flatpak) et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
 
 ### P-009 — Transactions sérialisées par backend, parallèles entre backends
 
