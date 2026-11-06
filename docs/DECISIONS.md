@@ -336,11 +336,17 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-004 — Toute la communication interface ↔ service passe par D-Bus, recherche comprise
 
-- **Statut** : Proposée. Écart par rapport à l'audit 0.1, qui suggérait une
-  lecture SQLite directe par l'interface pour la recherche.
-- **Décision** : l'interface n'ouvre aucun fichier du service. La recherche
-  est un appel D-Bus asynchrone ; le service interroge l'index FTS5 sur un
-  thread de lecture.
+- **Statut** : Proposée, corrigée après la matrice de validation. Écart par
+  rapport à l'audit 0.1, qui suggérait une lecture SQLite directe par
+  l'interface pour la recherche.
+- **Décision** : l'interface n'ouvre aucune base de données du service, aucun
+  fichier d'état et aucune connexion réseau. La recherche est un appel D-Bus
+  asynchrone ; le service interroge l'index FTS5 sur un thread de lecture.
+  Les seuls fichiers que l'interface lit sont des images désignées par le
+  service, selon le contrat d'accès aux fichiers (P-005).
+- **Correction** : la version précédente disait que l'interface n'ouvre
+  « aucun fichier du service », ce qui contredisait P-005 (chemins d'images
+  dans le cache du service).
 - **Justification** :
   - le schéma SQLite reste privé et peut évoluer ;
   - toutes les interfaces futures (D-001) utilisent le même contrat ;
@@ -354,12 +360,22 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-005 — Le service télécharge et met en cache les images
 
-- **Statut** : Proposée.
+- **Statut** : Proposée, précisée après la matrice de validation.
 - **Décision** :
   - le service gère le téléchargement (libcurl, HTTPS uniquement), le cache
     disque et la déduplication des captures d'écran et des icônes distantes ;
   - l'interface reçoit des chemins de fichiers locaux et les affiche avec
-    `ImageView`, qui décode sur un thread [CODE].
+    `ImageView`, qui décode sur un thread [CODE] ;
+  - **contrat d'accès aux fichiers** : les chemins transmis désignent soit
+    des icônes des catalogues (`/var/lib/swcatalog/icons`, dossiers appstream
+    des installations Flatpak), soit des fichiers du cache d'images du
+    service. Ce sont des fichiers partagés **en lecture seule** : le client ne
+    les modifie jamais ; le service écrit chaque fichier de cache de façon
+    atomique et ne le modifie plus ensuite ; un fichier peut disparaître après
+    éviction, et le client le redemande alors ;
+  - ces chemins ne sont **pas** lisibles par un client placé dans un bac à
+    sable. Ce n'est pas un objectif de la v1 ; l'évolution prévue est le
+    passage de descripteurs de fichiers (type D-Bus `h`).
 - **Justification** :
   - un seul cache pour toutes les interfaces ;
   - une seule politique réseau (taille maximale, délais, HTTPS, mode hors

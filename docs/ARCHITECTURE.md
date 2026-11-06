@@ -364,7 +364,8 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
 **Ne fait pas** :
 
 - accès réseau ;
-- lecture de fichiers du service ;
+- lecture des bases de données et des fichiers d'état du service. Les seuls
+  fichiers qu'elle lit sont les images désignées par le service (§5.8) ;
 - appels à PackageKit ou Flatpak ;
 - décisions de sécurité. L'interface affiche les plans, mais la règle « cette
   transaction exige une confirmation » vient du service (P-008).
@@ -624,8 +625,9 @@ Règles de publication :
 ### 5.4 Structures
 
 **Résumé d'application** (`Search`, `Browse`, `GetSummaries`) :
-`id` `s`, `name` `s`, `summary` `s`, `icon` `s` (chemin local, peut être
-vide), `icon-url` `s` (si l'icône n'est que distante), `backends` `as`,
+`id` `s`, `name` `s`, `summary` `s`, `icon` `s` (chemin local partagé en
+lecture seule, §5.8 ; peut être vide), `icon-url` `s` (si l'icône n'est que
+distante), `backends` `as`,
 `installed` `b`, `has-update` `b`, `verified` `b`, `developer` `s`.
 
 **Détails** (`GetDetails`) : les clés du résumé, plus :
@@ -746,6 +748,29 @@ dans `details`.
     v1 ; l'utilisateur relance l'action.
 - Le service ne s'arrête jamais sur inactivité tant qu'une transaction n'est
   pas terminale.
+
+### 5.8 Accès des clients aux fichiers (images et icônes)
+
+Ce que l'interface **ne fait jamais** (P-004) : ouvrir une base SQLite du
+service, lire ses fichiers d'état ou de réglages, accéder au réseau.
+
+Ce qu'elle **lit** : uniquement des fichiers image désignés par le service,
+dans le champ `icon` des résumés et dans le signal `ImagesReady` (P-005).
+
+| Catégorie | Emplacements | Écrits par | Règles du contrat |
+|---|---|---|---|
+| Icônes des catalogues | `/var/lib/swcatalog/icons/…` (profil Debian), dossiers `icons/` de l'appstream des installations Flatpak (`~/.local/share/flatpak/appstream/…`, `/var/lib/flatpak/appstream/…`) [MESURÉ] | APT, libflatpak, `flatpak-system-helper` | Lecture seule. Le chemin est valable pour la génération de catalogue qui l'a fourni ; après `CatalogChanged`, le client relit les résumés |
+| Cache d'images du service | `$XDG_CACHE_HOME/cutefish-store/images/` | Le service seul | Lecture seule pour les clients. Chaque fichier est écrit sous un nom temporaire puis renommé : un fichier annoncé est complet et ne change plus. Il peut être supprimé par l'éviction LRU ; un client qui ne le trouve plus rappelle `FetchImages` |
+
+**Clients dans un bac à sable** : aucun de ces chemins n'est lisible par un
+client confiné (par exemple une interface distribuée en Flatpak) sans
+permission d'accès au système de fichiers de l'hôte. Ce n'est pas un objectif
+de la v1, mais l'API ne doit pas l'empêcher. Évolution prévue : passage de
+descripteurs de fichiers (type D-Bus `h`), par une méthode du type
+`OpenImage(s ref) → h` ou une variante de `ImagesReady`. Points à vérifier
+avant d'y recourir [À VALIDER] : prise en charge de `h` par `base::dbus`, et
+décodage depuis un descripteur ou depuis des octets par le toolkit
+(`ImageView` accepte un chemin ou des pixels [CODE]).
 
 ---
 
@@ -1408,6 +1433,7 @@ Chaque connexion appartient à un seul thread (ouverture avec
 | Tableaux | ≤ 200 éléments |
 | `app_id`, `offer_id`, `source_id` | Recherchés dans le catalogue ou l'état ; inconnu ⇒ `NotFound`. Jamais transformés en commande ou en chemin |
 | URL d'images | Acceptées seulement si elles figurent dans le catalogue en service, et en `https` |
+| Chemins renvoyés aux clients | Toujours dans les emplacements du contrat §5.8, jamais un chemin fourni par un client |
 | Options | Dictionnaire typé ; clé inconnue ou type inattendu ⇒ `InvalidArgs` |
 | Charge | File de lecture bornée (64 requêtes en attente) ; au-delà ⇒ `Busy` |
 
@@ -1427,7 +1453,8 @@ Chaque connexion appartient à un seul thread (ouverture avec
     [À VALIDER]) ;
   - redirections limitées à `https` ;
   - le nom du fichier en cache est un hachage SHA-256 de l'URL, jamais dérivé
-    du chemin de l'URL ;
+    du chemin de l'URL ; écriture atomique (fichier temporaire puis
+    renommage), pour qu'un client ne lise jamais une image incomplète ;
   - le décodage par le toolkit refuse les images de plus de 256 Mio de pixels
     [CODE].
 - **Requêtes FTS5** construites par le service, jamais à partir de la syntaxe
