@@ -77,7 +77,8 @@ Flatpak (D-003).
      permissions Flatpak) restent dans le plan, sans être aplatis.
 7. **Mesurer avant d'optimiser, mais concevoir pour la vitesse.** Les
    structures (index FTS5, vues virtualisées, caches) sont choisies d'après les
-   mesures de la phase 0.1. Les objectifs chiffrés (§10) sont vérifiés en CI.
+   mesures des phases 0.1 et 0.2. Les objectifs chiffrés (§10) sont des cibles
+   initiales : ils seront vérifiés en CI une fois mesurés et fixés.
 8. **Simplicité.**
    - Pas de plugins dynamiques, pas d'abstraction pour des formats
      hypothétiques (P-001).
@@ -1507,28 +1508,46 @@ Chaque connexion appartient à un seul thread (ouverture avec
 
 ## 10. Performances et caches
 
-### 10.1 Objectifs initiaux
+### 10.1 Objectifs, mesures effectuées et mesures nécessaires
 
-Repris de l'audit 0.1 et précisés. Machine de référence : la machine d'audit,
-puis une machine modeste à définir [À DÉFINIR] avant d'en faire des seuils
-bloquants en CI.
+Trois notions sont distinguées partout :
 
-| Objectif | Valeur initiale | Statut |
+- **objectif** : une cible initiale, choisie pour guider la conception. Aucun
+  objectif n'est une caractéristique acquise tant qu'il n'a pas été mesuré ;
+- **mesure effectuée** : un chiffre obtenu sur la machine d'audit
+  [MESURÉ] ;
+- **mesure nécessaire** : ce qu'il faut mesurer, et avec quoi, pour
+  confirmer ou ajuster l'objectif.
+
+Machine de référence : la machine d'audit, puis une machine modeste à définir
+[À DÉFINIR] avant de transformer les objectifs en seuils bloquants en CI.
+
+**Objectifs** (aucun n'est encore mesuré) :
+
+| Grandeur | Objectif initial | Mesure nécessaire |
 |---|---|---|
-| Lancement à froid jusqu'à la première frame utile | < 400 ms | À mesurer (`FrameStatistics.firstPresentedNs` [CODE]) |
-| Lancement à chaud | < 200 ms | À mesurer |
-| Service : activation jusqu'à `ready` avec un catalogue existant | < 300 ms | Nouvel objectif, à mesurer |
-| Recherche : frappe jusqu'à l'affichage des résultats | p95 < 50 ms | À mesurer ; la requête SQL elle-même vise < 5 ms [HYPOTHÈSE] |
-| Défilement des listes et grilles | 0 frame abandonnée, p99 < 16,7 ms | À mesurer (`FrameStatistics.discarded`) |
-| Page de détails depuis le cache | < 100 ms, images ensuite | À mesurer |
-| Pendant une installation | aucune frame > 50 ms | À mesurer |
-| RSS de l'interface au repos | < 100 Mo | À mesurer |
-| RSS du service au repos | < 60 Mo | **Révisé** (150 Mo dans l'audit) : le catalogue n'est plus chargé en mémoire par le service (P-002). À mesurer |
-| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Nouvel objectif, non mesuré. Repères qui ne mesurent pas l'indexeur : 1,7 s et 459 Mo pour `appstreamcli convert` sur Flathub seul (analyse **et** sérialisation YAML), 52 Mo pour `appstreamcli search` (`AsPool`) [MESURÉ] |
+| Lancement à froid jusqu'à la première frame utile | < 400 ms | `FrameStatistics.firstPresentedNs` [CODE] |
+| Lancement à chaud | < 200 ms | Idem |
+| Service : activation jusqu'à `ready`, catalogue existant | < 300 ms | Horodatages du service |
+| Recherche : frappe jusqu'à l'affichage des résultats | p95 < 50 ms | Prototype P-004 : requête FTS5 sur le catalogue complet et aller-retour D-Bus (tous deux non mesurés ; le coût inférieur à la milliseconde de l'aller-retour est une [HYPOTHÈSE]) |
+| Défilement des listes et grilles | 0 frame abandonnée, p99 < 16,7 ms | `FrameStatistics.discarded` |
+| Page de détails depuis le cache | < 100 ms, images ensuite | Horodatages de l'interface |
+| Pendant une installation | aucune frame > 50 ms | `FrameStatistics` pendant une transaction |
+| RSS de l'interface au repos | < 100 Mo | Mesure sur le prototype d'interface |
+| RSS du service au repos | < 60 Mo, **provisoire** | Mesure sur le prototype, avec libflatpak, GLib, libcurl et SQLite chargées. La cible de l'audit 0.1 (150 Mo) supposait le catalogue en mémoire ; la nouvelle cible n'est qu'une estimation, à fixer après mesure |
+| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Prototype d'indexeur, avec `AsPool` et avec `AsMetadata` (§6.2) |
 
-Références mesurées en 0.1 et 0.2, à ne pas reproduire sur le chemin
-interactif : `appstreamcli search` ≈ 330 ms, `pkcon search` ≈ 530 ms,
-`pkcon get-updates` ≈ 890 ms [MESURÉ].
+**Mesures déjà effectuées** (références, pas des objectifs) [MESURÉ] :
+
+| Mesure | Résultat | Ce qu'elle montre |
+|---|---|---|
+| `appstreamcli search` | ≈ 330 ms par requête | Ne pas interroger AppStream à chaque frappe |
+| `pkcon search name` | ≈ 530 ms | Ne pas interroger PackageKit à chaque frappe |
+| `pkcon get-updates` | ≈ 890 ms | Calculer les mises à jour en arrière-plan |
+| `pkcon resolve --filter installed`, 1 843 noms | 0,52 s | L'état installé se reconstruit en arrière-plan en moins d'une seconde |
+| `flatpak list --app` | ≈ 20 ms | Lecture de l'état Flatpak bon marché |
+| `appstreamcli convert` sur Flathub | 1,7 s, pic 459 Mo | Analyse **et** sérialisation : ne mesure pas l'indexeur |
+| `appstreamcli search` (`AsPool`, cache libxmlb) | pic 52 Mo | Piste pour limiter la mémoire de l'indexeur |
 
 ### 10.2 Démarrage rapide
 
@@ -1596,7 +1615,7 @@ interactif : `appstreamcli search` ≈ 330 ms, `pkcon search` ≈ 530 ms,
 |---|---|---|---|---|
 | Résumés d'applications | Interface (`base::LruCache` [CODE]) | `(génération, app_id)` | 2 000 entrées | Changement de génération |
 | Détails | Interface | `(génération, app_id)` | 50 entrées | Génération, `InstalledChanged` |
-| Instantané du catalogue | Service (fichier) | — | ≈ quelques dizaines de Mo [À MESURER] | Nouvel instantané |
+| Instantané du catalogue | Service (fichier) | — | Inconnue, quelques dizaines de Mo estimés [À MESURER] | Nouvel instantané |
 | Cache de pages SQLite | Service | — | `cache_size` borné par connexion | — |
 | Requêtes préparées | Service, par connexion | Texte SQL | Toutes | Reconnexion |
 | État installé, mises à jour | `state.sqlite` | Offre | — | Signaux des backends |
