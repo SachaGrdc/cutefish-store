@@ -30,10 +30,10 @@ Niveau de preuve, comme dans l'audit de la phase 0.1 :
 8. [Threads et GLib](#8-threads-et-glib)
 9. [Modèle de sécurité](#9-modèle-de-sécurité)
 10. [Performances et caches](#10-performances-et-caches)
-11. Arborescence du projet (à rédiger)
-12. Dépendances et compilation (à rédiger)
-13. Stratégie de tests (à rédiger)
-14. Limites, risques et évolutions (à rédiger)
+11. [Arborescence du projet](#11-arborescence-du-projet)
+12. [Dépendances et compilation](#12-dépendances-et-compilation)
+13. [Stratégie de tests](#13-stratégie-de-tests)
+14. [Limites, risques et évolutions](#14-limites-risques-et-évolutions)
 
 ---
 
@@ -1377,3 +1377,271 @@ interactif : `appstreamcli search` ≈ 330 ms, `pkcon search` ≈ 530 ms,
   Flathub pour les benchmarks (§13).
 - Tests de coût sur le modèle du toolkit (`frame_cost_test`,
   `layout_cost_test` [CODE]).
+
+---
+
+## 11. Arborescence du projet
+
+Organisation inspirée de `calculator`, `settings` et `cutefish-installer`
+[CODE] : bibliothèques statiques par couche, `main.cpp` minimal, `data/` pour
+les fichiers installés, `po/` pour gettext, tests GoogleTest dans `tests/`.
+
+```text
+cutefish-store/
+├── CMakeLists.txt
+├── README.md
+├── LICENSE                         (O-001)
+├── cmake/                          (modules CMake propres, s'il en faut)
+├── data/
+│   ├── cutefish-store.desktop
+│   ├── org.cutefish.Store.metainfo.xml
+│   ├── org.cutefish.Store1.xml     (introspection : le contrat D-Bus)
+│   ├── org.cutefish.Store.service.in   (activation D-Bus de session)
+│   ├── cutefish-store.service.in       (unité systemd utilisateur)
+│   ├── cutefish-store-refresh.timer    (démarre l'unité ci-dessus)
+│   └── flathub.flatpakrepo             (P-011)
+├── icons/                          (glyphes SVG embarqués, comme calculator)
+├── po/
+├── docs/
+│   ├── ARCHITECTURE.md
+│   └── DECISIONS.md
+├── src/
+│   ├── common/                     (contrat D-Bus partagé : noms, clés, erreurs, conversions)
+│   ├── core/
+│   │   ├── backend.h               (interface commune, §7.1)
+│   │   ├── catalog/                (schéma, écriture et lecture, recherche, classement, dédoublonnage)
+│   │   ├── state/                  (state.sqlite : installé, mises à jour, journal)
+│   │   ├── transactions/           (transaction, gestionnaire, politique de confirmation)
+│   │   ├── images/                 (planification, cache disque, téléchargement)
+│   │   └── sources/
+│   ├── backends/
+│   │   ├── apt/                    (client PackageKit, backend APT)
+│   │   └── flatpak/                (GlibWorker, backend Flatpak, permissions)
+│   ├── indexer/                    (main.cpp, lecture AppStream)
+│   ├── service/                    (main.cpp, adaptateur D-Bus, objets Transaction, cycle de vie)
+│   └── ui/
+│       ├── main.cpp
+│       ├── client/                 (proxy D-Bus asynchrone, modèles, caches)
+│       ├── window/                 (fenêtre, barre latérale, navigation)
+│       ├── pages/                  (accueil, catégorie, recherche, détails, installées,
+│       │                            mises à jour, sources, préférences)
+│       └── widgets/                (carte d'application, grille virtualisée, carrousel,
+│                                    description, permissions, ligne de transaction)
+└── tests/
+    ├── core/
+    ├── indexer/
+    ├── backends/
+    ├── dbus/
+    ├── ui/                         (tests headless et outil de capture)
+    ├── perf/
+    ├── security/                   (fuzzing, tests de validation)
+    └── fixtures/                   (catalogues réduits, faux PackageKit, dépôt Flatpak de test)
+```
+
+Règles de dépendance entre dossiers, vérifiées par CMake (aucun
+`target_link_libraries` contraire) :
+
+| Cible | Peut dépendre de | Ne dépend jamais de |
+|---|---|---|
+| `ui` | `common`, `Cutefish::Toolkit` | `core`, backends, GLib, SQLite, libcurl |
+| `common` | `Cutefish::ToolkitBase` | Tout le reste |
+| `core` | `common`, `Cutefish::ToolkitBase`, SQLite, libcurl | GLib, `Cutefish::Toolkit` |
+| `backends/apt` | `core` | GLib |
+| `backends/flatpak` | `core`, libflatpak (GLib) | — |
+| `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib) | backends, D-Bus |
+| `service` | `core`, backends | `Cutefish::Toolkit`, libappstream |
+
+L'écriture du catalogue (schéma, insertion, construction FTS5) est dans `core`
+et n'utilise que SQLite : l'indexeur l'appelle, et les tests de `core` peuvent
+produire un catalogue sans libappstream.
+
+Packaging : pas de dossier `debian/` dans ce dépôt tant que O-003 n'est pas
+tranchée ; Cutefish garde tout son packaging dans `cutefishos/packaging`
+[CODE].
+
+---
+
+## 12. Dépendances et compilation
+
+### 12.1 Dépendances
+
+Les versions « mesurées » sont celles de la machine d'audit (Debian 13).
+
+**Obligatoires à la compilation** :
+
+| Dépendance | Utilisée par | Utilité | Contrainte de version | Mesuré |
+|---|---|---|---|---|
+| CMake, Ninja ou Make, pkg-config | Tout | Build | CMake ≥ 3.22, comme le toolkit [CODE] | — |
+| Compilateur C++20 (GCC ou Clang) | Tout | — | C++20 complet | — |
+| `Cutefish::ToolkitBase` | `common`, `core`, backends, indexeur, service | Boucle d'événements, pool de threads, sd-bus, JSON, journaux, réglages, `FileWatch`, `Process` | 1.x (`SameMajorVersion` [CODE]) | 1.0 |
+| `Cutefish::Toolkit` | `ui` | Interface | 1.x | 1.0 |
+| libsystemd (sd-bus) | Indirecte, via `ToolkitBase` | D-Bus | Celle exigée par le toolkit | systemd 257 |
+| SQLite 3 avec FTS5 | `core` | Catalogue, état, recherche | ≥ 3.34 si l'index `trigram` est adopté, sinon FTS5 suffit. FTS5 doit être compilé (vérifié au démarrage par `PRAGMA compile_options`) | 3.46.1, FTS5 et trigram disponibles |
+| libcurl | `core` (images) | HTTPS | ≥ 7.85 pour `CURLOPT_PROTOCOLS_STR`, déjà utilisé par `calendar` [CODE] | 8.14.1 |
+| libflatpak | `backends/flatpak` | Backend Flatpak | Version minimale à fixer après revue de l'API utilisée ; ≥ 1.14 visé [HYPOTHÈSE] | 1.16.6 |
+| GLib / GIO | Indirecte (libflatpak, libappstream) | — | Celle des deux bibliothèques | 2.84 |
+| libappstream | `indexer` | Lecture AppStream | **≥ 1.0** : l'API 1.0 diffère de la série 0.16 | 1.0.5 |
+
+**Facultatives** :
+
+| Dépendance | Utilité | Sans elle |
+|---|---|---|
+| GoogleTest | Tests (`BUILD_TESTING=ON`) | Pas de tests |
+| gettext (`msgfmt`) | Traductions, via `cutefish_add_translations` [CODE] | Anglais seulement |
+| `dbus-daemon` (outil `dbus-run-session`) | Tests D-Bus sur bus privé | Tests D-Bus ignorés |
+| Clang avec libFuzzer | Fuzzing (§13) | Pas de fuzzing |
+
+**Spécifiques à Cutefish** : `cutefish-toolkit` (les deux bibliothèques), et à
+l'exécution `cutefish-core` pour l'agent polkit, `org.cutefish.AppRuntime` et
+`Services.Appearance` [CODE]. Hors Cutefish, l'interface n'est pas visée
+(D-001) ; le service n'a besoin que de `ToolkitBase` (O-008).
+
+**À l'exécution seulement** :
+
+| Composant | Pourquoi |
+|---|---|
+| `packagekit` et son backend `apt` | Backend APT (1.3.1 mesuré) |
+| `polkitd` et un agent polkit | Autorisations des opérations APT |
+| `appstream` | Hook APT qui télécharge les catalogues DEP-11 (`50appstream` [MESURÉ]) |
+| `flatpak` | Exécution des applications Flatpak installées ; `flatpak-system-helper` pour un éventuel scope système |
+| Bus de session D-Bus, systemd utilisateur | Activation du service, timer |
+| `ca-certificates` | HTTPS |
+| Serveur `org.freedesktop.Notifications` | Notifications (facultatif, O-010) |
+
+**Volontairement absents** : Qt, packagekit-glib2, libsoup, bibliothèque JSON
+externe (`base::json` suffit [CODE]), Boost, moteur de recherche externe.
+
+### 12.2 Organisation CMake
+
+- Projet `cutefish-store`, `LANGUAGES CXX`, `CMAKE_CXX_STANDARD 20`,
+  `GNUInstallDirs`, comme les autres projets Cutefish [CODE].
+- Options :
+
+| Option | Défaut | Effet |
+|---|---|---|
+| `BUILD_TESTING` | `OFF` | Tests GoogleTest (convention Cutefish [CODE]) |
+| `CUTEFISH_STORE_BUILD_UI` | `ON` | Interface ; `OFF` pour construire seulement le service et l'indexeur (portage) |
+| `CUTEFISH_STORE_APT` | `ON` | Backend APT |
+| `CUTEFISH_STORE_FLATPAK` | `ON` | Backend Flatpak (sans libflatpak si `OFF`) |
+| `CUTEFISH_STORE_SANITIZERS` | `OFF` | ASan et UBSan pour les tests |
+
+- Cibles :
+
+| Cible | Type | Installée dans |
+|---|---|---|
+| `store-common`, `store-core`, `store-backend-apt`, `store-backend-flatpak`, `store-ui` | `STATIC` | — |
+| `cutefish-store` | exécutable | `bin/` |
+| `cutefish-store-service` | exécutable | `libexec/` |
+| `cutefish-store-indexer` | exécutable | `libexec/` |
+
+- Fichiers générés par `configure_file` avec
+  `CMAKE_INSTALL_FULL_LIBEXECDIR`, comme les services de l'installeur [CODE] :
+  - `share/dbus-1/services/org.cutefish.Store.service` ;
+  - `lib/systemd/user/cutefish-store.service` et le timer.
+- Autres fichiers installés : `.desktop`, metainfo, `flathub.flatpakrepo`
+  dans `share/cutefish-store/`, traductions.
+- Préfixe `/usr`, comme l'exige Cutefish pour ses composants [CODE :
+  getting-started].
+- Avertissements `-Wall -Wextra` ; `-Werror` en CI seulement.
+- Un test vérifie que `cutefish-store` ne dépend pas de `libglib-2.0`
+  (lecture des entrées `NEEDED` de l'ELF), pour faire respecter D-004.
+
+---
+
+## 13. Stratégie de tests
+
+GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
+
+| Domaine | Ce qui est testé | Comment | Session Cutefish ? |
+|---|---|---|---|
+| Cœur | Normalisation des identifiants, fusion et alias, offre par défaut, construction des requêtes FTS5 (échappement), classement, politique de confirmation, machine d'états, file par backend, journal et reprise, planification des images (LIFO, annulation), traduction des erreurs | Tests unitaires purs ; catalogues produits par l'écriture de `core` | Non |
+| Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
+| Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
+| Backend APT | Résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
+| Backend Flatpak | Plans, double passe, permissions et leurs différences, annulation, erreurs | Installation utilisateur temporaire et dépôt OSTree local construit par les tests, sans réseau [À VALIDER : redirection de l'installation utilisateur par variable d'environnement] ; parsing des permissions sur fixtures | Non |
+| API D-Bus | Méthodes, validation des entrées, erreurs, signaux, regroupement de la progression, `Busy`, reconnexion (arrêt et relance du service), journal `interrupted` | Service lancé sur un bus de session privé avec un **backend de test compilé** (un double de test, pas un plugin) | Non |
+| Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme APT et Flatpak | Backends de test | Non |
+| Interface headless | Mise en page des pages, liaison des modèles, états vides et d'erreur, mode sombre, échelles | `Application::Platform::Headless` [CODE], faux service sur bus privé, outil de capture comme `calculator-capture` [CODE] | Non |
+| Performances | Recherche (p50, p95) sur le catalogue complet, durée et pic mémoire de l'indexeur, aller-retour D-Bus, coût de liaison des lignes de grille, frames pendant le défilement | Benchmarks dédiés, tests de coût à la manière du toolkit [CODE] ; seuils larges et machine fixe pour éviter les faux positifs | Non (headless), oui pour les mesures de frames réelles |
+| Sécurité | Fuzzing du constructeur de requêtes, du convertisseur de descriptions, de la lecture des permissions et de la validation D-Bus ; catalogues malveillants ; refus des URL hors catalogue ; noms de cache ; absence de GLib dans l'interface ; `ONLY_TRUSTED` toujours présent | libFuzzer, tests dédiés | Non |
+
+**Ce qui exige une vraie session Cutefish** (liste de vérification manuelle
+avant chaque version, puis automatisation éventuelle avec
+`cutefish-computer-use`) :
+
+- rendu réel (flou, menu global, changement de thème en direct via
+  `Services.Appearance`) ;
+- dialogue de l'agent polkit de Cutefish ;
+- lancement par `AppRuntime` ;
+- notifications ;
+- installation et suppression réelles sur une machine de test jetable.
+
+**Intégration continue** :
+
+- le workflow réutilisable `cutefishos/.github/.github/workflows/build.yml`
+  accepte des dépendances Cutefish et des paquets supplémentaires (entrées
+  `dependencies` et `packages`) [CODE] ;
+- il est probablement appelable depuis ce dépôt public [HYPOTHÈSE], avec
+  `dependencies: cutefish-toolkit` et les paquets de développement de
+  libflatpak, libappstream, SQLite et libcurl.
+
+---
+
+## 14. Limites, risques et évolutions
+
+### 14.1 Limites assumées de la v1
+
+- APT et Flatpak utilisateur seulement ; pas de fichiers `.deb` locaux, de
+  `.flatpakref`, de remotes authentifiées ni de dépôts éditeurs.
+- Pas de mises à jour hors ligne ; le périmètre des mises à jour système est
+  à décider (O-005).
+- Interface Wayland uniquement, liée à Cutefish ; seul le service vise la
+  portabilité.
+- Dédoublonnage par identifiant et alias seulement : deux paquets de la même
+  application avec des identifiants AppStream différents restent séparés.
+
+### 14.2 Risques techniques
+
+| Risque | Impact | Atténuation |
+|---|---|---|
+| API de cutefish-toolkit jeune, un seul mainteneur visible [CODE] | Ruptures à absorber | Épingler la révision du toolkit en CI, dépendre de peu d'API, contribuer en amont (grille virtualisée) |
+| `ToolkitBase` livrée et construite avec le toolkit graphique (P-006) | Portage du service plus lourd | O-008 : demande d'option « base seule » en amont |
+| Comportement de `ready` retournant `FALSE`, et threads d'émission des signaux de libflatpak | La double passe (§7.3) pourrait ne pas fonctionner comme prévu | Prototype en phase 0.3, avant tout le reste ; repli : attendre la confirmation dans `ready` en bloquant le thread des transactions Flatpak |
+| Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
+| Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype ; lecture source par source |
+| Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
+| Mises à jour système via la boutique | Système cassé par une mise à jour partielle | O-005 ; `ONLY_TRUSTED` ; simulation et confirmation |
+| Politique `auth_admin_keep` de PackageKit | Fenêtre où d'autres processus de la session profitent d'une autorisation récente | Hors du contrôle de la boutique ; documenté |
+| Nom de bus `org.cutefish.Store` (O-002) | Changement de nom tardif | Trancher avant la phase 0.3 |
+| Croissance du catalogue Flathub (50 Mo de XML aujourd'hui) | Indexation plus longue | Indexation en arrière-plan ; réindexation seulement si une empreinte change |
+
+### 14.3 Évolutions prévues par la conception
+
+- **Flatpak système** : seconde instance du backend Flatpak, `scope =
+  system` ; l'API et le modèle ne changent pas.
+- **Dépôts éditeurs** : un helper root activé par D-Bus avec contrôle polkit,
+  sur le modèle de `cutefish-installer-service` [CODE], et un manifeste signé
+  (audit 0.1, §5).
+- **Snap, AppImage, RPM** : de nouvelles implémentations de l'interface
+  `Backend`. Elles l'étendront si nécessaire ; elles ne sont pas anticipées
+  aujourd'hui.
+- **Autres interfaces** : un client en ligne de commande sur l'API D-Bus
+  serait la preuve la moins coûteuse de l'ambition hybride (D-001), et un bon
+  outil de test.
+- **Optimisations** : index `trigram`, téléchargements via l'interface multi
+  de libcurl sur un seul thread, `immutable=1` pour le catalogue.
+
+### 14.4 Vérifications à faire avant l'implémentation (phase 0.3)
+
+1. Prototype libflatpak : double passe avec `ready`, threads d'émission des
+   signaux, annulation, installation utilisateur temporaire pour les tests.
+2. Prototype PackageKit sur sd-bus : `Resolve` par lots, simulation,
+   correspondance des `Status` et `ErrorCode`, signaux après un `apt` en ligne
+   de commande, rattachement à une transaction existante.
+3. Prototype d'indexeur : durée, pic mémoire, taille de l'instantané,
+   sélection des langues, conversion des descriptions.
+4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
+   complet (P-004).
+5. Options de durcissement systemd utilisables dans une unité utilisateur.
+6. Décisions O-001 (licence) et O-002 (nom de bus) avant le premier fichier
+   source.
