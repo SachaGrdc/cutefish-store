@@ -1,4 +1,4 @@
-# Cutefish Store — Le cœur (`store-core`), v0.1
+# Cutefish Store — Le cœur (`store-core`), v0.2
 
 `store-core` est la bibliothèque qui porte la logique métier de la boutique.
 Elle applique les décisions de [ARCHITECTURE.md](ARCHITECTURE.md) et de
@@ -11,17 +11,22 @@ documents qui font foi.
   versions, éléments installés, recherches.
 - Valider tout ce qui entre : un objet du modèle n'existe que s'il est
   valide.
-- Définir les contrats des composants qui viendront ensuite : catalogue,
-  état installé, backends.
+- Définir les contrats des composants : catalogue, état installé, backends.
+- Depuis la v0.2 : le catalogue SQLite (écriture d'un candidat, validation,
+  remplacement atomique, lecture et recherche), décrit dans
+  [CATALOG.md](CATALOG.md).
 
-Le cœur ne dépend que de C++20 et de la bibliothèque standard (P-006) :
+Le cœur ne dépend que de C++20, de la bibliothèque standard et de SQLite
+(P-006) :
 
 - ni Cutefish, ni Qt, ni GTK, ni GLib, ni sd-bus, ni PackageKit, ni
-  libflatpak ;
-- aucune boucle d'événements, aucun thread, aucun accès réseau, aucun
-  fichier ;
-- SQLite et libcurl, prévus par P-006, ne sont pas encore liés : ils
-  arriveront avec le catalogue et le cache d'images, quand ils serviront.
+  libflatpak, ni libappstream (confinée à l'indexeur, `src/indexer/`) ;
+- SQLite est lié en privé : aucun en-tête SQLite n'apparaît dans l'API
+  publique ;
+- aucune boucle d'événements, aucun thread, aucun accès réseau ; les seuls
+  fichiers touchés sont ceux du catalogue qu'on lui désigne ;
+- libcurl, prévu par P-006, n'est pas encore lié : il arrivera avec le cache
+  d'images.
 
 Il peut donc être repris tel quel par une autre couche hôte, un autre
 environnement de bureau ou un outil en ligne de commande.
@@ -33,8 +38,11 @@ CMakeLists.txt                     projet, options BUILD_TESTING et CUTEFISH_STO
 src/core/
 ├── CMakeLists.txt                 cible store-core (bibliothèque statique)
 ├── include/cutefish/store/        API publique : seul dossier visible des utilisateurs
-└── src/                           implémentation et en-têtes internes (text.h)
-tests/core/                        GoogleTest, implémentations de test (fakes.h, fixtures.h)
+└── src/                           implémentation et en-têtes internes (text.h, sqlite.h, catalogschema.h)
+src/indexer/                       importeur AppStream (CATALOG.md)
+tests/core/                        GoogleTest, implémentations de test (fakes.h, fixtures.h, catalogfixture.h)
+tests/indexer/                     tests de l'importeur et catalogues réduits
+tests/perf/                        store-catalog-bench (hors ctest)
 ```
 
 - Namespace `cutefish::store`, fichiers en minuscules sans séparateur
@@ -44,8 +52,8 @@ tests/core/                        GoogleTest, implémentations de test (fakes.h
 - Les détails d'implémentation (`cutefish::store::detail`) restent dans
   `src/core/src/`.
 
-L'arborescence du §11 de l'architecture (`catalog/`, `state/`,
-`transactions/`…) viendra avec les composants correspondants.
+L'état installé (`state.sqlite`), les transactions et les images
+viendront dans `src/core/src/` avec les composants correspondants.
 
 ## Erreurs et résultats
 
@@ -128,7 +136,7 @@ Précisions :
 
 | Interface | En-tête | Implémentation prévue | Appels |
 |---|---|---|---|
-| `Catalog` | `catalog.h` | Lecture de `catalog.sqlite` (§6.3) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries` |
+| `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries` |
 | `InstalledState` | `installedstate.h` | Lecture de `state.sqlite` | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
 | `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` | Asynchrones (§7.1) : `availability`, `queryInstalled`, `sources` |
 
@@ -151,6 +159,11 @@ transactions.
 interface, utilisées par les tests ; elles ne font pas partie de
 `store-core`.
 
+Autres API publiques du catalogue (v0.2, [CATALOG.md](CATALOG.md)) :
+`CatalogWriter` (`catalogwriter.h`), qui écrit un catalogue candidat, et
+`inspectCatalog` / `replaceCatalog` (`catalogfile.h`), qui le valident et le
+mettent en service.
+
 ## Performance
 
 - Les modèles reçoivent leurs données par déplacement ; les accesseurs
@@ -166,7 +179,10 @@ interface, utilisées par les tests ; elles ne font pas partie de
 ## Compiler et tester
 
 Prérequis : CMake ≥ 3.22, un compilateur C++20 (GCC 14 ou Clang 19 testés
-ici), et GoogleTest pour les tests (`libgtest-dev` sous Debian).
+ici), pkg-config, SQLite avec FTS5 (`libsqlite3-dev`), et pour l'indexeur
+libappstream et libxml2 (`libappstream-dev`, `libxml2-dev`) ;
+GoogleTest pour les tests (`libgtest-dev`). L'option
+`-DCUTEFISH_STORE_BUILD_INDEXER=OFF` construit le cœur sans l'indexeur.
 
 ```bash
 cmake -S . -B build -G Ninja -DBUILD_TESTING=ON

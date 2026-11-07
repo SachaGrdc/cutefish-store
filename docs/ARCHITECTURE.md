@@ -5,8 +5,10 @@ validation partielle par le propriétaire (P-006 et D-008 à D-011 validées,
 corrections de la matrice de validation intégrées), puis après le prototype 1
 de la phase 0.3 (P-008 validée : double passe Flatpak), puis après le
 prototype 4 (PackageKit par D-Bus : conclusions validées intégrées au §7.2,
-transactions réelles encore non testées). Aucune ligne de code n'existe
-encore. Ce document décrit ce qui sera construit. Les décisions qu'il
+transactions réelles encore non testées). Le code a commencé : cœur v0.1
+([CORE.md](CORE.md)), puis catalogue SQLite et indexeur v0.2
+([CATALOG.md](CATALOG.md)) ; le service, les backends et l'interface
+n'existent pas encore. Ce document décrit ce qui sera construit. Les décisions qu'il
 applique, et celles qui restent ouvertes, sont tenues à jour dans
 [DECISIONS.md](DECISIONS.md) (identifiants `D-`, `P-`, `O-`).
 
@@ -891,36 +893,40 @@ exactes, permissions Flatpak.
      l'indexation est mémorisée et relancée une fois à la fin.
 3. **Dans l'indexeur** :
    - abaisser sa propre priorité (`setpriority`, classe d'E/S idle) ;
-   - lire les sources avec libappstream. Deux options, à départager par le
-     prototype :
-     - `AsMetadata` (`as_metadata_parse_file` [SYMBOLE]), une source à la
-       fois, libérée après écriture ;
-     - `AsPool`, limité aux emplacements explicitement fournis
-       (`as_pool_set_load_std_data_locations`,
-       `as_pool_add_extra_data_location` [SYMBOLE]), qui s'appuie sur le
-       cache libxmlb.
-
-     `AsPool` conserve la provenance : [MESURÉ] il renvoie deux composants
-     distincts pour `app.drey.Dialect`, l'un avec le paquet Debian, l'autre
-     avec le bundle Flathub, et `as_component_get_origin` existe [SYMBOLE].
-     Critères de choix : pic mémoire, durée, provenance, sélection des
-     langues ;
+   - lire chaque source avec `AsMetadata`, une source à la fois (Core v0.2,
+     [CATALOG.md](CATALOG.md) §3). `AsPool` est écarté : il dédoublonne par
+     `data_id`, qui n'inclut pas la branche Flatpak, et perdait 703
+     composants Flathub [MESURÉ, prototype 3] ;
+   - lire les fichiers **en flux**, par lots de 20 composants (XML par le
+     lecteur de libxml2, DEP-11 découpé sur ses séparateurs `---`) : même
+     résultat qu'une lecture en bloc, pic mémoire divisé par 12 [MESURÉ] ;
    - normaliser chaque composant (§6.4) et écrire toutes les lignes dans une
      seule transaction SQLite (`journal_mode=OFF`, `synchronous=OFF` : le
      fichier est temporaire) ;
-   - construire l'index FTS5 (§6.3), `ANALYZE`, `PRAGMA optimize`, fermer ;
-   - code de sortie 0 seulement si tout a réussi.
+   - construire l'index FTS5 (§6.3), `optimize`, `ANALYZE`, puis écrire
+     `user_version` en dernier, dans une transaction journalisée et
+     synchronisée, et fermer ;
+   - **changement par rapport à la version précédente** : le code de sortie
+     est 0 dès que le candidat est écrit. Une source illisible, tronquée ou
+     mal formée est signalée dans le rapport de l'indexeur sans arrêter les
+     autres ; c'est la validation (étape 4) qui refuse un candidat
+     invraisemblable. Les composants ignorés sont comptés par raison.
 4. **Validation par le service** :
+   - aucun fichier `-journal` ni `-wal` à côté du candidat ;
    - ouverture en lecture seule ;
    - `user_version` égal à la version de schéma attendue ;
-   - `PRAGMA quick_check` ;
+   - `PRAGMA quick_check`, `PRAGMA foreign_key_check`, présence des tables,
+     réponse des deux index FTS5 ;
    - volumes plausibles : chaque source présente dans l'instantané précédent
      doit garder au moins 50 % de ses composants, sauf si elle a été retirée.
      Cela évite de remplacer un bon catalogue par un catalogue tronqué (fichier
      en cours de téléchargement, par exemple).
 5. **Mise en service** :
-   - `rename()` atomique vers `catalog.sqlite`, génération + 1, signal
-     `CatalogChanged` ;
+   - `fsync` du candidat, `rename()` atomique vers `catalog.sqlite`,
+     `fsync` du dossier, génération + 1, signal `CatalogChanged` ;
+   - les lecteurs ouvrent le fichier en lecture seule avec `immutable=1`
+     (aucun verrou, aucun journal) : c'est sûr parce que l'instantané n'est
+     jamais modifié en place ([CATALOG.md](CATALOG.md) §7) ;
    - les threads de lecture ouvrent de nouvelles connexions ;
    - les requêtes en cours finissent sur l'ancien fichier, qui reste lisible
      tant qu'il est ouvert (sémantique POSIX).
@@ -928,47 +934,60 @@ exactes, permissions Flatpak.
    journalisée, `State` passe à `degraded` seulement s'il n'existe aucun
    catalogue.
 
-[À MESURER] durée et pic mémoire de l'indexeur sur Debian + Flathub, avec
-chacune des deux options (objectif initial : < 10 s, < 300 Mo, sur la machine
-d'audit). Repères existants, qui ne mesurent pas l'indexeur : 459 Mo pour
-`appstreamcli convert` (analyse et sérialisation), 52 Mo pour `appstreamcli
-search` (`AsPool` et cache libxmlb) [MESURÉ].
+[MESURÉ, Core v0.2, machine d'audit, catalogues du 7 novembre 2026] :
+Debian `main` et Flathub en 4,4 à 4,7 s, pic mémoire 37 à 39 MiB, instantané
+de 25 Mo (descriptions `C` seulement). Objectif initial (< 10 s, < 300 Mo)
+tenu sur cette machine ; une lecture des fichiers en bloc dépassait 460 MiB.
+Détails et autres politiques de langues : [CATALOG.md](CATALOG.md) §5 et §8.
 
-### 6.3 Schéma (préliminaire)
+### 6.3 Schéma
 
-**`catalog.sqlite`** (lecture seule une fois en service) :
+**`catalog.sqlite`** (lecture seule une fois en service), implémenté en
+Core v0.2 ; schéma complet, contraintes et index : [CATALOG.md](CATALOG.md)
+§2.
 
 | Table | Contenu |
 |---|---|
-| `meta` | Version de schéma (aussi dans `PRAGMA user_version`), génération, date, langues, empreintes des sources |
-| `sources` | `id`, `backend`, `origin` (suite Debian ou nom de remote), `scope`, `label`, `priority` |
-| `apps` | Une ligne par application fusionnée : `rowid`, `app_id` (unique), `name`, `summary`, `developer`, `icon_path`, `icon_url`, `verified`, `license`, `flags`. Volontairement étroite : c'est la table lue pour remplir les listes |
-| `app_details` | `app_id`, puis description (blocs), captures, versions, URL, classification du contenu. Lue seulement par `GetDetails`. Format : tables annexes ou JSON produit et lu par les fonctions JSON intégrées à SQLite, pour ne pas ajouter de bibliothèque JSON au cœur [À VALIDER] |
-| `app_categories` | `(app_id, category)`, indexée par catégorie |
-| `offers` | `offer_id`, `app_id`, `backend`, `source_id`, `ref` (nom de paquet, ou ref Flatpak `app/ID/arch/branche`), `is_default` |
-| `aliases` | Identifiants alternatifs (`<provides><id>`, ancien identifiant en `.desktop`) vers `app_id` |
-| `search` | Table virtuelle FTS5, `content=''` (sans contenu, liée par `rowid` à `apps`) |
+| `meta` | Version de schéma (aussi dans `PRAGMA user_version`), génération, langues indexées, nombre d'offres par source |
+| `sources` | `source_id`, `backend`, `scope`, `kind`, `origin` (suite Debian ou nom de remote), `label`, `url`, `priority`, `enabled` |
+| `apps` | Une ligne par application : `id` (`rowid` des index FTS5), `app_id` (unique), `verified`. Volontairement étroite |
+| `aliases` | Identifiants alternatifs (`<provides><id>` non ambigus) vers l'application |
+| `app_categories` | `(category, app)`, indexée par application |
+| `offers` | Une ligne par composant importé : `offer_id`, application, source, `component_id` d'origine, format, paquet ou ref, version, architecture, développeur, icône |
+| `texts` | Textes **par offre**, champ et langue : nom, résumé, description (blocs), mots-clés |
+| `search`, `search_names` | Tables virtuelles FTS5 sans contenu, liées par `rowid` à `apps` |
 
-**Index de recherche** :
+Écarts avec la version préliminaire de ce paragraphe :
 
-- colonnes FTS5 : `name`, `keywords`, `summary`, `developer`, `categories`
-  (noms traduits), `description` (texte brut tronqué à 2 000 caractères
-  [À VALIDER]) ;
-- tokenizer `unicode61 remove_diacritics 2`, préfixes indexés `prefix='2 3'`
-  [MESURÉ : FTS5 disponible dans le SQLite 3.46.1 de Debian 13] ;
-- classement : `bm25` pondéré (nom 10, mots-clés 5, résumé 2, développeur 1,
-  catégories 1, description 0,5), puis bonus pour une correspondance exacte ou
-  un préfixe du nom, pour une application vérifiée et pour une application
-  installée. Les poids sont à régler sur un jeu de requêtes de référence
-  (§13) ;
-- construction de la requête : la saisie est découpée avec les mêmes règles
-  que le tokenizer, limitée à 8 termes, et chaque terme devient `"terme"*`.
-  **La saisie n'est jamais transmise telle quelle comme syntaxe FTS5**
-  (opérateurs `NEAR`, `OR`, filtres de colonnes, guillemets) : c'est une
-  question d'exactitude autant que de robustesse ;
-- un second index `trigram` sur `name` seul servira aux sous-chaînes et aux
-  fautes légères si la mesure montre un besoin [À VALIDER ; tokenizer
-  `trigram` disponible, MESURÉ].
+- les textes et l'icône sont rattachés à chaque offre, et non à
+  l'application : chaque source garde les siens (§6.4) ;
+- pas de colonne `is_default` : aucune offre par défaut n'est stockée tant
+  que D-009 n'est pas précisée pour les remotes tiers ;
+- `app_details` (captures, versions, URL, licence, classification du
+  contenu, lue seulement par `GetDetails`) n'est pas encore créée : elle
+  viendra avec la page de détails. Format à choisir : tables annexes ou JSON
+  produit et lu par les fonctions JSON intégrées à SQLite, pour ne pas
+  ajouter de bibliothèque JSON au cœur [À VALIDER] ;
+- les formes `.desktop` d'origine sont gardées dans `offers.component_id`,
+  pas dans `aliases`.
+
+**Index de recherche** (Core v0.2, [CATALOG.md](CATALOG.md) §6) :
+
+- colonnes FTS5 : `name`, `keywords`, `summary`, `description` (texte brut,
+  2 000 octets par langue et par offre), `developer`. Les noms de catégories
+  ne sont pas indexés ;
+- tokenizer `unicode61 remove_diacritics 2`, préfixes indexés `prefix='2 3'` ;
+  second index `trigram` sur les noms, retenu (sous-chaînes et fautes de
+  frappe, prototype 3) ;
+- construction de la requête : la saisie est découpée en mots, limitée à 8
+  termes, et chaque terme devient `"terme"*`. **La saisie n'est jamais
+  transmise telle quelle comme syntaxe FTS5** ;
+- classement en rangs : nom exact, préfixe du nom, mots (`bm25` pondéré :
+  nom 10, mots-clés 5, résumé 2, description 0,5, développeur 1), sous-chaîne
+  du nom, puis nom approché (distance ≤ 2) seulement si rien d'autre n'est
+  trouvé. Les bonus prévus pour une application vérifiée ou installée ne
+  sont pas implémentés ; les poids restent à régler sur un jeu de requêtes
+  de référence (§13).
 
 **`state.sqlite`** (mode WAL ; seul écrivain : le thread principal du
 service) :
@@ -1005,7 +1024,7 @@ résultats de recherche sans aller-retour supplémentaire.
 - 1 364 des 2 515 identifiants Debian (`main`) et 511 identifiants Flathub se
   terminent encore par `.desktop` (forme héritée) ;
 - `app_id` = identifiant sans le suffixe `.desktop` ; la forme d'origine est
-  conservée dans `aliases`.
+  conservée dans `offers.component_id` (Core v0.2).
 
 **Fusion** :
 
@@ -1017,6 +1036,11 @@ résultats de recherche sans aller-retour supplémentaire.
    `<provides><id>`, ils sont fusionnés. Si deux applications distinctes
    revendiquent le même alias, rien n'est fusionné et un avertissement est
    journalisé.
+   **Écart du Core v0.2** : aucune fusion n'est faite sur un
+   `<provides><id>`. L'identifiant devient un alias s'il est revendiqué par
+   une seule application et ne désigne aucune application existante ;
+   sinon il est compté comme ambigu (79 cas sur les catalogues réels). La
+   règle ci-dessus reste à confirmer ou à remplacer [À VALIDER].
 3. **Jamais de fusion sur le nom seul** : trop de faux positifs.
 
 **Métadonnées affichées** pour une application fusionnée :
@@ -1024,6 +1048,10 @@ résultats de recherche sans aller-retour supplémentaire.
 - chaque champ vient de la source de l'**offre par défaut** ;
 - un champ vide est complété par les autres sources, dans l'ordre de
   priorité des sources ;
+- **règle provisoire du Core v0.2**, validée par le propriétaire en
+  attendant que D-009 soit précisée : chaque champ vient de l'offre dont la
+  source a la plus haute priorité parmi celles qui fournissent ce champ dans
+  la meilleure langue disponible ; aucune offre par défaut n'est choisie ;
 - la règle de choix de l'offre par défaut est une fonction de `core`, testée
   isolément. Politique retenue (D-009) :
   1. une offre déjà installée ;
@@ -1574,7 +1602,7 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 | Base | Écrivain | Lecteurs | Mode |
 |---|---|---|---|
 | Fichier temporaire de l'indexeur | L'indexeur seul | Le service (validation) | `journal_mode=OFF` pendant la construction |
-| `catalog.sqlite` | Personne : remplacé en bloc par `rename()` | Les threads de lecture | Lecture seule, `immutable` envisageable [À VALIDER] |
+| `catalog.sqlite` | Personne : remplacé en bloc par `rename()` | Les threads de lecture | Lecture seule avec `immutable=1` (Core v0.2) |
 | `state.sqlite` | Le thread principal du service | Les threads de lecture (`ATTACH` en lecture seule) | WAL, `synchronous=NORMAL`, `busy_timeout` court |
 
 Chaque connexion appartient à un seul thread (ouverture avec
@@ -1739,7 +1767,7 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 | Pendant une installation | aucune frame > 50 ms | `FrameStatistics` pendant une transaction |
 | RSS de l'interface au repos | < 100 Mo | Mesure sur le prototype d'interface |
 | RSS du service au repos | < 60 Mo, **provisoire** | Mesure sur le prototype, avec libflatpak, GLib, libcurl et SQLite chargées. La cible de l'audit 0.1 (150 Mo) supposait le catalogue en mémoire ; la nouvelle cible n'est qu'une estimation, à fixer après mesure |
-| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Prototype d'indexeur, avec `AsPool` et avec `AsMetadata` (§6.2) |
+| Indexation Debian + Flathub | < 10 s, pic < 300 Mo, en arrière-plan | Mesuré en Core v0.2 sur la machine d'audit : 4,4 à 4,7 s, 37 à 39 MiB (§6.2) ; reste à mesurer sur une machine modeste |
 
 **Mesures déjà effectuées** (références, pas des objectifs) [MESURÉ] :
 
@@ -1756,6 +1784,8 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 | `flatpak list --app` | ≈ 20 ms | Lecture de l'état Flatpak bon marché |
 | `appstreamcli convert` sur Flathub | 1,7 s, pic 459 Mo | Analyse **et** sérialisation : ne mesure pas l'indexeur |
 | `appstreamcli search` (`AsPool`, cache libxmlb) | pic 52 Mo | Piste pour limiter la mémoire de l'indexeur |
+| Core v0.2 : indexation Debian `main` + Flathub, lecture en flux | 4,4 à 4,7 s, pic 37 à 39 MiB, 25 Mo | Objectif d'indexation tenu sur la machine d'audit |
+| Core v0.2 : recherche FTS5 en rangs, 500 requêtes par mode | p95 0,6 à 5,6 ms selon le mode ; application avec ses offres 0,04 ms | Sans D-Bus ni interface ([CATALOG.md](CATALOG.md) §8) |
 
 ### 10.2 Démarrage rapide
 
@@ -1825,7 +1855,7 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 |---|---|---|---|---|
 | Résumés d'applications | Interface (`base::LruCache` [CODE]) | `(génération, app_id)` | 2 000 entrées | Changement de génération |
 | Détails | Interface | `(génération, app_id)` | 50 entrées | Génération, `InstalledChanged` |
-| Instantané du catalogue | Service (fichier) | — | Inconnue, quelques dizaines de Mo estimés [À MESURER] | Nouvel instantané |
+| Instantané du catalogue | Service (fichier) | — | 25 Mo pour Debian `main` et Flathub, descriptions `C` ; 28 Mo avec le français ; 58 Mo avec toutes les langues [MESURÉ, Core v0.2] | Nouvel instantané |
 | Cache de pages SQLite | Service | — | `cache_size` borné par connexion | — |
 | Requêtes préparées | Service, par connexion | Texte SQL | Toutes | Reconnexion |
 | État installé, mises à jour | `state.sqlite` | Offre | — | Signaux des backends |
@@ -1882,23 +1912,26 @@ cutefish-store/
 │   └── flathub.flatpakrepo             (P-011)
 ├── icons/                          (glyphes SVG embarqués, comme calculator)
 ├── po/
+├── scripts/                        (mesures sur les catalogues réels du système)
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── CATALOG.md                  (catalogue SQLite et indexeur, v0.2)
+│   ├── CORE.md                     (cœur, v0.1)
 │   └── DECISIONS.md
 ├── src/
 │   ├── common/                     (contrat D-Bus partagé : noms, clés, erreurs, conversions)
-│   ├── core/
-│   │   ├── backend.h               (interface commune, §7.1)
-│   │   ├── catalog/                (schéma, écriture et lecture, recherche, classement, dédoublonnage)
-│   │   ├── state/                  (state.sqlite : installé, mises à jour, journal)
-│   │   ├── transactions/           (transaction, gestionnaire, politique de confirmation)
-│   │   ├── images/                 (planification, cache disque, téléchargement)
-│   │   └── sources/
+│   ├── core/                       (store-core : C++20 et SQLite seulement, P-006)
+│   │   ├── CMakeLists.txt
+│   │   ├── include/cutefish/store/ (API publique : modèles, Catalog, InstalledState, Backend,
+│   │   │                            CatalogWriter, SqliteCatalog, catalogfile.h)
+│   │   └── src/                    (implémentation et en-têtes internes : sqlite.h,
+│   │                                catalogschema.h ; plus tard état, transactions, images)
 │   ├── backends/
 │   │   ├── packagekit/             (logique PackageKit générique, profils de distribution :
 │   │   │                            debian/ en v1 ; transport D-Bus dans service/)
 │   │   └── flatpak/                (GlibWorker, backend Flatpak, permissions)
-│   ├── indexer/                    (main.cpp, lecture AppStream)
+│   ├── indexer/                    (store-indexer et cutefish-store-indexer : libappstream,
+│   │                                GLib, libxml2 ; lecture en flux, rapport d'import)
 │   ├── service/                    (couche hôte Cutefish : main.cpp, D-Bus, objets Transaction,
 │   │                                cycle de vie, pools, transport PackageKit)
 │   └── ui/
@@ -1915,10 +1948,17 @@ cutefish-store/
     ├── backends/
     ├── dbus/
     ├── ui/                         (tests headless et outil de capture)
-    ├── perf/
+    ├── perf/                       (store-catalog-bench, hors ctest)
     ├── security/                   (fuzzing, tests de validation)
     └── fixtures/                   (catalogues réduits, faux PackageKit, dépôt Flatpak de test)
 ```
+
+Existent aujourd'hui : `CMakeLists.txt`, `README.md`, `docs/`, `scripts/`,
+`src/core/`, `src/indexer/`, `tests/core/`, `tests/indexer/` (avec ses
+catalogues réduits dans `data/`) et `tests/perf/`. Le reste de
+l'arborescence est prévu. L'API publique du cœur est dans
+`src/core/include/cutefish/store/`, son implémentation dans
+`src/core/src/` ([CORE.md](CORE.md)).
 
 Règles de dépendance entre dossiers, vérifiées par CMake (aucun
 `target_link_libraries` contraire) :
@@ -1930,7 +1970,7 @@ Règles de dépendance entre dossiers, vérifiées par CMake (aucun
 | `core` | SQLite, libcurl | `common`, `Cutefish::ToolkitBase`, `Cutefish::Toolkit`, GLib, D-Bus |
 | `backends/packagekit` (logique et profils) | `core` | GLib, D-Bus, `Cutefish::ToolkitBase` |
 | `backends/flatpak` | `core`, libflatpak (GLib) | `Cutefish::ToolkitBase` |
-| `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib) | backends, D-Bus, `Cutefish::ToolkitBase` |
+| `indexer` | `core` (schéma et écriture du catalogue, dédoublonnage), libappstream (GLib), libxml2 | backends, D-Bus, `Cutefish::ToolkitBase` |
 | `service` (couche hôte) | `core`, adaptateurs, `common`, `Cutefish::ToolkitBase` | `Cutefish::Toolkit`, libappstream |
 
 L'écriture du catalogue (schéma, insertion, construction FTS5) est dans `core`
@@ -1958,11 +1998,12 @@ Les versions « mesurées » sont celles de la machine d'audit (Debian 13).
 | `Cutefish::ToolkitBase` | Couche hôte (`service`, transport PackageKit), `common`, interface. **Pas** le cœur, l'indexeur ni l'adaptateur Flatpak (P-006) | Boucle d'événements, pool de threads, sd-bus, journaux, réglages, `FileWatch`, `Process`, langue de session | 1.x (`SameMajorVersion` [CODE]) | 1.0 |
 | `Cutefish::Toolkit` | `ui` | Interface | 1.x | 1.0 |
 | libsystemd (sd-bus) | Indirecte, via `ToolkitBase` (couche hôte) | D-Bus | Celle exigée par le toolkit | systemd 257 |
-| SQLite 3 avec FTS5 | `core` | Catalogue, état, recherche | ≥ 3.34 si l'index `trigram` est adopté, sinon FTS5 suffit. FTS5 doit être compilé (vérifié au démarrage par `PRAGMA compile_options`) | 3.46.1, FTS5 et trigram disponibles |
+| SQLite 3 avec FTS5 | `core` (lié en privé : aucun en-tête SQLite dans l'API publique) | Catalogue, état, recherche | ≥ 3.34 : l'index `trigram` est adopté (Core v0.2). Sans FTS5, la création du schéma échoue | 3.46.1, FTS5 et trigram disponibles |
 | libcurl | `core` (images) | HTTPS | ≥ 7.85 pour `CURLOPT_PROTOCOLS_STR`, déjà utilisé par `calendar` [CODE] | 8.14.1 |
 | libflatpak | `backends/flatpak` | Backend Flatpak | Version minimale à fixer après revue de l'API utilisée ; ≥ 1.14 visé [HYPOTHÈSE] | 1.16.6 |
-| GLib / GIO | Indirecte (libflatpak, libappstream) | — | Celle des deux bibliothèques | 2.84 |
+| GLib / GIO | libflatpak, libappstream ; directement dans l'indexeur (décompression en flux du DEP-11) | — | Celle des deux bibliothèques | 2.84 |
 | libappstream | `indexer` | Lecture AppStream | **≥ 1.0** : l'API 1.0 diffère de la série 0.16 | 1.0.5 |
+| libxml2 | `indexer` | Lecture en flux du XML Flathub, conversion du balisage des descriptions | Celle de libappstream, qui en dépend déjà | 2.9.14 |
 
 **Facultatives** :
 
@@ -2104,7 +2145,7 @@ avant chaque version, puis automatisation éventuelle avec
 | Rattachement à une transaction PackageKit après redémarrage du service | Signaux émis pendant l'absence perdus ; relecture des propriétés non testée | Suivi des signaux par une autre connexion vérifié (prototype 4) ; repli : `interrupted` puis réconciliation |
 | PackageKit (backend APT) sérialise toutes ses transactions, requêtes comprises | Une longue installation retarde l'état installé et les mises à jour, y compris pour d'autres logiciels de la machine | File unique du service (P-009), requêtes groupées, interface servie depuis `state.sqlite` |
 | Pas de lien entre simulation et exécution PackageKit ; version d'un `package_id` non imposée ; `allow_deps=false` ignoré | Une exécution peut différer du plan confirmé | Simulation obligatoire, vérification des versions et des paquets supplémentaires, nouvelle simulation avant l'exécution ; fenêtre résiduelle documentée (§7.2) ; correspondance à tester en environnement jetable |
-| Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype, avec `AsPool` et avec `AsMetadata` ; lecture source par source |
+| Mémoire et durée de l'indexeur | Objectifs §10 manqués sur une machine modeste ou avec des catalogues plus gros | Lecture en flux par lots (Core v0.2 : 37 à 39 MiB, 4,4 à 4,7 s sur la machine d'audit) ; à mesurer sur une machine modeste |
 | Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
 | Mise à jour d'une application APT qui entraîne celle de dépendances partagées | Effet sur d'autres programmes | Simulation, dépendances visibles dans le plan, `ONLY_TRUSTED` ; la boutique ne lance jamais de mise à jour complète (D-010) |
 | Utilisateurs qui attendent les mises à jour système dans la boutique | Système non mis à jour | Message clair dans l'écran « Mises à jour » : le système se met à jour par l'outil de la distribution (D-010) |
@@ -2144,9 +2185,9 @@ avant chaque version, puis automatisation éventuelle avec
    du démon pendant une transaction, `RefreshCache`, questions debconf,
    correspondance entre simulation et exécution, signaux après un `apt` en
    ligne de commande, relecture des propriétés d'une transaction rattachée.
-3. Prototype d'indexeur : comparaison `AsPool` / `AsMetadata` (durée, pic
-   mémoire, provenance), taille de l'instantané, sélection des langues,
-   conversion des descriptions.
+3. Prototype d'indexeur : **fait** (prototype 3), puis implémenté en Core
+   v0.2 ([CATALOG.md](CATALOG.md)). Restent : politique de langues (O-009),
+   règle des `<provides><id>` (§6.4), mesures sur une machine modeste.
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.

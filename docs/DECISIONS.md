@@ -432,10 +432,14 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   laissé au prototype, selon la mémoire, la durée, la conservation de la
   provenance et la sélection des langues.
 - **Détails** : [ARCHITECTURE §6.2](ARCHITECTURE.md#62-chaîne-dindexation).
-- **À mesurer** :
-  - durée totale de l'indexation Debian + Flathub (objectif initial < 10 s en
-    arrière-plan) ;
-  - pic mémoire réel de l'indexeur, avec `AsPool` et avec `AsMetadata`.
+- **Mesures** (statut de la décision inchangé) :
+  - prototype 3 : `AsMetadata` retenu, `AsPool` perdant les branches
+    Flatpak ; lecture en bloc des deux catalogues 471 MiB de pic ;
+  - Core v0.2, indexeur réel, lecture en flux par lots de 20 composants,
+    Debian `main` + Flathub : 4,4 à 4,7 s, pic 37 à 39 MiB, instantané de
+    25 Mo [MESURÉ sur la machine d'audit, une seule machine]. L'objectif
+    initial (< 10 s, < 300 Mo) est tenu sur cette machine ;
+  - détails : [CATALOG.md](CATALOG.md) §3 et §8.
 
 ### P-003 — Deux bases SQLite : catalogue (instantané) et état
 
@@ -655,7 +659,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 | O-006 | Tranchée → D-011 | **Flatpaks déjà installés en système**. | Éviter de proposer un doublon utilisateur ; périmètre polkit | — |
 | O-007 | Ouverte | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
 | O-008 | Ouverte | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
-| O-009 | Ouverte | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation | Pendant le prototype de l'indexeur |
+| O-009 | Ouverte | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation. Coûts mesurés en Core v0.2 (descriptions `C` : 25 Mo ; + français : 28 Mo ; toutes : 58 Mo ; durée 4,4 à 4,9 s) : [CATALOG.md](CATALOG.md) §5 | Avant le service (l'indexeur reçoit déjà les langues en argument) |
 | O-010 | Ouverte | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
 | O-011 | Ouverte | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
 | O-012 | Ouverte | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
