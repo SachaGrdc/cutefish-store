@@ -531,7 +531,18 @@ Différence essentielle entre les deux backends, à ne jamais masquer :
 | Conservation dans le journal | Au plus 200 transactions terminées **et** au plus 90 jours (la plus stricte) ; non terminées jamais supprimées ; plans JSON gardés | **D-018** |
 | Délai maximal côté service d'un appel PackageKit sans `Finished` | 30 minutes pour une transaction réelle, 2 minutes pour une requête | **Nouveau** : PackageKit peut répondre par une erreur D-Bus sans `Finished` [MESURÉ, prototype 4] |
 
-### 5.4 Interface `Backend` étendue [PROPOSITION]
+### 5.4 Interface `Backend` étendue
+
+**Implémentée en Core v0.3, étape D** (`backend.h` ; détails et écarts dans
+[CORE.md](CORE.md), « Plans et exécution »). Écarts avec la proposition
+ci-dessous : `execute` reçoit la demande (`PlanRequest`) et le plan
+accepté, et rend `Completed` ou `PlanChanged` ; la progression passe par
+`OperationEvents` (`started`, `progress`, `handle`) ; `cancel` prend
+l'identifiant d'opération choisi par l'hôte ; s'ajoutent `reattach`,
+`permissions`, `capabilities` et `setChangeListener` (au lieu de
+`watchChanges`).
+
+Proposition initiale :
 
 Extension de `backend.h` (Core v0.1), sans changer les trois opérations
 existantes ni le contrat de complétion (une fois, par `post`, jamais dans
@@ -1054,7 +1065,8 @@ sont des manques, sauf le premier, qui est un commentaire périmé.
 (`plan.h`, `confirmation.h`, `transaction.h`, `defaultoffer.h` ; détails dans
 [CORE.md](CORE.md)). **Après le Core v0.3b** : les écarts 3 et 10 aussi
 (`statestore.h`). **Après le Catalogue v0.3** : les écarts 7, 8 (sauf
-`has-update`, sans table des mises à jour) et 9. Reste l'écart 5 (étape D).
+`has-update`, sans table des mises à jour) et 9. **Après l'étape D** :
+l'écart 5. Tous les écarts du cœur sont traités, sauf `has-update`.
 
 | # | Écart | Où | Conséquence | Traitement |
 |---|---|---|---|---|

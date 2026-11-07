@@ -149,7 +149,7 @@ Précisions :
 |---|---|---|---|
 | `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2, étendue en v0.3 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries`, `browse`, `listCategories`, `sources` ; avec `state.sqlite` attachée, `installed` et `installedOnly` |
 | `InstalledState` | `installedstate.h` | `StateStore` (thread principal) et `SqliteInstalledState` (threads de lecture), implémentées en v0.3b (`statestore.h`) | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
-| `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` | Asynchrones (§7.1) : `availability`, `queryInstalled`, `sources` |
+| `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` (à écrire) ; contrat complet depuis la v0.3 (étape D) | Asynchrones (A §7.1) : `availability`, `queryInstalled`, `sources`, `catalogSources`, `queryUpdates`, `permissions`, `plan`, `execute`, `reattach`, `refresh`, `cancel`, `setChangeListener` ; `capabilities` synchrone |
 
 Contrat de `Backend` :
 
@@ -160,12 +160,42 @@ Contrat de `Backend` :
 - elle n'est **jamais** appelée depuis l'intérieur de la méthode, ce qui
   évite toute réentrance ;
 - les échecs du gestionnaire de paquets sont des erreurs `Backend` avec leur
-  `BackendFailure`.
+  `BackendFailure` (`Interrupted` pour une opération perdue,
+  `Unavailable` pour un backend inutilisable) ; `Cancelled` après une
+  annulation, `NotSupported` pour ce que les capacités excluent, `Conflict`
+  pour une seconde opération modificatrice ;
+- les événements (`OperationEvents` : `started`, `progress`, `handle`)
+  suivent les mêmes règles que la complétion, dans l'ordre, et jamais après
+  elle ;
+- au plus **une opération modificatrice** (`execute`, `refresh`,
+  `reattach`) par backend à la fois (P-009) ; plans et requêtes peuvent être
+  demandés à tout moment, le backend les met en file lui-même ;
+- rien de ce que le backend rapporte n'est conservé comme vérité :
+  `state.sqlite` n'en garde qu'une copie pour l'affichage.
 
-Les opérations de planification, d'exécution, d'annulation, de mises à
-jour et de notification de changement (§7.1) seront ajoutées à `Backend` à
-l'étape D (SERVICE.md §15) ; les types qu'elles échangent (`Plan`) existent
-depuis la v0.3a.
+**Plans et exécution** (v0.3, étape D ; P-008, D-014, D-017) :
+
+| Élément | Rôle |
+|---|---|
+| `PlanRequest` (`plan.h`) | Type de transaction et 1 à 200 offres, sans doublon, d'un seul backend et d'une seule installation |
+| `decodeOfferId` (`offer.h`) | Relit `packagekit:<paquet>` et `flatpak:<installation>:<remote>:<ref>` : le backend sait sur quoi agir, même pour une offre qu'il n'a pas listée |
+| `checkPlanForRequest` | Refuse un plan qui ne répond pas à la demande (autre type, installation ou paquet demandé ; paquet demandé absent d'une installation ou d'une suppression) |
+| `plan()` | Calcule un plan sans rien changer ; annulable |
+| `execute()` | Calcule le plan qu'il va exécuter et appelle `mayExecute(accepté, nouveau)` **avant tout changement**. Faux : il ne change rien et rend `PlanChanged` avec ce plan (`started` n'est jamais appelé). Vrai : `started(plan)`, progression, résultat |
+| `mayExecute` (`confirmation.h`) | Même règle que `Transaction::verifyExecutionPlan()` : le backend et l'état de la transaction concordent toujours |
+| `cancel()` | Une demande : `NotFound` pour une opération inconnue, `NotSupported` si elle n'est pas annulable maintenant ; la complétion dit ce qui s'est passé |
+| `reattach()` | Suit de nouveau une exécution qui a survécu au service (`RecoveryAction::TryReattach`) ; `NotFound` si le backend ne la connaît plus |
+| `capabilities()` | Installations gérées, permissions, rafraîchissement, annulation à tout moment, rattachement, et `verifiesExecutedPlan` |
+
+`verifiesExecutedPlan` rend visible la limite de D-017 : vrai pour Flatpak
+(la seconde passe vérifie le plan de la transaction exécutée elle-même),
+faux pour PackageKit (une nouvelle simulation, transaction distincte : la
+fenêtre est réduite, pas fermée).
+
+L'orchestration (file par backend, minuterie de confirmation, journal,
+publication D-Bus) appartient au service (étape E). Les tests
+(`tests/core/testbackend.cpp`) la reproduisent avec un faux backend
+scriptable pour vérifier le contrat.
 
 `tests/core/fakes.h` contient des implémentations en mémoire de chaque
 interface, utilisées par les tests ; elles ne font pas partie de

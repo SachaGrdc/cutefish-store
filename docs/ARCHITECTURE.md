@@ -1139,7 +1139,9 @@ la nouvelle langue.
 
 ### 7.1 Interface commune
 
-Une classe abstraite C++ dans `core`, implémentée deux fois. Tous les rappels
+Une classe abstraite C++ dans `core`, implémentée deux fois. Contrat écrit en
+Core v0.3, étape D (`backend.h`, [CORE.md](CORE.md) « Plans et exécution ») ;
+les tableaux ci-dessous restent la description fonctionnelle. Tous les rappels
 arrivent sur le thread principal de la couche hôte, par la fonction `post`
 qu'elle fournit, quel que soit le thread qui a fait le travail.
 
