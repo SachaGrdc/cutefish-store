@@ -10,6 +10,7 @@ add_executable(store-core-tests
     testbrowse.cpp
     testcatalog.cpp
     testcatalogfile.cpp
+    testcatalogstate.cpp
     testconfirmation.cpp
     testdefaultoffer.cpp
     testerror.cpp

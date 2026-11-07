@@ -16,6 +16,11 @@ struct CatalogReadOptions
     /// Each brings its fallbacks (`fr_FR` then `fr`); the untranslated `C`
     /// text always comes last.
     std::vector<std::string> locales = {};
+    /// state.sqlite (StateStore), attached read-only to give `installed`
+    /// and the `installedOnly` filter (ARCHITECTURE §6.3, SERVICE.md §8.4).
+    /// Empty: no installed state; `installedOnly` is then refused. The file
+    /// must exist and have the current state schema; it is never modified.
+    std::filesystem::path statePath = {};
 };
 
 /// The catalogue snapshot (catalog.sqlite), read-only (ARCHITECTURE §6.3).
@@ -31,6 +36,15 @@ struct CatalogReadOptions
 /// in the best available language. Offers come in the same order. This
 /// order is not the installation priority: the offer proposed by default is
 /// chosen by defaultOffer() (defaultoffer.h, D-009), never by position.
+///
+/// Installed state (with CatalogReadOptions::statePath): an application is
+/// shown installed when state.sqlite lists one of its offers, or, for an
+/// installed offer the catalogue does not know, when the inventory links it
+/// to the application (its id or an alias). The catalogue's offer wins over
+/// the inventory's link when both exist. This is a display cache of the
+/// last inventory, never a reason to install or remove anything: the
+/// backends decide (SERVICE.md §8). Each call reads one committed state of
+/// state.sqlite: one SQLite read transaction per call.
 ///
 /// One instance per thread; it keeps prepared statements and the result
 /// list of the last search, so that turning pages does not search again.
@@ -48,8 +62,9 @@ public:
     /// Ranking in tiers, documented in docs/CATALOG.md: exact name, name
     /// prefix, words (FTS5, bm25), substring of the name (trigrams), and only
     /// when those find nothing, approximate names (trigrams and edit
-    /// distance ≤ 2). `installedOnly` needs state.sqlite and is refused with
-    /// NotSupported; `installed` and `hasUpdate` are always false here.
+    /// distance ≤ 2). With state.sqlite attached, `installed` is set and
+    /// `installedOnly` filters; without it, `installedOnly` is refused with
+    /// NotSupported. `hasUpdate` stays false: there is no update table yet.
     Result<SearchPage> search(const SearchQuery& query) const override;
     Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const override;
     /// The sorted list of matching rows is kept, as for a search, so that

@@ -1,6 +1,6 @@
 // store-catalog-bench: latency of SqliteCatalog on a real catalogue.
 //
-//   store-catalog-bench CATALOG [--queries N] [--readers N] [--locale L]
+//   store-catalog-bench CATALOG [--queries N] [--readers N] [--locale L] [--state STATE]
 //
 // Query sets are drawn from the catalogue's own names with a fixed seed,
 // like prototype 3: exact names, prefixes of 2 to 5 characters (typing),
@@ -10,12 +10,14 @@
 // real catalogue (scripts/measure-catalog.sh).
 
 #include <cutefish/store/sqlitecatalog.h>
+#include <cutefish/store/statestore.h>
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <optional>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -106,7 +108,7 @@ void run(const SqliteCatalog& c, const char* label, const std::vector<Query>& qu
 int main(int argc, char** argv)
 {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: store-catalog-bench CATALOG [--queries N] [--readers N] [--locale L]\n");
+        std::fprintf(stderr, "usage: store-catalog-bench CATALOG [--queries N] [--readers N] [--locale L] [--state STATE]\n");
         return 2;
     }
     const char* path = argv[1];
@@ -121,6 +123,19 @@ int main(int argc, char** argv)
             readers = std::stoi(argv[i + 1]);
         else if (arg == "--locale")
             options.locales.push_back(argv[i + 1]);
+        else if (arg == "--state")
+            options.statePath = argv[i + 1];
+    }
+    // --state: state.sqlite attached to every reader (Catalogue v0.3). The
+    // file is created empty if it does not exist.
+    std::optional<StateStore> state;
+    if (!options.statePath.empty()) {
+        auto s = StateStore::open(options.statePath, 0);
+        if (!s) {
+            std::fprintf(stderr, "%s\n", s.error().message().c_str());
+            return 1;
+        }
+        state.emplace(std::move(s).value());
     }
 
     const auto t0 = Clock::now();
@@ -236,6 +251,11 @@ int main(int argc, char** argv)
         auto again = c.listCategories();
         const double listMs = ms(lc, Clock::now());
         const Stats pc = perCategory.empty() ? Stats{0, 0, 0, 0} : stats(perCategory);
+        if (!options.statePath.empty()) {
+            const auto s = Clock::now();
+            auto r = c.browse(*BrowseQuery::create({.limit = 60, .installedOnly = true}));
+            std::printf("browse installed_only total=%u first_page_ms=%.3f\n", r ? r->total : 0u, ms(s, Clock::now()));
+        }
         std::printf("browse total=%u first_page_ms=%.3f next_page_p50_ms=%.3f next_page_p95_ms=%.3f "
                     "category_first_page_p50_ms=%.3f category_first_page_max_ms=%.3f categories=%zu list_categories_ms=%.3f\n",
                     first ? first->total : 0u, ms(a, b), n.p50, n.p95, pc.p50, pc.max,

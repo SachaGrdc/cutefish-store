@@ -5,6 +5,7 @@
 #include "catalogschema.h"
 #include "sqlite.h"
 #include "sqliteuri.h"
+#include "stateschema.h"
 #include "text.h"
 
 #include <algorithm>
@@ -168,7 +169,9 @@ struct SqliteCatalog::Impl
 
     mutable Statement appById, appByAlias, appByRow, offersOfApp, displayTexts, allTexts, categoriesOfApp,
             aliasesOfApp, exactNames, prefixNames, words, substrings, fuzzyCandidates, namesOfApp, inCategory,
-            hasBackend, browseRows, categoryCounts;
+            hasBackend, browseRows, categoryCounts, installedOfApp;
+    // state.sqlite attached as `state` (CatalogReadOptions::statePath).
+    bool hasState = false;
 
     // Result list of the last search (application rows, ranked), reused when
     // only the page changes.
@@ -238,6 +241,18 @@ struct SqliteCatalog::Impl
                                 " WHERE o.app = ?1 AND t.field IN (0, 1, 2) AND t.locale IN " + inLocales;
         const std::string names = "SELECT t.value FROM texts t JOIN offers o ON o.id = t.offer"
                                   " WHERE o.app = ?1 AND t.field = 0 AND t.locale IN " + inLocales;
+        // An application is installed when the inventory lists one of its
+        // offers; for an installed offer the catalogue does not know, the
+        // inventory's link to the application (its id, or one of its
+        // aliases) counts. When the catalogue knows the offer, its own link
+        // wins. Three EXISTS, each on an index (offers by application,
+        // installed by offer and by application, aliases by application).
+        const std::string unknownOffer = " AND NOT EXISTS (SELECT 1 FROM offers xo WHERE xo.offer_id = i.offer_id)";
+        const std::string installedExpr =
+                "(EXISTS (SELECT 1 FROM offers io JOIN state.installed i ON i.offer_id = io.offer_id WHERE io.app = a.id)"
+                " OR EXISTS (SELECT 1 FROM state.installed i WHERE i.app_id = a.app_id" + unknownOffer + ")"
+                " OR EXISTS (SELECT 1 FROM aliases al JOIN state.installed i ON i.app_id = al.alias"
+                " WHERE al.app = a.id" + unknownOffer + "))";
         // Browse order: the name displayed for the reader's languages, chosen
         // like chooseTexts(): the first language of the chain that has a
         // name, then the offer of highest source priority, then the offer
@@ -256,7 +271,9 @@ struct SqliteCatalog::Impl
                 " WHERE (?1 = '' OR EXISTS (SELECT 1 FROM app_categories c WHERE c.category = ?1 AND c.app = a.id))"
                 " AND (?2 = '' OR EXISTS (SELECT 1 FROM offers o JOIN sources s ON s.id = o.source"
                 " WHERE o.app = a.id AND s.backend = ?2))"
-                " ORDER BY " + sortName + " COLLATE NOCASE, a.app_id";
+                + (hasState ? " AND (?" + std::to_string(locales.size() + 3) + " = 0 OR " + installedExpr + ")"
+                            : std::string())
+                + " ORDER BY " + sortName + " COLLATE NOCASE, a.app_id";
         struct Item
         {
             Statement* target;
@@ -297,8 +314,80 @@ struct SqliteCatalog::Impl
                 return std::move(stmt).error();
             *item.target = std::move(stmt).value();
         }
+        if (hasState) {
+            auto stmt = Statement::prepare(db, ("SELECT " + installedExpr + " FROM apps a WHERE a.id = ?1").c_str());
+            if (!stmt)
+                return std::move(stmt).error();
+            installedOfApp = std::move(stmt).value();
+        }
         return {};
     }
+
+    Result<void> attachState(const std::filesystem::path& path)
+    {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec))
+            return Error::notFound("no state database " + path.string());
+        auto attach = Statement::prepare(db, "ATTACH DATABASE ?1 AS state");
+        if (!attach)
+            return std::move(attach).error();
+        const std::string uri = detail::fileUri(path) + "?mode=ro";
+        attach->bind(1, uri);
+        if (auto ok = attach->run(); !ok)
+            return Error::notFound("cannot attach " + path.string() + ": " + ok.error().message());
+        if (auto ok = db.exec("PRAGMA query_only = ON"); !ok)
+            return ok;
+        auto version = db.queryInt("PRAGMA state.user_version");
+        if (!version)
+            return Error::invalidArgument("not a state database: " + version.error().message());
+        if (*version != detail::kStateSchemaVersion)
+            return Error::notSupported("state database schema version " + std::to_string(*version) + ", expected "
+                                       + std::to_string(detail::kStateSchemaVersion));
+        hasState = true;
+        return {};
+    }
+
+    bool installed(std::int64_t app) const
+    {
+        if (!hasState)
+            return false;
+        installedOfApp.bind(1, app);
+        const bool yes = installedOfApp.step() == SQLITE_ROW && installedOfApp.columnInt(0) != 0;
+        installedOfApp.reset();
+        return yes;
+    }
+
+    // Changes whenever state.sqlite was written by another connection: part
+    // of the cache key of installed-only lists.
+    std::string stateVersion() const
+    {
+        if (!hasState)
+            return {};
+        auto v = const_cast<Database&>(db).queryInt("PRAGMA state.data_version");
+        return v ? std::to_string(*v) : std::string("?");
+    }
+
+    /// One read transaction per call, so that a page sees a single committed
+    /// state of state.sqlite (the catalogue itself never changes).
+    class ReadSnapshot
+    {
+    public:
+        explicit ReadSnapshot(const Impl& impl) : m_db(impl.hasState ? &const_cast<Database&>(impl.db) : nullptr)
+        {
+            if (m_db && !m_db->exec("BEGIN"))
+                m_db = nullptr;
+        }
+        ~ReadSnapshot()
+        {
+            if (m_db)
+                (void) m_db->exec("COMMIT");
+        }
+        ReadSnapshot(const ReadSnapshot&) = delete;
+        ReadSnapshot& operator=(const ReadSnapshot&) = delete;
+
+    private:
+        Database* m_db;
+    };
 
     struct AppRow
     {
@@ -410,6 +499,7 @@ struct SqliteCatalog::Impl
         Texts texts = chooseTexts(app, offerRows, false);
         AppSummary s{.id = std::move(id).value(), .name = std::move(texts.name), .summary = std::move(texts.summary)};
         s.verified = row->verified;
+        s.installed = installed(app);
         for (const OfferRow& o : offerRows) {
             if (s.icon.kind == IconKind::None && o.icon.kind != IconKind::None)
                 s.icon = o.icon;
@@ -538,6 +628,8 @@ struct SqliteCatalog::Impl
             if (!ok)
                 return false;
         }
+        if (o.installedOnly && !installed(app))
+            return false;
         return true;
     }
 };
@@ -570,6 +662,9 @@ Result<SqliteCatalog> SqliteCatalog::open(const std::filesystem::path& path, Cat
     impl->locales.push_back("C");
     if (auto ok = impl->loadSources(); !ok)
         return std::move(ok).error();
+    if (!options.statePath.empty())
+        if (auto ok = impl->attachState(options.statePath); !ok)
+            return std::move(ok).error();
     if (auto ok = impl->prepare(); !ok)
         return std::move(ok).error();
     return SqliteCatalog(std::move(impl));
@@ -635,20 +730,25 @@ Result<Application> SqliteCatalog::application(const AppId& id) const
 Result<SearchPage> SqliteCatalog::search(const SearchQuery& query) const
 {
     const SearchOptions& o = query.options();
-    if (o.installedOnly)
+    if (o.installedOnly && !d->hasState)
         return Error::notSupported("installed-only search needs state.sqlite");
     SearchPage page{.generation = d->generation};
     if (query.text().empty())
         return page;
+    const Impl::ReadSnapshot snapshot(*d);
 
     std::string key = query.text();
     key += '\0';
     key += o.category;
     key += '\0';
     key += o.backend ? toString(*o.backend) : "";
+    if (o.installedOnly) {
+        key += '\0';
+        key += "installed:" + d->stateVersion();
+    }
     if (key != d->lastKey) {
         std::vector<std::int64_t> ranked = d->rank(query.text());
-        if (!o.category.empty() || o.backend)
+        if (!o.category.empty() || o.backend || o.installedOnly)
             std::erase_if(ranked, [&](std::int64_t app) { return !d->accept(app, o); });
         d->lastResults = std::move(ranked);
         d->lastKey = std::move(key);
@@ -670,15 +770,22 @@ Result<SearchPage> SqliteCatalog::search(const SearchQuery& query) const
 Result<SearchPage> SqliteCatalog::browse(const BrowseQuery& query) const
 {
     const SearchOptions& o = query.options();
-    if (o.installedOnly)
+    if (o.installedOnly && !d->hasState)
         return Error::notSupported("installed-only browsing needs state.sqlite");
+    const Impl::ReadSnapshot snapshot(*d);
     std::string key = o.category;
     key += '\0';
     key += o.backend ? toString(*o.backend) : "";
+    if (o.installedOnly) {
+        key += '\0';
+        key += "installed:" + d->stateVersion();
+    }
     if (key != d->lastBrowseKey) {
         Statement& s = d->browseRows;
         s.bind(1, std::string_view(o.category)).bind(2, o.backend ? toString(*o.backend) : std::string_view());
         d->bindLocales(s, 3);
+        if (d->hasState)
+            s.bind(static_cast<int>(d->locales.size()) + 3, std::int64_t(o.installedOnly));
         std::vector<std::int64_t> rows;
         int rc;
         while ((rc = s.step()) == SQLITE_ROW)
@@ -759,6 +866,7 @@ Result<std::vector<RecordedSource>> SqliteCatalog::sources() const
 
 Result<std::vector<AppSummary>> SqliteCatalog::summaries(std::span<const AppId> ids) const
 {
+    const Impl::ReadSnapshot snapshot(*d);
     std::vector<AppSummary> out;
     out.reserve(ids.size());
     for (const AppId& id : ids) {
