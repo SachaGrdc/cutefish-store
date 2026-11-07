@@ -1,8 +1,14 @@
 # Unit tests of store-core: no network, no privileges, no Cutefish session.
 
 add_executable(store-core-tests
+    fixtures.h
+    testapplication.cpp
     testerror.cpp
     testidentifiers.cpp
+    testinstalled.cpp
+    testoffer.cpp
+    testsearch.cpp
+    testsource.cpp
     testversion.cpp
 )
 target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main)

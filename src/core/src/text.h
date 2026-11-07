@@ -22,6 +22,9 @@ bool hasControlCharacters(std::string_view text, bool allowNewlines = false) noe
 /// Opaque identifier: 1 to 255 bytes of printable ASCII without spaces.
 Result<void> checkOpaqueIdentifier(std::string_view text, std::string_view what);
 
+/// Printable ASCII without spaces, 1 to maxBytes bytes (URLs, paths).
+Result<void> checkAsciiToken(std::string_view text, std::string_view what, std::size_t maxBytes);
+
 /// Display text: valid UTF-8, no control character, at most maxBytes.
 /// Empty text is accepted unless required.
 Result<void> checkText(std::string_view text, std::string_view what, std::size_t maxBytes, bool required,

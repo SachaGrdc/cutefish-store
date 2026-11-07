@@ -58,18 +58,23 @@ bool hasControlCharacters(std::string_view text, bool allowNewlines) noexcept
     return false;
 }
 
-Result<void> checkOpaqueIdentifier(std::string_view text, std::string_view what)
+Result<void> checkAsciiToken(std::string_view text, std::string_view what, std::size_t maxBytes)
 {
     if (text.empty())
         return Error::invalidArgument(std::string(what) + " is empty");
-    if (text.size() > kMaxIdentifierBytes)
-        return Error::invalidArgument(std::string(what) + " is longer than 255 bytes");
+    if (text.size() > maxBytes)
+        return Error::invalidArgument(std::string(what) + " is too long");
     for (const char ch : text) {
         const auto c = static_cast<unsigned char>(ch);
         if (c <= 0x20 || c >= 0x7F)
             return Error::invalidArgument(std::string(what) + " contains a character outside printable ASCII");
     }
     return {};
+}
+
+Result<void> checkOpaqueIdentifier(std::string_view text, std::string_view what)
+{
+    return checkAsciiToken(text, what, kMaxIdentifierBytes);
 }
 
 Result<void> checkText(std::string_view text, std::string_view what, std::size_t maxBytes, bool required,
