@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -68,5 +69,7 @@ private:
 /// Stable lowercase names, e.g. "invalid-argument", "auth-denied".
 std::string_view toString(ErrorCode code) noexcept;
 std::string_view toString(BackendFailure failure) noexcept;
+std::optional<ErrorCode> parseErrorCode(std::string_view text) noexcept;
+std::optional<BackendFailure> parseBackendFailure(std::string_view text) noexcept;
 
 } // namespace cutefish::store

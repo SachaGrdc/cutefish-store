@@ -21,6 +21,17 @@ std::string_view toString(TransactionState state) noexcept
     return "failed";
 }
 
+std::optional<TransactionState> parseTransactionState(std::string_view text) noexcept
+{
+    for (const TransactionState s :
+         {TransactionState::Queued, TransactionState::Planning, TransactionState::AwaitingConfirmation,
+          TransactionState::Running, TransactionState::Succeeded, TransactionState::Failed,
+          TransactionState::Cancelled, TransactionState::Interrupted})
+        if (toString(s) == text)
+            return s;
+    return std::nullopt;
+}
+
 bool isTerminal(TransactionState state) noexcept
 {
     switch (state) {
@@ -39,6 +50,49 @@ bool isTerminal(TransactionState state) noexcept
 }
 
 Transaction::Transaction(TransactionKind kind, ConfirmationPolicy policy) : m_policy(policy), m_kind(kind) {}
+
+Result<Transaction> Transaction::restore(TransactionSnapshot s, ConfirmationPolicy policy)
+{
+    const std::string where = " (" + std::string(toString(s.state)) + ")";
+    for (const auto* p : {&s.plan, &s.acceptedPlan})
+        if (*p && (*p)->kind() != s.kind)
+            return Error::invalidArgument("a restored plan does not match the transaction kind");
+    if (s.state == TransactionState::Queued && (s.plan || s.acceptedPlan))
+        return Error::invalidArgument("a queued transaction has no plan");
+    if (s.state == TransactionState::AwaitingConfirmation && !s.plan)
+        return Error::invalidArgument("a plan is required" + where);
+    if (s.state == TransactionState::Running && (!s.plan || !s.acceptedPlan))
+        return Error::invalidArgument("a plan and an accepted plan are required" + where);
+    if (s.planChanged && s.state != TransactionState::AwaitingConfirmation)
+        return Error::invalidArgument("plan-changed outside awaiting-confirmation");
+    if (s.error.has_value() != (s.state == TransactionState::Failed))
+        return Error::invalidArgument("an error is kept exactly in the failed state" + where);
+
+    Transaction t(s.kind, policy);
+    t.m_state = s.state;
+    t.m_accepted = std::move(s.acceptedPlan);
+    t.m_confirmedByUser = s.confirmedByUser;
+    t.m_error = std::move(s.error);
+    if (s.state == TransactionState::AwaitingConfirmation) {
+        // Recomputes reasons and concerns from the plan.
+        t.awaitConfirmation(std::move(*s.plan), s.planChanged);
+    } else {
+        t.m_plan = std::move(s.plan);
+    }
+    return t;
+}
+
+TransactionSnapshot Transaction::snapshot() const
+{
+    return {.kind = m_kind,
+            .state = m_state,
+            .plan = m_plan,
+            .acceptedPlan = m_accepted,
+            .planChanged = m_state == TransactionState::AwaitingConfirmation
+                    && m_reasons.contains(ConfirmationReason::PlanChanged),
+            .confirmedByUser = m_confirmedByUser,
+            .error = m_error};
+}
 
 Result<void> Transaction::expect(std::initializer_list<TransactionState> allowed, std::string_view action) const
 {

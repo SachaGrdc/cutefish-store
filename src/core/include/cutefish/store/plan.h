@@ -41,6 +41,9 @@ enum class PlanItemKind : std::uint8_t {
 std::string_view toString(TransactionKind kind) noexcept;
 std::string_view toString(PlanOperation operation) noexcept;
 std::string_view toString(PlanItemKind kind) noexcept;
+std::optional<TransactionKind> parseTransactionKind(std::string_view text) noexcept;
+std::optional<PlanOperation> parsePlanOperation(std::string_view text) noexcept;
+std::optional<PlanItemKind> parsePlanItemKind(std::string_view text) noexcept;
 
 /// Input of one plan item. Filled by a backend from its own simulation
 /// (PackageKit SIMULATE, the `ready` signal of a FlatpakTransaction); the

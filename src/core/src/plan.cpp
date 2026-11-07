@@ -105,6 +105,31 @@ std::string_view toString(PlanItemKind kind) noexcept
     return "package";
 }
 
+std::optional<TransactionKind> parseTransactionKind(std::string_view text) noexcept
+{
+    for (const TransactionKind k : {TransactionKind::Install, TransactionKind::Remove, TransactionKind::Update})
+        if (toString(k) == text)
+            return k;
+    return std::nullopt;
+}
+
+std::optional<PlanOperation> parsePlanOperation(std::string_view text) noexcept
+{
+    for (const PlanOperation o :
+         {PlanOperation::Install, PlanOperation::Update, PlanOperation::Downgrade, PlanOperation::Remove})
+        if (toString(o) == text)
+            return o;
+    return std::nullopt;
+}
+
+std::optional<PlanItemKind> parsePlanItemKind(std::string_view text) noexcept
+{
+    for (const PlanItemKind k : {PlanItemKind::Application, PlanItemKind::Runtime, PlanItemKind::Package})
+        if (toString(k) == text)
+            return k;
+    return std::nullopt;
+}
+
 std::vector<std::string> PlanItem::addedPermissions() const
 {
     std::vector<std::string> added;

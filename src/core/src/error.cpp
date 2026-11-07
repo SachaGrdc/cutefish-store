@@ -47,4 +47,25 @@ std::string_view toString(BackendFailure failure) noexcept
     return "unspecified";
 }
 
+std::optional<ErrorCode> parseErrorCode(std::string_view text) noexcept
+{
+    for (const ErrorCode c : {ErrorCode::InvalidArgument, ErrorCode::NotFound, ErrorCode::NotSupported,
+                              ErrorCode::Conflict, ErrorCode::Cancelled, ErrorCode::Backend, ErrorCode::Internal})
+        if (toString(c) == text)
+            return c;
+    return std::nullopt;
+}
+
+std::optional<BackendFailure> parseBackendFailure(std::string_view text) noexcept
+{
+    for (const BackendFailure f :
+         {BackendFailure::Unspecified, BackendFailure::Unavailable, BackendFailure::AuthDenied,
+          BackendFailure::AuthCancelled, BackendFailure::Network, BackendFailure::NoSpace, BackendFailure::Untrusted,
+          BackendFailure::Dependency, BackendFailure::PackageConflict, BackendFailure::Locked,
+          BackendFailure::Interrupted})
+        if (toString(f) == text)
+            return f;
+    return std::nullopt;
+}
+
 } // namespace cutefish::store

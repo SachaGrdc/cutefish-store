@@ -316,3 +316,68 @@ TEST(Transaction, StableNames)
     for (S s : {S::Succeeded, S::Failed, S::Cancelled, S::Interrupted})
         EXPECT_TRUE(isTerminal(s)) << toString(s);
 }
+
+// --- Snapshot and restore (state.sqlite) ------------------------------------
+
+TEST(TransactionSnapshot, RoundTripsEveryState)
+{
+    std::vector<Transaction> samples;
+    samples.emplace_back(TransactionKind::Install); // queued
+
+    Transaction planning(TransactionKind::Install);
+    ASSERT_TRUE(planning.startPlanning());
+    ASSERT_TRUE(planning.planReady(userInstall()));
+    samples.push_back(planning);
+
+    Transaction awaiting(TransactionKind::Update);
+    ASSERT_TRUE(awaiting.startPlanning());
+    ASSERT_TRUE(awaiting.planReady(systemUpdate(false)));
+    ASSERT_TRUE(awaiting.verifyExecutionPlan(systemUpdate(true))); // plan-changed
+    samples.push_back(awaiting);
+
+    Transaction running = planning;
+    ASSERT_TRUE(running.verifyExecutionPlan(userInstall()));
+    samples.push_back(running);
+
+    Transaction failed(TransactionKind::Install);
+    ASSERT_TRUE(failed.startPlanning());
+    ASSERT_TRUE(failed.fail(Error::backend(BackendFailure::Network, "timeout")));
+    samples.push_back(failed);
+
+    for (const Transaction& t : samples) {
+        auto restored = Transaction::restore(t.snapshot());
+        ASSERT_TRUE(restored) << toString(t.state()) << ": " << restored.error().message();
+        EXPECT_EQ(restored->state(), t.state());
+        EXPECT_EQ(restored->kind(), t.kind());
+        EXPECT_EQ(restored->reasons(), t.reasons());
+        EXPECT_EQ(restored->concerns(), t.concerns());
+        EXPECT_EQ(restored->confirmedByUser(), t.confirmedByUser());
+        EXPECT_EQ(restored->plan().has_value(), t.plan().has_value());
+        EXPECT_EQ(restored->acceptedPlan().has_value(), t.acceptedPlan().has_value());
+        EXPECT_EQ(restored->error(), t.error());
+    }
+
+    // A restored transaction keeps working.
+    auto again = Transaction::restore(awaiting.snapshot());
+    ASSERT_TRUE(again);
+    EXPECT_TRUE(again->reasons().contains(R::PlanChanged));
+    ASSERT_TRUE(again->confirm());
+    ASSERT_TRUE(again->verifyExecutionPlan(systemUpdate(true)));
+    EXPECT_EQ(again->state(), S::Running);
+}
+
+TEST(TransactionSnapshot, RefusesInconsistentSnapshots)
+{
+    auto refuse = [](TransactionSnapshot s) {
+        auto r = Transaction::restore(std::move(s));
+        ASSERT_FALSE(r);
+        EXPECT_EQ(r.error().code(), ErrorCode::InvalidArgument);
+    };
+    refuse({.kind = TransactionKind::Install, .state = S::Queued, .plan = userInstall()});
+    refuse({.kind = TransactionKind::Install, .state = S::AwaitingConfirmation});
+    refuse({.kind = TransactionKind::Install, .state = S::Running, .plan = userInstall()});
+    refuse({.kind = TransactionKind::Remove, .state = S::Planning, .plan = userInstall()});
+    refuse({.kind = TransactionKind::Install, .state = S::Planning, .planChanged = true});
+    refuse({.kind = TransactionKind::Install, .state = S::Failed});
+    refuse({.kind = TransactionKind::Install, .state = S::Succeeded, .error = Error::internal("x")});
+}

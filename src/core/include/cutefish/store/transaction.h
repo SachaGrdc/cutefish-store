@@ -28,7 +28,26 @@ enum class TransactionState : std::uint8_t {
 /// "queued", "planning", "awaiting-confirmation", "running", "succeeded",
 /// "failed", "cancelled", "interrupted".
 std::string_view toString(TransactionState state) noexcept;
+std::optional<TransactionState> parseTransactionState(std::string_view text) noexcept;
 bool isTerminal(TransactionState state) noexcept;
+
+/// Everything a Transaction needs to be rebuilt after a restart
+/// (state.sqlite, SERVICE.md §5.6). The confirmation reasons are not part
+/// of it: they are recomputed from the plan, and only the PlanChanged flag
+/// is kept. The last comparison is a diagnostic and is not kept either.
+struct TransactionSnapshot
+{
+    TransactionKind kind;
+    TransactionState state;
+    std::optional<Plan> plan = {};
+    std::optional<Plan> acceptedPlan = {};
+    /// The pending confirmation includes PlanChanged (awaiting-confirmation
+    /// only).
+    bool planChanged = false;
+    bool confirmedByUser = false;
+    /// Set exactly in the failed state.
+    std::optional<Error> error = {};
+};
 
 /// The state machine of one transaction, with its plans (P-008). It only
 /// records and decides: it calls no backend, keeps no time and creates no
@@ -63,6 +82,13 @@ class Transaction
 {
 public:
     explicit Transaction(TransactionKind kind, ConfirmationPolicy policy = {});
+
+    /// Rebuilds a transaction from a snapshot. Rules: the plans belong to
+    /// the transaction's kind; queued has no plan; awaiting-confirmation
+    /// has a plan; running has a plan and an accepted plan; planChanged only
+    /// in awaiting-confirmation; an error exactly in the failed state.
+    static Result<Transaction> restore(TransactionSnapshot snapshot, ConfirmationPolicy policy = {});
+    TransactionSnapshot snapshot() const;
 
     TransactionKind kind() const noexcept { return m_kind; }
     TransactionState state() const noexcept { return m_state; }
