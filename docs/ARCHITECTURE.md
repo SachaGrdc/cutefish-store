@@ -8,7 +8,8 @@ prototype 4 (PackageKit par D-Bus : conclusions validées intégrées au §7.2,
 transactions réelles encore non testées). Le code a commencé : cœur v0.1
 ([CORE.md](CORE.md)), puis catalogue SQLite et indexeur v0.2
 ([CATALOG.md](CATALOG.md)) ; le service, les backends et l'interface
-n'existent pas encore. Ce document décrit ce qui sera construit. Les décisions qu'il
+n'existent pas encore. La conception détaillée du service est proposée dans
+[SERVICE.md](SERVICE.md) (phase 0.4, à valider). Ce document décrit ce qui sera construit. Les décisions qu'il
 applique, et celles qui restent ouvertes, sont tenues à jour dans
 [DECISIONS.md](DECISIONS.md) (identifiants `D-`, `P-`, `O-`).
 
@@ -845,9 +846,10 @@ permission d'accès au système de fichiers de l'hôte. Ce n'est pas un objectif
 de la v1, mais l'API ne doit pas l'empêcher. Évolution prévue : passage de
 descripteurs de fichiers (type D-Bus `h`), par une méthode du type
 `OpenImage(s ref) → h` ou une variante de `ImagesReady`. Points à vérifier
-avant d'y recourir [À VALIDER] : prise en charge de `h` par `base::dbus`, et
-décodage depuis un descripteur ou depuis des octets par le toolkit
-(`ImageView` accepte un chemin ou des pixels [CODE]).
+avant d'y recourir : prise en charge de `h` par `base::dbus` — présente
+(type `UnixFd`) [CODE : en-têtes installés de cutefish-toolkit 1.0, phase
+0.4] ; décodage depuis un descripteur ou depuis des octets par le toolkit
+[À VALIDER] (`ImageView` accepte un chemin ou des pixels [CODE]).
 
 ---
 
@@ -1148,8 +1150,10 @@ partie générique et le transport ne changent pas.
 transport possède sa connexion sd-bus sur un thread dédié, avec sa propre
 boucle d'événements (§8.2) ; aucun autre thread ne touche cette connexion,
 sd-bus n'étant pas thread-safe. Le prototype 4 utilisait sd-bus et sd-event
-directement ; l'usage de `base::dbus` [CODE] sur une boucle distincte de la
-boucle principale de l'hôte reste à vérifier [À VALIDER]. Au démarrage,
+directement. `base::dbus` permet une connexion au bus système sur une boucle
+distincte de la boucle principale (`Connection::open(Bus::System, loop)`,
+une `EventLoop` par thread) [CODE : en-têtes installés de cutefish-toolkit
+1.0, lus en phase 0.4 ; non encore exercé, voir SERVICE.md §1.3]. Au démarrage,
 lecture de `BackendName`, `Roles`, `Filters`, `DistroId`, `Locked` [MESURÉ :
 propriétés présentes]. Si les rôles nécessaires manquent, le backend se
 déclare indisponible.
