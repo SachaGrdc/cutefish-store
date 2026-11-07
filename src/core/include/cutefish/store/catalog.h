@@ -40,6 +40,14 @@ public:
     /// out. The caller bounds the number of ids (200 over D-Bus, §5.2).
     virtual Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const = 0;
 
+    /// One page of applications without text, sorted by displayed name
+    /// (the name shown for the reader's languages, ASCII case ignored), then
+    /// by id; filters as for search().
+    virtual Result<SearchPage> browse(const BrowseQuery& query) const = 0;
+
+    /// Every category with its number of applications, sorted by name.
+    virtual Result<std::vector<CategoryCount>> listCategories() const = 0;
+
     /// The sources this snapshot was built from, sorted by id, with the
     /// fingerprint of what was imported and the number of offers.
     virtual Result<std::vector<RecordedSource>> sources() const = 0;

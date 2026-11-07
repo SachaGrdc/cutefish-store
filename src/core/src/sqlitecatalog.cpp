@@ -168,12 +168,15 @@ struct SqliteCatalog::Impl
 
     mutable Statement appById, appByAlias, appByRow, offersOfApp, displayTexts, allTexts, categoriesOfApp,
             aliasesOfApp, exactNames, prefixNames, words, substrings, fuzzyCandidates, namesOfApp, inCategory,
-            hasBackend;
+            hasBackend, browseRows, categoryCounts;
 
     // Result list of the last search (application rows, ranked), reused when
     // only the page changes.
     mutable std::string lastKey;
     mutable std::vector<std::int64_t> lastResults;
+    // Same for the last browse: row numbers only.
+    mutable std::string lastBrowseKey;
+    mutable std::vector<std::int64_t> lastBrowseResults;
 
     std::size_t localeRank(std::string_view locale) const noexcept
     {
@@ -235,6 +238,25 @@ struct SqliteCatalog::Impl
                                 " WHERE o.app = ?1 AND t.field IN (0, 1, 2) AND t.locale IN " + inLocales;
         const std::string names = "SELECT t.value FROM texts t JOIN offers o ON o.id = t.offer"
                                   " WHERE o.app = ?1 AND t.field = 0 AND t.locale IN " + inLocales;
+        // Browse order: the name displayed for the reader's languages, chosen
+        // like chooseTexts(): the first language of the chain that has a
+        // name, then the offer of highest source priority, then the offer
+        // id. One subquery per language, all on indexed columns.
+        std::string sortName = "coalesce(";
+        for (std::size_t i = 0; i < locales.size(); ++i) {
+            if (i)
+                sortName += ", ";
+            sortName += "(SELECT t.value FROM offers o JOIN sources s ON s.id = o.source"
+                        " JOIN texts t ON t.offer = o.id AND t.field = 0 AND t.locale = ?"
+                    + std::to_string(i + 3) + " WHERE o.app = a.id ORDER BY s.priority DESC, o.offer_id LIMIT 1)";
+        }
+        sortName += ", '')";
+        const std::string browse =
+                "SELECT a.id FROM apps a"
+                " WHERE (?1 = '' OR EXISTS (SELECT 1 FROM app_categories c WHERE c.category = ?1 AND c.app = a.id))"
+                " AND (?2 = '' OR EXISTS (SELECT 1 FROM offers o JOIN sources s ON s.id = o.source"
+                " WHERE o.app = a.id AND s.backend = ?2))"
+                " ORDER BY " + sortName + " COLLATE NOCASE, a.app_id";
         struct Item
         {
             Statement* target;
@@ -266,6 +288,8 @@ struct SqliteCatalog::Impl
             {&inCategory, "SELECT 1 FROM app_categories WHERE category = ?1 AND app = ?2"},
             {&hasBackend, "SELECT 1 FROM offers o JOIN sources s ON s.id = o.source WHERE o.app = ?1 AND s.backend = ?2"
                           " LIMIT 1"},
+            {&browseRows, browse},
+            {&categoryCounts, "SELECT category, count(*) FROM app_categories GROUP BY category ORDER BY category"},
         };
         for (const Item& item : items) {
             auto stmt = Statement::prepare(db, item.sql.c_str());
@@ -641,6 +665,56 @@ Result<SearchPage> SqliteCatalog::search(const SearchQuery& query) const
         page.items.push_back(std::move(s).value());
     }
     return page;
+}
+
+Result<SearchPage> SqliteCatalog::browse(const BrowseQuery& query) const
+{
+    const SearchOptions& o = query.options();
+    if (o.installedOnly)
+        return Error::notSupported("installed-only browsing needs state.sqlite");
+    std::string key = o.category;
+    key += '\0';
+    key += o.backend ? toString(*o.backend) : "";
+    if (key != d->lastBrowseKey) {
+        Statement& s = d->browseRows;
+        s.bind(1, std::string_view(o.category)).bind(2, o.backend ? toString(*o.backend) : std::string_view());
+        d->bindLocales(s, 3);
+        std::vector<std::int64_t> rows;
+        int rc;
+        while ((rc = s.step()) == SQLITE_ROW)
+            rows.push_back(s.columnInt(0));
+        s.reset();
+        if (rc != SQLITE_DONE)
+            return d->db.error("browsing the catalogue");
+        d->lastBrowseResults = std::move(rows);
+        d->lastBrowseKey = std::move(key);
+    }
+    const std::vector<std::int64_t>& rows = d->lastBrowseResults;
+    SearchPage page{.generation = d->generation};
+    page.total = static_cast<std::uint32_t>(std::min<std::size_t>(rows.size(), UINT32_MAX));
+    const std::size_t begin = std::min<std::size_t>(o.offset, rows.size());
+    const std::size_t end = std::min<std::size_t>(begin + o.limit, rows.size());
+    page.items.reserve(end - begin);
+    for (std::size_t i = begin; i < end; ++i) {
+        auto s = d->summary(rows[i]);
+        if (!s)
+            return std::move(s).error();
+        page.items.push_back(std::move(s).value());
+    }
+    return page;
+}
+
+Result<std::vector<CategoryCount>> SqliteCatalog::listCategories() const
+{
+    std::vector<CategoryCount> out;
+    Statement& s = d->categoryCounts;
+    int rc;
+    while ((rc = s.step()) == SQLITE_ROW)
+        out.push_back({std::string(s.columnText(0)), static_cast<std::uint32_t>(s.columnInt(1))});
+    s.reset();
+    if (rc != SQLITE_DONE)
+        return d->db.error("listing categories");
+    return out;
 }
 
 Result<std::vector<RecordedSource>> SqliteCatalog::sources() const

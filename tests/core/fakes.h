@@ -11,6 +11,7 @@
 #include <cctype>
 #include <deque>
 #include <functional>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -113,6 +114,44 @@ public:
             ++page.total;
         }
         return page;
+    }
+
+    Result<SearchPage> browse(const BrowseQuery& query) const override
+    {
+        const SearchOptions& o = query.options();
+        std::vector<const Application*> sorted;
+        for (const Application& a : m_apps)
+            sorted.push_back(&a);
+        std::sort(sorted.begin(), sorted.end(), [](const Application* x, const Application* y) {
+            const std::string a = lower(x->name()), b = lower(y->name());
+            return a != b ? a < b : x->id() < y->id();
+        });
+        SearchPage page{.generation = m_generation, .total = 0, .items = {}};
+        for (const Application* a : sorted) {
+            if (!o.category.empty() && !a->hasCategory(o.category))
+                continue;
+            if (o.backend && !a->hasBackend(*o.backend))
+                continue;
+            AppSummary s = summarize(*a);
+            if (o.installedOnly && !s.installed)
+                continue;
+            if (page.total >= o.offset && page.items.size() < o.limit)
+                page.items.push_back(std::move(s));
+            ++page.total;
+        }
+        return page;
+    }
+
+    Result<std::vector<CategoryCount>> listCategories() const override
+    {
+        std::map<std::string, std::uint32_t> counts;
+        for (const Application& a : m_apps)
+            for (const std::string& c : a.categories())
+                ++counts[c];
+        std::vector<CategoryCount> out;
+        for (const auto& [c, n] : counts)
+            out.push_back({c, n});
+        return out;
     }
 
     /// What sources() returns; set by the test.

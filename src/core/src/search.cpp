@@ -16,4 +16,13 @@ Result<SearchQuery> SearchQuery::create(std::string text, SearchOptions options)
     return SearchQuery(std::move(text), std::move(options));
 }
 
+Result<BrowseQuery> BrowseQuery::create(SearchOptions options)
+{
+    // Same option rules as a search, without text.
+    auto checked = SearchQuery::create({}, std::move(options));
+    if (!checked)
+        return std::move(checked).error();
+    return BrowseQuery(checked->options());
+}
+
 } // namespace cutefish::store

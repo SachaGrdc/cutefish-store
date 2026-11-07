@@ -73,10 +73,11 @@ public:
     static Result<Statement> prepare(Database& db, const char* sql);
 
     /// Parameters are 1-based. Text is bound with SQLITE_STATIC: the caller
-    /// keeps it alive until the statement is reset.
+    /// keeps it alive until the statement is reset. An empty text is bound
+    /// as '' even when its pointer is null (SQLite would bind NULL).
     Statement& bind(int index, std::string_view text) noexcept
     {
-        sqlite3_bind_text(m_stmt, index, text.data(), static_cast<int>(text.size()), SQLITE_STATIC);
+        sqlite3_bind_text(m_stmt, index, text.data() ? text.data() : "", static_cast<int>(text.size()), SQLITE_STATIC);
         return *this;
     }
     Statement& bind(int index, std::int64_t value) noexcept

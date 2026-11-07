@@ -211,6 +211,37 @@ int main(int argc, char** argv)
     const Stats p = stats(pageTimes);
     std::printf("summaries ids=60 p50_ms=%.3f p95_ms=%.3f max_ms=%.3f\n", p.p50, p.p95, p.max);
 
+    // Browsing (Catalogue v0.3): the first page sorts the whole catalogue (or
+    // category); the following pages reuse the sorted row numbers.
+    {
+        const auto categories = c.listCategories();
+        const auto a = Clock::now();
+        auto first = c.browse(*BrowseQuery::create({.limit = 60}));
+        const auto b = Clock::now();
+        std::vector<double> next;
+        for (std::uint32_t offset = 60; offset < 60 * 21; offset += 60) {
+            const auto s = Clock::now();
+            auto r = c.browse(*BrowseQuery::create({.limit = 60, .offset = offset}));
+            next.push_back(ms(s, Clock::now()));
+        }
+        const Stats n = stats(next);
+        std::vector<double> perCategory;
+        if (categories)
+            for (std::size_t i = 0; i < std::min<std::size_t>(30, categories->size()); ++i) {
+                const auto s = Clock::now();
+                auto r = c.browse(*BrowseQuery::create({.limit = 60, .category = (*categories)[i].category}));
+                perCategory.push_back(ms(s, Clock::now()));
+            }
+        const auto lc = Clock::now();
+        auto again = c.listCategories();
+        const double listMs = ms(lc, Clock::now());
+        const Stats pc = perCategory.empty() ? Stats{0, 0, 0, 0} : stats(perCategory);
+        std::printf("browse total=%u first_page_ms=%.3f next_page_p50_ms=%.3f next_page_p95_ms=%.3f "
+                    "category_first_page_p50_ms=%.3f category_first_page_max_ms=%.3f categories=%zu list_categories_ms=%.3f\n",
+                    first ? first->total : 0u, ms(a, b), n.p50, n.p95, pc.p50, pc.max,
+                    again ? again->size() : std::size_t(0), listMs);
+    }
+
     // Several readers, one connection each (ARCHITECTURE §8.4).
     std::atomic<int> errors{0};
     std::vector<std::vector<double>> perThread(static_cast<std::size_t>(readers));

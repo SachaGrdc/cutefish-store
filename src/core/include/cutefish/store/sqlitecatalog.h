@@ -52,6 +52,11 @@ public:
     /// NotSupported; `installed` and `hasUpdate` are always false here.
     Result<SearchPage> search(const SearchQuery& query) const override;
     Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const override;
+    /// The sorted list of matching rows is kept, as for a search, so that
+    /// turning pages does not sort again; only row numbers are kept, never
+    /// the applications themselves.
+    Result<SearchPage> browse(const BrowseQuery& query) const override;
+    Result<std::vector<CategoryCount>> listCategories() const override;
     Result<std::vector<RecordedSource>> sources() const override;
 
 private:

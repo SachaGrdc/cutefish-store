@@ -65,6 +65,32 @@ private:
     SearchOptions m_options;
 };
 
+/// A validated request to list applications without text (Browse,
+/// ARCHITECTURE §5.2): same options and rules as a search, the category
+/// empty for the whole catalogue.
+class BrowseQuery
+{
+public:
+    /// Rules: limit 1 to 200; category, when given, a valid category name.
+    static Result<BrowseQuery> create(SearchOptions options = {});
+
+    const SearchOptions& options() const noexcept { return m_options; }
+
+private:
+    explicit BrowseQuery(SearchOptions options) : m_options(std::move(options)) {}
+    SearchOptions m_options;
+};
+
+/// One category of the catalogue (ListCategories). The display name and
+/// icon of a freedesktop category belong to the interface.
+struct CategoryCount
+{
+    std::string category;
+    std::uint32_t applications = 0;
+
+    bool operator==(const CategoryCount&) const = default;
+};
+
 /// What a list row needs, without a second round trip (ARCHITECTURE §5.4).
 struct AppSummary
 {
