@@ -4,12 +4,18 @@
 
 set(STORE_CORE_PUBLIC_HEADERS
     include/cutefish/store/error.h
+    include/cutefish/store/identifiers.h
     include/cutefish/store/result.h
+    include/cutefish/store/version.h
 )
 
 add_library(store-core STATIC
     ${STORE_CORE_PUBLIC_HEADERS}
     src/error.cpp
+    src/identifiers.cpp
+    src/text.cpp
+    src/text.h
+    src/version.cpp
 )
 
 target_include_directories(store-core

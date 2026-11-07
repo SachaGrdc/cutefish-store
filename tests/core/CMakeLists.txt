@@ -2,6 +2,8 @@
 
 add_executable(store-core-tests
     testerror.cpp
+    testidentifiers.cpp
+    testversion.cpp
 )
 target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main)
 target_compile_options(store-core-tests PRIVATE -Wall -Wextra)
