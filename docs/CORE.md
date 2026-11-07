@@ -1,4 +1,4 @@
-# Cutefish Store — Le cœur (`store-core`), v0.2
+# Cutefish Store — Le cœur (`store-core`), v0.3a
 
 `store-core` est la bibliothèque qui porte la logique métier de la boutique.
 Elle applique les décisions de [ARCHITECTURE.md](ARCHITECTURE.md) et de
@@ -15,6 +15,10 @@ documents qui font foi.
 - Depuis la v0.2 : le catalogue SQLite (écriture d'un candidat, validation,
   remplacement atomique, lecture et recherche), décrit dans
   [CATALOG.md](CATALOG.md).
+- Depuis la v0.3a : les plans de transaction, la politique de confirmation,
+  la comparaison de plans, la machine d'états des transactions et le choix
+  de l'offre proposée par défaut (D-009). Ce sont des fonctions pures : elles
+  décident, mais n'appellent aucun backend.
 
 Le cœur ne dépend que de C++20, de la bibliothèque standard et de SQLite
 (P-006) :
@@ -52,8 +56,8 @@ tests/perf/                        store-catalog-bench (hors ctest)
 - Les détails d'implémentation (`cutefish::store::detail`) restent dans
   `src/core/src/`.
 
-L'état installé (`state.sqlite`), les transactions et les images
-viendront dans `src/core/src/` avec les composants correspondants.
+L'état installé (`state.sqlite`) et les images viendront dans
+`src/core/src/` avec les composants correspondants.
 
 ## Erreurs et résultats
 
@@ -151,9 +155,10 @@ Contrat de `Backend` :
 - les échecs du gestionnaire de paquets sont des erreurs `Backend` avec leur
   `BackendFailure`.
 
-La planification, l'exécution, l'annulation, les mises à jour et les
-notifications de changement (§7.1) seront ajoutées avec le modèle des
-transactions.
+Les opérations de planification, d'exécution, d'annulation, de mises à
+jour et de notification de changement (§7.1) seront ajoutées à `Backend` à
+l'étape D (SERVICE.md §15) ; les types qu'elles échangent (`Plan`) existent
+depuis la v0.3a.
 
 `tests/core/fakes.h` contient des implémentations en mémoire de chaque
 interface, utilisées par les tests ; elles ne font pas partie de
@@ -163,6 +168,113 @@ Autres API publiques du catalogue (v0.2, [CATALOG.md](CATALOG.md)) :
 `CatalogWriter` (`catalogwriter.h`), qui écrit un catalogue candidat, et
 `inspectCatalog` / `replaceCatalog` (`catalogfile.h`), qui le valident et le
 mettent en service.
+
+## Plans, confirmation et transactions (v0.3a)
+
+Ces types appliquent P-008, D-011 et D-014 sans rien savoir de Cutefish, de
+D-Bus, de polkit, de PackageKit ni de libflatpak. Le cœur **décrit** ce qui
+doit être confirmé ; il n'authentifie personne. L'autorisation reste aux
+gestionnaires de paquets et à polkit (ARCHITECTURE §9).
+
+### `Plan` (`plan.h`)
+
+Ce qu'une transaction fera, tel que le backend l'a calculé (simulation
+PackageKit, signal `ready` d'une `FlatpakTransaction`). Un plan appartient à
+**un** backend et **une** installation, et porte le type de la transaction
+(`install`, `remove`, `update`). Chaque `PlanItem` :
+
+| Champ | Sens |
+|---|---|
+| `operation` | `install`, `update`, `downgrade`, `remove` |
+| `kind` | `application`, `runtime`, `package` |
+| `requested` | Demandé par l'utilisateur, ou ajouté par le gestionnaire (dépendance, runtime, suppression en cascade) |
+| `package` | Nom de paquet ou ref Flatpak complète, unique dans le plan |
+| `fromVersion`, `toVersion` | Versions avant et après, si connues |
+| `origin`, `revision` | Dépôt ou remote ; identifiant de construction immuable (commit Flatpak) |
+| `downloadSize` | Taille annoncée |
+| `permissions`, `oldPermissions` | Chaînes stables choisies par le backend, triées et dédoublonnées par `Plan::create` |
+| `addsSource`, `rebaseFrom`, `trusted` | Ajout d'une remote, remplacement en fin de vie, authentification |
+
+Règles de `Plan::create` : au moins un élément demandé ; un élément demandé
+fait ce que la transaction demande ; pas de version cible pour une
+suppression ni de version précédente pour une installation ; schéma de
+version du backend ; PackageKit toujours en système. Les éléments ajoutés
+peuvent tout faire : une mise à jour peut installer un runtime (D-014).
+
+### Politique de confirmation (`confirmation.h`)
+
+`assessPlan(plan, policy)` rend les raisons (`ConfirmationReasons`) et, pour
+chacune, l'élément qui la cause (`ConfirmationConcern`), pour que
+l'interface montre par exemple le runtime système qu'une mise à jour
+installerait.
+
+| Raison | Règle, élément par élément |
+|---|---|
+| `removes-packages` | Suppression non demandée |
+| `new-permissions` | Permissions absentes avant l'opération (toutes, pour une installation) |
+| `new-source`, `rebase`, `untrusted` | Indicateurs de l'élément |
+| `system-scope` | Installation ou suppression, demandée ou non, dans l'installation système d'un backend de `policy.sharedSystemScope` (Flatpak par défaut, D-011), **quel que soit le type de transaction** : un runtime installé par une mise à jour système compte (D-014) |
+| `plan-changed` | Jamais produite ici : vient de la comparaison |
+
+Les paquets de la distribution ne sont pas dans `sharedSystemScope` par
+défaut : P-008 ne demande pas de confirmation pour eux. C'est une donnée de
+la politique, pas une règle codée en dur.
+
+### Comparaison de plans
+
+`comparePlans(accepted, fresh)` applique la comparaison sémantique de P-008
+(seconde passe Flatpak, nouvelle simulation PackageKit) :
+
+| Différence | Verdict |
+|---|---|
+| Type, backend ou installation différents | Nouvelle confirmation, rien d'autre n'est comparé |
+| Élément ajouté (dépendance comprise) | Nouvelle confirmation |
+| Élément ajouté par le gestionnaire, qui installait ou mettait à jour, disparu | Compatible (déjà satisfait) |
+| Tout autre élément disparu (demandé, ou suppression) | Nouvelle confirmation |
+| Opération, nature, demande, origine, révision, version changées | Nouvelle confirmation |
+| Permission nouvelle par rapport au plan accepté | Nouvelle confirmation |
+| Ajout d'une source, rebase changé, perte d'authentification | Nouvelle confirmation |
+| Permissions seulement retirées, risque réduit, taille changée | Compatible |
+
+Tout ce qui n'est pas explicitement inoffensif exige une confirmation. Les
+différences sont triées par paquet puis par nature : le résultat ne dépend
+pas de l'ordre des éléments.
+
+### Machine d'états (`transaction.h`)
+
+`Transaction` enregistre et décide ; l'hôte la pilote depuis son thread
+principal. États et transitions : ARCHITECTURE §3.5.
+
+- `planReady(plan)` : premier plan sans raison ⇒ `running` (accepté tel
+  quel) ; sinon `awaiting-confirmation`. Après `confirm()`, le plan est
+  comparé au plan accepté : `running` s'il est compatible, sinon retour en
+  `awaiting-confirmation` avec `plan-changed`.
+- `verifyExecutionPlan(plan)` : dernière vérification du plan que le backend
+  va exécuter, même comparaison. Sur une différence : retour en
+  `awaiting-confirmation`, rien n'est exécuté. `succeed()` est refusé tant
+  que cette vérification n'a pas eu lieu : aucune opération non confirmée ne
+  s'exécute en silence, même quand le premier plan n'exigeait rien (D-014).
+- Une transition interdite rend `Conflict` et ne change rien ; un plan d'un
+  autre type rend `InvalidArgument`.
+- Ni délai ni horloge : le délai de confirmation (SERVICE.md §5.3) est
+  appliqué par l'hôte, qui appelle `cancel()`.
+
+## Offre proposée par défaut (`defaultoffer.h`, D-009)
+
+`defaultOffer(offers, installed)` choisit, dans l'ordre :
+
+1. une offre installée (son identifiant figure dans `installed`) ;
+2. le rang `offerRank()` : Flathub, puis deb de la distribution, puis
+   Flatpak d'une remote tierce, puis les offres non classées (deb d'un dépôt
+   APT tiers, remote Flatpak marquée « distribution ») ;
+3. l'installation utilisateur avant l'installation système (D-005) ;
+4. le plus petit identifiant d'offre.
+
+La clé est totale : le résultat ne dépend ni de l'ordre des offres rendu par
+SQLite, ni de l'ordre de `installed`. Elle n'utilise jamais
+`Source::priority`, qui ne règle que les textes affichés (priorité
+éditoriale, CATALOG §4). La fonction est appliquée à la lecture et jamais
+stockée, puisqu'elle dépend de l'état installé.
 
 ## Performance
 

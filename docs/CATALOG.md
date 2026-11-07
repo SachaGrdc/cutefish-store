@@ -279,8 +279,8 @@ Flathub, puis la distribution, puis une remote Flatpak tierce), fondée sur la
 nature des sources et l'état installé. Elle n'est pas dans le catalogue :
 `Offer` ne porte pas de marque « par défaut », et l'ordre des offres rendu par
 le catalogue suit la priorité éditoriale, **pas** la priorité
-d'installation. La fonction qui l'applique est prévue en Core v0.3
-(SERVICE.md §14 et §15, étape A).
+d'installation. Elle est appliquée à la lecture par `defaultOffer()`
+(`defaultoffer.h`, Core v0.3a, [CORE.md](CORE.md)).
 
 ## 5. Localisation
 
@@ -472,8 +472,9 @@ réussis avec GCC, avec ASan et UBSan [MESURÉ].
 
 ## 10. Limites connues
 
-- **D-009** : l'offre par défaut n'est pas encore calculée (Core v0.3) ; le
-  catalogue n'en stocke pas.
+- **D-009** : le catalogue ne stocke pas l'offre par défaut ; elle est
+  calculée à la lecture par `defaultOffer()` (Core v0.3a), avec l'état
+  installé.
 - Composants autres que `desktop-application` (console, polices, modules
   complémentaires) non importés.
 - Rangs 1 et 2 sensibles aux accents (casse ASCII seulement).

@@ -58,6 +58,57 @@ inline Source flathubSource(Scope scope = Scope::User)
                                   .priority = 20}));
 }
 
+inline Source thirdPartyFlatpakSource(const char* remote = "kde-nightly", Scope scope = Scope::User)
+{
+    std::string id = std::string("flatpak:") + std::string(toString(scope)) + ":" + remote;
+    return unwrap(Source::create({.id = unwrap(SourceId::parse(id)),
+                                  .backend = BackendKind::Flatpak,
+                                  .scope = scope,
+                                  .kind = SourceKind::ThirdParty,
+                                  .origin = remote,
+                                  .priority = 30}));
+}
+
+inline Source thirdPartyAptSource()
+{
+    return unwrap(Source::create({.id = unwrap(SourceId::parse("packagekit:vendor-stable-main")),
+                                  .backend = BackendKind::PackageKit,
+                                  .scope = Scope::System,
+                                  .kind = SourceKind::ThirdParty,
+                                  .origin = "vendor-stable-main",
+                                  .priority = 40}));
+}
+
+inline Source distributionFlatpakSource()
+{
+    return unwrap(Source::create({.id = unwrap(SourceId::parse("flatpak:system:debian")),
+                                  .backend = BackendKind::Flatpak,
+                                  .scope = Scope::System,
+                                  .kind = SourceKind::Distribution,
+                                  .origin = "debian",
+                                  .priority = 50}));
+}
+
+/// A Flatpak offer from any source.
+inline Offer flatpakOfferFrom(const Source& source, const char* ref = "app/org.mozilla.firefox/x86_64/stable")
+{
+    return unwrap(Offer::create({.format = PackageFormat::Flatpak,
+                                 .package = ref,
+                                 .version = unwrap(Version::upstream("128.4.0")),
+                                 .architecture = {}},
+                                source));
+}
+
+/// A deb offer from any PackageKit source.
+inline Offer debOfferFrom(const Source& source, const char* package = "firefox-esr")
+{
+    return unwrap(Offer::create({.format = PackageFormat::Deb,
+                                 .package = package,
+                                 .version = unwrap(Version::debian("128.4.0esr-1")),
+                                 .architecture = {}},
+                                source));
+}
+
 inline Offer debOffer(const char* package, const char* version = "128.4.0esr-1")
 {
     return unwrap(Offer::create({.format = PackageFormat::Deb,

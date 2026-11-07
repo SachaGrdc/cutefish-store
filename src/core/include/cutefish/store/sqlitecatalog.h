@@ -26,9 +26,11 @@ struct CatalogReadOptions
 /// opened, even after a replacement; open a new one to see the new
 /// generation (docs/CATALOG.md, "Reconstruction atomique").
 ///
-/// Displayed texts: for each field, the text of the offer whose source has
-/// the highest priority among those that provide it in the best available
-/// language. This interim rule does not choose a default offer (D-009).
+/// Displayed texts (editorial priority): for each field, the text of the
+/// offer whose source has the highest priority among those that provide it
+/// in the best available language. Offers come in the same order. This
+/// order is not the installation priority: the offer proposed by default is
+/// chosen by defaultOffer() (defaultoffer.h, D-009), never by position.
 ///
 /// One instance per thread; it keeps prepared statements and the result
 /// list of the last search, so that turning pages does not search again.

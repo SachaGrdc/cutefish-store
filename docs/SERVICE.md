@@ -445,7 +445,7 @@ Conséquences :
 
 ## 5. Modèle des transactions
 
-### 5.1 Machine d'états (ARCHITECTURE §3.5, inchangée)
+### 5.1 Machine d'états (ARCHITECTURE §3.5, complétée en Core v0.3a)
 
 ```mermaid
 stateDiagram-v2
@@ -461,6 +461,10 @@ stateDiagram-v2
     running --> failed
     running --> cancelled: annulation acceptée par le backend
     running --> interrupted: service arrêté (Flatpak), transaction PackageKit perdue
+    running --> awaiting_confirmation: plan d'exécution différent du plan accepté
+    planning --> cancelled: Cancel()
+    queued --> interrupted: reprise (§5.6)
+    planning --> interrupted: reprise (§5.6)
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
@@ -1008,6 +1012,10 @@ Comparaison des interfaces de `store-core` v0.2 avec ce que les décisions
 D-009, D-013 à D-016 et ce document demandent [CODE : lecture des en-têtes
 de `src/core/include/cutefish/store/`]. Aucun ne contredit une décision : ce
 sont des manques, sauf le premier, qui est un commentaire périmé.
+
+**État après le Core v0.3a** : les écarts 1, 2, 4 et 6 sont traités
+(`plan.h`, `confirmation.h`, `transaction.h`, `defaultoffer.h` ; détails dans
+[CORE.md](CORE.md)). Les autres restent aux étapes B à D.
 
 | # | Écart | Où | Conséquence | Traitement |
 |---|---|---|---|---|

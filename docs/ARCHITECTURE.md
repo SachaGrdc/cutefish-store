@@ -347,6 +347,10 @@ stateDiagram-v2
     planning --> failed
     queued --> cancelled: Cancel()
     running --> interrupted: le service s'est arrêté
+    running --> awaiting_confirmation: plan d'exécution différent, rien n'est exécuté
+    planning --> cancelled: Cancel()
+    queued --> interrupted: le service s'est arrêté
+    planning --> interrupted: le service s'est arrêté
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
@@ -357,6 +361,21 @@ Après `Confirm()`, la transaction repasse par `planning` : seconde passe
 Flatpak (P-008, §7.3) ou nouvelle simulation PackageKit si le catalogue ou
 l'état ont changé (§5.5). Si le nouveau plan diffère de façon pertinente du
 plan confirmé, elle revient en `awaiting-confirmation`.
+
+Transitions ajoutées par le Core v0.3a ([CORE.md](CORE.md), « Plans,
+confirmation et transactions ») [À VALIDER] :
+
+- `running → awaiting-confirmation` : juste avant d'exécuter, le backend
+  soumet le plan qu'il va réellement exécuter (seconde passe Flatpak,
+  nouvelle simulation PackageKit). S'il diffère du plan accepté, rien n'est
+  exécuté et l'utilisateur est consulté avec la raison `plan-changed`. C'est
+  le seul moyen de ne rien exécuter en silence quand le premier plan
+  n'exigeait aucune confirmation (D-014 : runtime système apparu à la
+  seconde passe). Une transaction ne peut pas réussir sans cette
+  vérification ;
+- `planning → cancelled` : annulation pendant le calcul du plan ;
+- `queued → interrupted` et `planning → interrupted` : reprise après un arrêt
+  du service (SERVICE.md §5.6).
 
 Pendant `running`, une **phase** plus fine est publiée : `waiting-for-auth`,
 `waiting-for-lock`, `downloading`, `installing`, `removing`, `finishing`. Elle

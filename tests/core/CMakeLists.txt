@@ -4,17 +4,22 @@ add_executable(store-core-tests
     catalogfixture.h
     fakes.h
     fixtures.h
+    planfixtures.h
     testaliases.cpp
     testapplication.cpp
     testcatalog.cpp
     testcatalogfile.cpp
+    testconfirmation.cpp
+    testdefaultoffer.cpp
     testerror.cpp
     testidentifiers.cpp
     testinstalled.cpp
     testinterfaces.cpp
     testoffer.cpp
+    testplan.cpp
     testsearch.cpp
     testsource.cpp
+    testtransaction.cpp
     testversion.cpp
 )
 find_package(Threads REQUIRED)
