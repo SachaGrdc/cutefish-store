@@ -14,8 +14,15 @@ interface, D-Bus service or package backend yet.
 
 ## Build and test
 
-Requires CMake ≥ 3.22, a C++20 compiler, pkg-config and SQLite with FTS5;
-the indexer also needs libappstream and libxml2, and the tests GoogleTest.
+On Debian 13:
+
+```bash
+sudo apt install build-essential cmake ninja-build pkg-config \
+    libsqlite3-dev libappstream-dev libxml2-dev libgtest-dev
+```
+
+Details, and how the list was checked: [docs/CATALOG.md](docs/CATALOG.md),
+"Dépendances".
 
 ```bash
 cmake -S . -B build -G Ninja -DBUILD_TESTING=ON

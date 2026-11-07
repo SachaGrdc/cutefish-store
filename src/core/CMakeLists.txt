@@ -4,7 +4,11 @@
 # only external dependency, for the catalogue (ARCHITECTURE §12.1).
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3>=3.34)
+pkg_check_modules(SQLITE3 IMPORTED_TARGET sqlite3>=3.34)
+if(NOT SQLITE3_FOUND)
+    message(FATAL_ERROR "store-core needs SQLite >= 3.34 with its development files "
+                        "(Debian: libsqlite3-dev). See docs/CATALOG.md, \"Dépendances\".")
+endif()
 
 set(STORE_CORE_PUBLIC_HEADERS
     include/cutefish/store/application.h

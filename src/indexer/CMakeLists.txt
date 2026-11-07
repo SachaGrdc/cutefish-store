@@ -3,8 +3,14 @@
 # never sees their headers.
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(APPSTREAM REQUIRED IMPORTED_TARGET appstream>=1.0)
-pkg_check_modules(LIBXML2 REQUIRED IMPORTED_TARGET libxml-2.0)
+pkg_check_modules(APPSTREAM IMPORTED_TARGET appstream>=1.0)
+pkg_check_modules(LIBXML2 IMPORTED_TARGET libxml-2.0)
+if(NOT APPSTREAM_FOUND OR NOT LIBXML2_FOUND)
+    message(FATAL_ERROR "cutefish-store-indexer needs libappstream >= 1.0 and libxml2 with their "
+                        "development files (Debian: libappstream-dev libxml2-dev; libxml2-dev is not "
+                        "a dependency of libappstream-dev). Configure with "
+                        "-DCUTEFISH_STORE_BUILD_INDEXER=OFF to build without the indexer.")
+endif()
 
 add_library(store-indexer STATIC
     importer.cpp

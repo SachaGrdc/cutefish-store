@@ -2003,7 +2003,7 @@ Les versions « mesurées » sont celles de la machine d'audit (Debian 13).
 | libflatpak | `backends/flatpak` | Backend Flatpak | Version minimale à fixer après revue de l'API utilisée ; ≥ 1.14 visé [HYPOTHÈSE] | 1.16.6 |
 | GLib / GIO | libflatpak, libappstream ; directement dans l'indexeur (décompression en flux du DEP-11) | — | Celle des deux bibliothèques | 2.84 |
 | libappstream | `indexer` | Lecture AppStream | **≥ 1.0** : l'API 1.0 diffère de la série 0.16 | 1.0.5 |
-| libxml2 | `indexer` | Lecture en flux du XML Flathub, conversion du balisage des descriptions | Celle de libappstream, qui en dépend déjà | 2.9.14 |
+| libxml2 | `indexer` | Lecture en flux du XML Flathub, conversion du balisage des descriptions | Celle de libappstream, qui en dépend déjà ; ses fichiers de développement (`libxml2-dev`) ne sont pas tirés par `libappstream-dev` | 2.9.14 |
 
 **Facultatives** :
 

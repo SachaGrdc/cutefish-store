@@ -37,15 +37,56 @@ catalogues AppStream                cutefish-store-indexer (processus éphémèr
   libappstream n'apparaît dans l'API publique de `store-core` : SQLite y est
   lié en `PRIVATE`, derrière des classes à implémentation cachée (pimpl).
 - **Nouvelles dépendances**, toutes prévues par l'architecture (§12.1) :
-  - SQLite ≥ 3.34 avec FTS5 et `trigram`, dans `store-core` (paquet
-    `libsqlite3-dev`) ;
-  - libappstream ≥ 1.0 dans l'indexeur (`libappstream-dev`), qui apporte
-    GLib et GIO ;
-  - libxml2 dans l'indexeur (`libxml2-dev`, déjà présent comme dépendance de
-    libappstream), pour lire le XML en flux et convertir les descriptions.
+  - SQLite ≥ 3.34 avec FTS5 et `trigram`, dans `store-core` ;
+  - libappstream ≥ 1.0 dans l'indexeur, qui apporte GLib et GIO ;
+  - libxml2 dans l'indexeur, pour lire le XML en flux et convertir les
+    descriptions. La bibliothèque libxml2 est une dépendance de
+    libappstream, mais **pas ses fichiers de développement** : `libxml2-dev`
+    doit être installé à part.
 - L'interface `Catalog` du Core v0.1 n'a pas changé. Les modèles non plus,
   à une correction près : une ref Flatpak dont l'ID se termine par
   `.desktop` est acceptée (`app/chat.delta.desktop/…`, publiée par Flathub).
+
+### Dépendances
+
+Paquets Debian 13 nécessaires pour construire le projet et ses tests :
+
+```bash
+sudo apt install build-essential cmake ninja-build pkg-config \
+    libsqlite3-dev libappstream-dev libxml2-dev libgtest-dev
+```
+
+| Paquet | Pour | Version utilisée |
+|---|---|---|
+| `build-essential`, `cmake`, `ninja-build`, `pkg-config` | Compilation (GCC 14, CMake ≥ 3.22) | 12.12, 3.31.6, 1.12.1, 1.8.1 |
+| `libsqlite3-dev` | `store-core` | 3.46.1 |
+| `libappstream-dev` (apporte `libglib2.0-dev`) | Indexeur | 1.0.5 |
+| `libxml2-dev` | Indexeur | 2.9.14 |
+| `libgtest-dev` | Tests (`-DBUILD_TESTING=ON`) | 1.16.0 |
+
+Sans l'indexeur (`-DCUTEFISH_STORE_BUILD_INDEXER=OFF`), `libappstream-dev`
+et `libxml2-dev` ne sont pas nécessaires. Si un paquet manque, la
+configuration CMake s'arrête en nommant le paquet Debian à installer.
+
+**Comment ces dépendances ont été obtenues** : aucune n'a été contournée.
+Les en-têtes de SQLite et d'AppStream manquaient au début du Core v0.2 ; le
+propriétaire a installé `libsqlite3-dev` et `libappstream-dev` le 7 novembre
+2026 (`apt install libsqlite3-dev libappstream-dev`, journal
+`/var/log/apt/history.log`) avant toute compilation, à la demande de cette
+étape. `libxml2-dev`, `libglib2.0-dev` et `libgtest-dev` étaient déjà
+installés. Les déclarations recopiées à la main des prototypes de la phase
+0.3 n'ont jamais été utilisées dans ce dépôt.
+
+**Vérification** [MESURÉ, 7 novembre 2026] : `scripts/check-clean-build.sh`
+construit et teste le projet, sans root, dans une vue du système (bubblewrap)
+où `/usr/include` et les dossiers pkg-config et CMake ne contiennent que les
+fichiers des paquets ci-dessus et de leurs dépendances (203 paquets installés
+dans cette fermeture). Résultat : configuration, compilation et 123 tests
+réussis. Retirer un seul des paquets `libsqlite3-dev`, `libappstream-dev`,
+`libxml2-dev` ou `libgtest-dev` fait échouer la configuration avec le
+message attendu. Limite : les bibliothèques d'exécution et les outils
+restent ceux de l'hôte ; ce n'est pas une installation Debian vierge, qui
+n'a pas pu être testée sans machine virtuelle ni conteneur [À VALIDER].
 
 ## 2. Schéma SQLite
 

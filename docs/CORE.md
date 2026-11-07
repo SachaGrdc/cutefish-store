@@ -183,6 +183,8 @@ ici), pkg-config, SQLite avec FTS5 (`libsqlite3-dev`), et pour l'indexeur
 libappstream et libxml2 (`libappstream-dev`, `libxml2-dev`) ;
 GoogleTest pour les tests (`libgtest-dev`). L'option
 `-DCUTEFISH_STORE_BUILD_INDEXER=OFF` construit le cœur sans l'indexeur.
+Liste des paquets Debian et vérification : [CATALOG.md](CATALOG.md),
+« Dépendances ».
 
 ```bash
 cmake -S . -B build -G Ninja -DBUILD_TESTING=ON
