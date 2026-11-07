@@ -104,6 +104,12 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Précisions ultérieures** : le backend s'appelle `backend-packagekit`
   (P-001) ; seul son transport D-Bus, dans la couche hôte, utilise
   `ToolkitBase` (P-006).
+- **Base expérimentale** (prototype 4, phase 0.3, validé par le propriétaire
+  sous réserve des tests non réalisés) : un client asynchrone sd-bus, sur un
+  thread dédié avec sa propre boucle d'événements, a interrogé PackageKit
+  1.3.1 (backend `apt`) sans jamais bloquer le thread appelant (attente
+  maximale 6 ms) [MESURÉ sur la machine d'audit]. Requêtes en lecture et
+  transactions simulées seulement ; détails dans ARCHITECTURE §7.2.
 
 ### D-008 — Nom D-Bus `org.cutefish.Store` (tranche O-002)
 
@@ -157,6 +163,15 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
     mettre à jour pour eux, figurent dans le plan.
 - **Conséquence** : les mises à jour système restent du ressort de l'outil de
   la distribution (APT, mises à jour automatiques ou autre).
+- **Précisions du prototype 4** [MESURÉ, backend APT de PackageKit 1.3.1] :
+  - les entrées de `GetUpdates` dont la version proposée est identique à la
+    version installée sont retirées de la liste ;
+  - `GetUpdates` et `UpdatePackages` ne se comportent pas exactement de la
+    même façon : la liste est toujours confirmée par une simulation
+    `UpdatePackages(ONLY_TRUSTED | SIMULATE)` ;
+  - la liste de `GetUpdates` mélange applications, composants du bureau et
+    bibliothèques : le filtrage par les offres d'application du catalogue
+    est indispensable.
 - **Détails** : ARCHITECTURE §5.4 et §7.2.
 
 ### D-011 — Flatpaks système détectés, affichés et gérés en v1 (tranche O-006)
@@ -307,6 +322,26 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Restant à tester** : réseau réel et coût de la seconde résolution sur
   Flathub, remotes GPG et HTTP, plusieurs clients D-Bus, installation système
   avec `flatpak-system-helper`.
+- **Précisions PackageKit** (prototype 4, validées par le propriétaire sous
+  réserve des tests non réalisés) :
+  - la simulation (`SIMULATE`) donne pour chaque paquet l'action, la version
+    et l'origine ; sur la machine d'audit, elle a donné les mêmes plans
+    qu'`apt-get -s` [MESURÉ] ;
+  - toute suppression est précédée d'une simulation : le backend APT testé
+    ignore `allow_deps=false` et supprime aussi les paquets qui dépendent du
+    paquet demandé [MESURÉ, CODE]. Le service présente ces paquets
+    supplémentaires à l'utilisateur et ne suppose jamais qu'une suppression
+    se limite au paquet demandé ;
+  - la version d'un `package_id` n'est pas une garantie : une version
+    inexistante est remplacée sans erreur [MESURÉ]. Le service vérifie la
+    version réellement présente dans le plan et refuse, ou redemande une
+    confirmation, si le plan ne correspond pas à la demande ;
+  - **ce n'est pas une double passe** au sens Flatpak : une simulation
+    PackageKit est une transaction distincte de l'exécution, qui recalcule
+    tout et n'émet pas son plan avant de l'appliquer [CODE]. La nouvelle
+    simulation faite avant l'exécution réduit la fenêtre sans la fermer ;
+    la correspondance entre simulation et transaction réelle n'est **pas
+    garantie** et n'a pas été testée.
 - **Alternative écartée** : mécanisme A, blocage dans `ready`. Il exécute
   exactement le commit présenté, mais bloque toute la file Flatpak (P-009)
   jusqu'à la décision ou au délai maximal, et laisse une transaction
@@ -320,7 +355,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-001 — Un seul service, bibliothèques internes statiques, pas de plugins
 
-- **Statut** : Proposée, corrigée après la matrice de validation.
+- **Statut** : Proposée, corrigée après la matrice de validation. Le point
+  « backend `backend-packagekit`, qui parle à PackageKit par D-Bus avec
+  sd-bus » est **validé** (propriétaire, phase 0.3, après le prototype 4) ;
+  le reste de la décision reste proposé.
 - **Décision** :
   - un seul service (`cutefish-store-service`) ;
   - le code est découpé en bibliothèques statiques internes : `common`,
@@ -483,16 +521,36 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-009 — Transactions sérialisées par backend, parallèles entre backends
 
-- **Statut** : Proposée.
+- **Statut** : Proposée. La précision PackageKit ci-dessous est **validée**
+  (propriétaire, phase 0.3, après le prototype 4).
 - **Décision** :
   - au plus une transaction modificatrice active par backend et par
     installation ;
   - PackageKit et Flatpak peuvent s'exécuter en parallèle ;
-  - les lectures (recherche, détails) ne sont jamais bloquées par une
-    transaction.
+  - les lectures du catalogue et de `state.sqlite` (recherche, détails,
+    état installé affiché) ne sont jamais bloquées par une transaction.
+- **Précision PackageKit (validée)** :
+  - sur le backend APT testé, PackageKit sérialise **toutes** ses
+    transactions, consultations et recherches comprises : `Resolve`,
+    `GetUpdates`, `GetDetails` attendent la fin de la transaction en cours
+    [MESURÉ ; CODE : le backend APT ne déclare pas le parallélisme, et le
+    planificateur rend alors toutes les transactions exclusives] ;
+  - le service utilise donc une **file unique pour toutes les requêtes
+    PackageKit** sur ce backend, et pas seulement pour les opérations
+    modificatrices ;
+  - une transaction modificatrice active peut retarder les consultations :
+    l'interface est servie depuis `state.sqlite`, la recherche interactive
+    depuis le catalogue SQLite/FTS5, et PackageKit n'est jamais interrogé à
+    chaque frappe ; `Resolve` et `GetDetails` sont groupés ;
+  - ce constat porte sur le backend APT de PackageKit 1.3.1. Il n'est pas
+    généralisé aux autres backends PackageKit sans preuve.
 - **Justification** :
   - PackageKit sérialise de toute façon les transactions APT et gère le
-    verrou dpkg [DOC] ;
+    verrou dpkg [DOC ; MESURÉ, prototype 4] ;
+  - chaque transaction du backend APT recharge le cache APT (≈ 0,45 s sur la
+    machine d'audit [MESURÉ, une seule machine, pas une garantie]) : des
+    requêtes groupées et peu nombreuses coûtent bien moins que des requêtes
+    individuelles répétées ;
   - un seul `FlatpakTransaction` à la fois évite les contentions de verrou
     du dépôt OSTree et simplifie l'annulation.
 

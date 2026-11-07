@@ -3,8 +3,10 @@
 Statut : **référence de conception, phase 0.2**, mise à jour après la
 validation partielle par le propriétaire (P-006 et D-008 à D-011 validées,
 corrections de la matrice de validation intégrées), puis après le prototype 1
-de la phase 0.3 (P-008 validée : double passe Flatpak). Aucune ligne de code
-n'existe encore. Ce document décrit ce qui sera construit. Les décisions qu'il
+de la phase 0.3 (P-008 validée : double passe Flatpak), puis après le
+prototype 4 (PackageKit par D-Bus : conclusions validées intégrées au §7.2,
+transactions réelles encore non testées). Aucune ligne de code n'existe
+encore. Ce document décrit ce qui sera construit. Les décisions qu'il
 applique, et celles qui restent ouvertes, sont tenues à jour dans
 [DECISIONS.md](DECISIONS.md) (identifiants `D-`, `P-`, `O-`).
 
@@ -441,7 +443,13 @@ PackageKit, qui ne dépend pas de la distribution.)
   liste des dépôts.
 - Traduction de `Status`, `Percentage`, `ItemProgress` et `ErrorCode` vers le
   modèle commun.
-- Aucun thread propre : le transport vit sur la boucle principale de l'hôte.
+- La logique et le profil ne créent aucun thread. Le **transport** fourni par
+  la couche hôte possède sa connexion sd-bus sur un **thread dédié**, avec sa
+  propre boucle d'événements ; il rend ses résultats par `post` (§8.2). Ce
+  modèle a été validé par le prototype 4 : le thread appelant n'a jamais
+  attendu plus de 6 ms [MESURÉ sur la machine d'audit].
+- Une **file unique** pour toutes les requêtes PackageKit, consultations
+  comprises (P-009, §5.5).
 
 ### 4.5 `backend-flatpak`
 
@@ -695,6 +703,14 @@ pour un affichage cohérent.
 
 - Une seule transaction modificatrice active par backend (P-009). Les
   suivantes restent en `queued`.
+- PackageKit (backend APT testé) exécute **une transaction à la fois, requêtes
+  comprises** : `Resolve`, `GetUpdates` ou `GetDetails` attendent la fin de la
+  transaction en cours, y compris une installation [MESURÉ et CODE, prototype
+  4 ; non généralisé aux autres backends PackageKit]. Le service envoie donc
+  toutes ses requêtes PackageKit par une **file unique**, et non seulement les
+  opérations modificatrices. Une transaction modificatrice active retarde les
+  consultations : l'interface est servie depuis `state.sqlite` et n'attend
+  jamais PackageKit (§7.2).
 - Une demande qui porte sur une offre déjà concernée par une transaction non
   terminée est refusée avec `Busy`, et l'erreur indique le chemin de la
   transaction existante.
@@ -707,7 +723,15 @@ pour un affichage cohérent.
 - PackageKit : une transaction en attente de confirmation n'occupe pas la
   file. Elle y entre à la confirmation, et sa simulation est refaite si le
   catalogue ou l'état ont changé ; si le nouveau plan exige une confirmation
-  différente, elle revient en `awaiting-confirmation`.
+  différente, elle revient en `awaiting-confirmation`. Cette nouvelle
+  simulation n'est **pas** l'équivalent de la seconde passe Flatpak : la
+  seconde passe Flatpak compare le plan de la transaction qui sera exécutée,
+  alors qu'une simulation PackageKit est une transaction distincte de
+  l'exécution, qui recalcule tout. Rien ne garantit que l'exécution suive la
+  dernière simulation (§7.2).
+- Annulation PackageKit : jamais promise comme immédiate. Une transaction
+  encore en file est annulée aussitôt ; une transaction en cours ne l'est
+  qu'entre deux étapes (§7.2).
 - Flatpak (double passe, P-008, §7.3) : pendant l'attente, aucune transaction
   libflatpak n'existe ; ni le thread ni la file des transactions Flatpak ne
   sont occupés. À la confirmation, la transaction entre dans la file ; une
@@ -773,11 +797,16 @@ Cas particuliers observés avec libflatpak (prototype 1, §7.3) :
 - Au démarrage, toute transaction du journal qui n'est pas dans un état
   terminal est traitée selon son backend :
   - **PackageKit** : la transaction vit dans `packagekitd`, pas dans le
-    service. Le journal conserve son chemin (`tid`). Si
-    `GetTransactionList()` le contient encore, le service s'y rattache
-    (abonnement aux signaux, lecture des propriétés) [À VALIDER : rattachement
-    à une transaction créée par une autre connexion]. Sinon, elle passe en
-    `interrupted` et l'état installé est réconcilié.
+    service, et **continue** si la connexion du service disparaît
+    (`CallerActive` passe à faux) [MESURÉ, prototype 4]. Le journal conserve
+    son chemin (`tid`). Si `GetTransactionList()` le contient encore, le
+    service s'y rattache et reprend son suivi : abonnement aux signaux, puis
+    lecture des propriétés. Une autre connexion qui s'abonne au chemin reçoit
+    bien la suite des signaux jusqu'à `Finished` [MESURÉ, prototype 4] ; les
+    signaux déjà émis sont perdus, et la relecture des propriétés d'une
+    transaction en cours n'a pas été testée [À VALIDER]. Si la transaction
+    n'existe plus, elle passe en `interrupted` et l'état installé est
+    réconcilié.
   - **Flatpak** : la transaction tournait dans le service et s'est arrêtée
     avec lui. Elle passe en `interrupted`, puis l'état installé est
     réconcilié avec libflatpak. Une reprise automatique n'est pas tentée en
@@ -1038,7 +1067,7 @@ qu'elle fournit, quel que soit le thread qui a fait le travail.
 | `availability()` | Backend utilisable, et sinon pourquoi | Nom `org.freedesktop.PackageKit` activable et `BackendName` connu | Par périmètre : installation utilisateur ouvrable ; installation système présente |
 | `catalogSources()` | Fichiers à donner à l'indexeur | Fournis par le profil de distribution (fichiers DEP-11 sous Debian) | Dossier appstream de chaque remote activée |
 | `refresh(cancel)` | Rafraîchir les métadonnées | `RefreshCache` | Mise à jour de l'appstream des remotes |
-| `queryInstalled()` | Ce qui est installé | `Resolve(installed)` sur les paquets du catalogue | Refs d'applications installées |
+| `queryInstalled()` | Ce qui est installé | `Resolve(installed)` groupé sur tous les paquets du catalogue | Refs d'applications installées |
 | `queryUpdates()` | Mises à jour disponibles | `GetUpdates` | `list_installed_refs_for_update` |
 | `permissions(offer)` | Permissions d'une offre | `NotSupported` | Métadonnées du ref |
 | `sources()` | Sources configurées | `GetRepoList` (lecture) | Remotes de l'installation |
@@ -1056,7 +1085,7 @@ Le `sink` reçoit des événements normalisés (phase, progression, octets,
 |---|---|---|---|
 | Authentification | polkit via PackageKit (`package-install` : `auth_admin_keep`, `package-remove` : `auth_admin`, `system-update` : `auth_admin_keep` [MESURÉ]) | Aucune | polkit via `flatpak-system-helper`, variable selon l'action et le groupe de l'utilisateur (§7.4) |
 | Contenu du plan | Paquets installés, supprimés, mis à jour | Refs, runtimes, permissions anciennes et nouvelles | Idem, plus la raison `system-scope` pour une suppression |
-| Annulation | Possible seulement quand PackageKit l'autorise (`AllowCancel`) | Possible à tout moment ; effet à la prochaine étape interruptible | Idem [À VALIDER : annulation pendant une opération du helper] |
+| Annulation | Possible seulement quand PackageKit l'autorise (`AllowCancel`) ; effet entre deux étapes seulement : le chargement du cache APT et le calcul d'un plan ne sont pas interrompus [MESURÉ, prototype 4] ; jamais présentée comme immédiate | Possible à tout moment ; effet à la prochaine étape interruptible | Idem [À VALIDER : annulation pendant une opération du helper] |
 | Isolation | Aucune (`sandboxed = false`) | Bac à sable, permissions affichées | Idem |
 | Vérification | Signature des dépôts par APT (`sqv` sur Debian 13 [MESURÉ]) | Signature GPG des commits OSTree | Idem, vérifiée par le helper |
 
@@ -1084,10 +1113,15 @@ Un futur profil (Fedora, openSUSE) n'ajoutera qu'un module de profil ; la
 partie générique et le transport ne changent pas.
 
 
-**Connexion** : bus système, objet `/org/freedesktop/PackageKit`, via
-`base::dbus` [CODE]. Au démarrage, lecture de `BackendName`, `Roles`,
-`Filters`, `DistroId`, `Locked` [MESURÉ : propriétés présentes]. Si les rôles
-nécessaires manquent, le backend se déclare indisponible.
+**Connexion** : bus système, objet `/org/freedesktop/PackageKit`. Le
+transport possède sa connexion sd-bus sur un thread dédié, avec sa propre
+boucle d'événements (§8.2) ; aucun autre thread ne touche cette connexion,
+sd-bus n'étant pas thread-safe. Le prototype 4 utilisait sd-bus et sd-event
+directement ; l'usage de `base::dbus` [CODE] sur une boucle distincte de la
+boucle principale de l'hôte reste à vérifier [À VALIDER]. Au démarrage,
+lecture de `BackendName`, `Roles`, `Filters`, `DistroId`, `Locked` [MESURÉ :
+propriétés présentes]. Si les rôles nécessaires manquent, le backend se
+déclare indisponible.
 
 **Déroulement d'un appel** :
 
@@ -1095,66 +1129,139 @@ nécessaires manquent, le backend se déclare indisponible.
 2. abonnement aux signaux de cet objet **avant** l'appel de la méthode, pour
    ne rien manquer ;
 3. `SetHints` avec `locale=<langue>`, `interactive=true|false`,
-   `background=true|false`, `cache-age=<s>` [MESURÉ : clés documentées dans
-   l'interface installée] ;
+   `supports-plural-signals=true` (un seul signal `Packages(a(uss))` au lieu
+   d'un `Package` par paquet), `background=true|false` et `cache-age=<s>`
+   pour un rafraîchissement [MESURÉ : clés lues par le démon 1.3.1, prototype
+   4]. Une transaction `background=true` est annulée par toute requête de
+   premier plan (voir « Rafraîchissement ») ;
 4. appel de la méthode, avec `transaction_flags` contenant toujours
-   `ONLY_TRUSTED` pour les opérations qui modifient le système ;
-5. réception de `Package`/`Packages`, `ItemProgress`, `ErrorCode`, puis
-   `Finished` ; `Destroy` libère l'abonnement [MESURÉ : noms des signaux].
+   `ONLY_TRUSTED` pour les opérations qui modifient le système. Une seule
+   méthode d'action par transaction : un second appel est refusé
+   (`InvalidState`) [MESURÉ] ;
+5. réception de `Package`/`Packages`, `Details` (un signal par paquet),
+   `ItemProgress`, `ErrorCode`, puis `Finished` ; `Destroy` libère
+   l'abonnement [MESURÉ] ;
+6. un argument invalide (liste vide, `package_id` mal formé, rôle absent du
+   backend) est refusé en **erreur D-Bus de la méthode**, sans `ErrorCode` ni
+   `Finished` : le transport traite les deux voies et garde son propre délai
+   maximal [MESURÉ] ;
+7. le champ `info` des paquets porte la gravité d'une mise à jour dans ses
+   16 bits de poids fort (`info & 0xFFFF`, gravité `info >> 16`) [CODE,
+   MESURÉ].
+
+**Coût des requêtes** [MESURÉ, prototype 4 : une seule machine, la machine
+d'audit, avec son cache APT ; ordres de grandeur, pas des garanties] :
+
+- chaque transaction du backend APT recharge le cache APT (≈ 0,45 s), quelle
+  que soit sa taille : `Resolve` d'un nom 0,46 s, de 2 165 noms 0,54 s ;
+  `GetDetails` de 1 ou de 2 165 identifiants 0,47 à 0,56 s ; `SearchNames`
+  0,55 s ; `SearchDetails` 1,5 s ; `GetUpdates` 0,95 s ; simulation d'une
+  installation 0,76 s ; `GetRepoList` 6 ms ;
+- 50 `Resolve` d'un nom prennent 29,6 s à la suite, 25,4 s envoyés ensemble
+  (le démon les sérialise) ;
+- conséquences :
+  - la recherche interactive utilise **uniquement** le catalogue local
+    SQLite/FTS5 (§6.3) : PackageKit n'est jamais interrogé à chaque frappe ;
+  - `Resolve` et `GetDetails` sont **groupés** : une requête pour tous les
+    noms du catalogue, pas une par application ; les appels individuels
+    répétés sont évités ;
+  - les résultats utiles (état installé, versions, mises à jour, tailles)
+    sont conservés dans `state.sqlite`, d'où l'interface est servie.
 
 **Opérations** :
 
 | Besoin | Appel PackageKit | Remarques |
 |---|---|---|
-| État installé | `Resolve(filter=installed, noms)` par lots de 500 | [MESURÉ] 1 843 noms en 0,52 s avec `pkcon`. `package_id` = `nom;version;arch;données`, les données indiquant `installed` ou `manual:<origine>` |
-| Plan d'installation | `Resolve(newest, arch native)`, puis `InstallPackages(ONLY_TRUSTED \| SIMULATE)` | Les signaux `Package` donnent l'action par paquet (installation, suppression, mise à jour, rétrogradation) |
-| Tailles | `GetDetails(package_ids)` | Taille de téléchargement |
-| Installation | `InstallPackages(ONLY_TRUSTED)`, hint `interactive=true` | |
-| Plan de suppression | `RemovePackages(ONLY_TRUSTED \| SIMULATE, ids, allow_deps=true, autoremove=false)` | Toute suppression d'un autre paquet ⇒ confirmation (P-008) |
-| Suppression | Même appel sans `SIMULATE` | Simulation refaite juste avant (§5.5). Une petite fenêtre de concurrence subsiste : PackageKit n'offre pas de « exécuter exactement ce plan ». Elle est acceptée et documentée |
-| Mises à jour d'applications | `GetUpdates`, filtré sur les paquets qui portent une offre d'application du catalogue ; puis `UpdatePackages(ONLY_TRUSTED \| SIMULATE)` et `UpdatePackages(ONLY_TRUSTED)` pour **ces paquets seulement** | D-010 : les autres mises à jour (bibliothèques seules, noyau, paquets sans application) ne sont ni listées ni appliquées. Les dépendances que PackageKit doit mettre à jour pour l'application apparaissent dans le plan. L'action polkit demandée est probablement `system-update` [HYPOTHÈSE], ce qui influe sur le texte du dialogue d'authentification |
-| Rafraîchissement | `RefreshCache(force=false)`, hint `background=true` | polkit `system-sources-refresh` : `yes` pour l'utilisateur actif [MESURÉ] |
-| Sources | `GetRepoList` puis signaux `RepoDetail` | Lecture seule en v1 |
+| État installé | Un seul `Resolve(filter=installed;arch, noms)` pour tous les paquets du catalogue | [MESURÉ, prototype 4] 2 165 noms en 0,54 s, 239 Ko de signaux. Le filtre `arch` évite les doublons multiarch ; le client dédoublonne aussi les identifiants, qui peuvent être répétés. `package_id` = `nom;version;arch;données` ; données observées : `manual:<origine>`, `auto:<origine>`, `auto:local` (paquet installé hors dépôt) |
+| Plan d'installation | `Resolve(~installed;arch)`, puis `InstallPackages(ONLY_TRUSTED \| SIMULATE)` | Les signaux `Packages` donnent l'action, la version exacte et l'origine de chaque paquet, plus la raison `+auto:`/`+manual:`. **La version d'un `package_id` n'est pas une garantie** : une version inexistante est remplacée sans erreur par la version installée ou candidate [MESURÉ : `gimp;0.1` planifie gimp 3.0.4 ; CODE]. Le service vérifie la version réellement présente dans le plan, et refuse ou redemande une confirmation si le plan ne correspond pas à la demande. Le filtre `newest` n'est pas annoncé par le backend APT |
+| Tailles | `GetDetails(package_ids)`, groupé | Taille du paquet seul (`download-size`, `size`). La taille à télécharger avec les dépendances vient de `DownloadSizeRemaining` pendant la simulation [MESURÉ : 6,5 Mo pour gimp seul, 52,5 Mo pour la transaction] |
+| Installation | `InstallPackages(ONLY_TRUSTED)`, hint `interactive=true` | Non testée réellement [À VALIDER en environnement jetable] |
+| Plan de suppression | `RemovePackages(ONLY_TRUSTED \| SIMULATE, ids, allow_deps=true, autoremove=false)` | **Obligatoire avant toute suppression.** Le backend APT testé **ignore `allow_deps=false`** : les paquets qui dépendent du paquet supprimé sont supprimés aussi [MESURÉ : 16 paquets dans les deux cas ; CODE]. Le service analyse le plan, présente à l'utilisateur les paquets supplémentaires concernés (confirmation, P-008), et ne suppose jamais que la suppression se limite au paquet demandé |
+| Suppression | Même appel sans `SIMULATE` | Simulation refaite juste avant (§5.5). PackageKit n'offre pas de « exécuter exactement ce plan », et l'exécution réelle n'émet pas sa liste de paquets avant de les traiter [CODE] : la correspondance entre simulation et exécution n'est **pas garantie**. Fenêtre acceptée et documentée. Non testée réellement |
+| Mises à jour d'applications | `GetUpdates`, filtré sur les paquets qui portent une offre d'application du catalogue, **sans les entrées dont la version proposée est identique à la version installée** ; puis `UpdatePackages(ONLY_TRUSTED \| SIMULATE)` et `UpdatePackages(ONLY_TRUSTED)` pour **ces paquets seulement** | D-010 : les autres mises à jour (bibliothèques seules, noyau, paquets sans application) ne sont ni listées ni appliquées. Les dépendances que PackageKit doit mettre à jour pour l'application apparaissent dans le plan. `GetUpdates` et `UpdatePackages` ne se comportent pas exactement pareil : 10 paquets installés hors dépôt étaient listés par `GetUpdates` à version identique, puis ignorés par `UpdatePackages` [MESURÉ]. La liste de `GetUpdates` mélange applications, composants du bureau et bibliothèques : seul le croisement avec le catalogue les sépare. Action polkit : `system-update` [MESURÉ : journal du démon, refus non interactif] |
+| Rafraîchissement | `RefreshCache(force=false)`, hint `background=true` | polkit `system-sources-refresh` : `yes` pour l'utilisateur actif [MESURÉ]. Non testé (modifie les listes APT) [À VALIDER]. Observation à prendre en compte avant de fixer l'indice : une transaction marquée `background=true` est annulée (`cancelled-priority`) dès qu'une requête de premier plan arrive [MESURÉ sur une recherche, prototype 4] |
+| Sources | `GetRepoList` puis signaux `RepoDetail` | Lecture seule en v1 ; 6 ms, sans chargement du cache APT [MESURÉ] |
+
+**Autorisations** [prototype 4] :
+
+- les simulations et les requêtes ne demandent aucune autorisation dans les
+  scénarios observés [MESURÉ ; CODE `pk_transaction_obtain_authorization`] ;
+- les vraies transactions passent `interactive=true` : sans cet indice,
+  polkit est interrogé sans interaction et refuse aussitôt
+  (`not-authorized`, 7 à 16 ms, aucun dialogue) [MESURÉ avec des requêtes
+  pour un paquet inexistant] ;
+- actions demandées, relevées dans le journal du démon [MESURÉ] :
+  `package-install` (installation `ONLY_TRUSTED`), `package-remove`,
+  `system-update` ;
+- l'autorisation est demandée avant l'entrée dans la file de PackageKit : le
+  dialogue peut apparaître pendant qu'une autre transaction tourne [CODE] ;
+- PackageKit et polkit restent seuls responsables de l'élévation de
+  privilèges ; la boutique n'introduit aucun mécanisme privilégié (P-007) ;
+- **le dialogue graphique de l'agent polkit de Cutefish n'a pas été testé**
+  (acceptation, refus, annulation), ni le cas d'un utilisateur non
+  administrateur [À VALIDER].
+
+**Annulation et déconnexion** [MESURÉ, prototype 4] :
+
+- une transaction encore en file est annulée aussitôt
+  (`transaction-cancelled`) ;
+- une transaction en cours n'est annulée qu'entre deux étapes : le chargement
+  du cache APT (≈ 0,45 s) et le calcul d'un plan ne sont pas interrompus ; une
+  simulation d'installation annulée en cours de calcul s'est terminée en
+  succès. L'annulation n'est donc **jamais promise comme immédiate** ;
+- pendant une vraie transaction, `AllowCancel` passe à faux avant `dpkg`
+  [CODE ; non testé réellement] ;
+- une transaction continue après la déconnexion de son client ; une autre
+  connexion peut en suivre les signaux jusqu'à la fin (§5.7).
 
 **Suivi des changements faits hors de la boutique** :
 
 - signaux du démon : `InstalledChanged`, `UpdatesChanged`, `RepoListChanged`,
   `TransactionListChanged` [MESURÉ : signaux présents] ;
 - le hook APT `DPkg::Post-Invoke` de PackageKit appelle `StateHasChanged`
-  après chaque exécution de dpkg [MESURÉ : fichier présent], donc un `apt
-  install` en ligne de commande devrait produire ces signaux [À VALIDER :
-  signaux effectivement émis] ;
+  après chaque exécution de dpkg [MESURÉ : fichier présent]. D'après le code,
+  le démon émet alors `UpdatesChanged` (après 2 s, et seulement si le réseau
+  est disponible) ; `InstalledChanged` n'est pas garanti [CODE `pk-engine.c`].
+  Signaux réellement émis après un `apt` en ligne de commande [À VALIDER] ;
 - les signaux sont regroupés sur 2 s avant de relancer `Resolve` et
   `GetUpdates`.
 
-**Phases** (`Status` de PackageKit vers `Phase`) :
+**Phases** (`Status` de PackageKit vers `Phase`). Statuts que le backend APT
+émet [CODE `backends/apt`, 1.3.1] ; correspondance à confirmer pendant une
+vraie transaction [À VALIDER] :
 
 | Phase | Statuts PackageKit |
 |---|---|
-| `waiting-for-auth` | attente d'autorisation |
-| `waiting-for-lock` | attente du verrou |
-| `downloading` | téléchargement, téléchargement des listes |
-| `installing` | installation, mise à jour |
-| `removing` | suppression |
-| `finishing` | nettoyage, validation |
+| (préparation, avant `running`) | `setup`, `loading-cache`, `query`, `running`, `request` |
+| `waiting-for-auth` | `waiting-for-auth` (émis par le démon) |
+| `waiting-for-lock` | `waiting-for-lock` |
+| `downloading` | `download`, `download-changelog`, `download-updateinfo`, `refresh-cache` |
+| `installing` | `install` (par paquet, via `ItemProgress`), `commit` (scripts de dpkg) |
+| `removing` | `remove` (par paquet, via `ItemProgress`) |
+| `finishing` | `cancel`, `finished` |
 
-Le tableau de correspondance exact sera établi à partir de l'énumération
-`PkStatusEnum` [À VALIDER]. Une valeur inconnue est conservée telle quelle dans
-les journaux et affichée sous une phase générique.
+Une valeur inconnue est conservée telle quelle dans les journaux et affichée
+sous une phase générique.
 
-**Erreurs** (`ErrorCode` vers §5.6) :
+**Erreurs** (`ErrorCode` vers §5.6 ; noms de `PkErrorEnum` 1.3.1 [CODE]) :
 
-| Code commun | Familles d'erreurs PackageKit (noms exacts à confirmer [À VALIDER]) |
+| Code commun | Erreurs PackageKit |
 |---|---|
-| `auth-denied` | not-authorized |
-| `locked` | cannot-get-lock |
-| `network` | no-network, connexion échouée |
-| `untrusted` | signatures GPG manquantes ou invalides |
-| `dependency` | échec de résolution des dépendances |
-| `conflict` | conflits de fichiers ou de paquets |
-| `no-space` | plus de place sur le disque |
-| `not-found` | paquet introuvable |
-| `cancelled` | transaction annulée |
+| `auth-denied` | `not-authorized` [MESURÉ] |
+| `locked` | `cannot-get-lock`, `lock-required` |
+| `network` | `no-network`, `package-download-failed`, `no-more-mirrors-to-try`, `cannot-fetch-sources` |
+| `untrusted` | `gpg-failure`, `bad-gpg-signature`, `missing-gpg-signature`, `cannot-install-repo-unsigned`, `cannot-update-repo-unsigned` |
+| `dependency` | `dep-resolution-failed` [MESURÉ] |
+| `conflict` | `file-conflicts`, `package-conflicts` |
+| `no-space` | `no-space-on-device` |
+| `not-found` | `package-not-found` [MESURÉ], `package-id-invalid` |
+| `cancelled` | `transaction-cancelled` [MESURÉ], `cancelled-priority` [MESURÉ] |
+| `internal` | toute autre valeur, conservée dans `details` |
+
+Les textes d'erreur viennent d'APT et suivent la langue : la traduction se
+fonde sur le code, jamais sur le texte [MESURÉ]. `auth-denied` et
+`auth-cancelled` ne sont pas distinguables d'après le code [CODE ; non testé
+avec le dialogue].
 
 **Ce que le backend PackageKit ne fait jamais en v1** :
 
@@ -1167,9 +1274,34 @@ les journaux et affichée sous une phase générique.
 
 **Paquets protégés** : la suppression d'un paquet indispensable au bureau
 (méta-paquet `cutefish-desktop`, la boutique elle-même) est refusée d'après
-la liste du profil de distribution, en plus des protections d'APT
-[À VALIDER : comportement du backend apt de PackageKit face aux paquets
-`Essential` et `Priority: required`].
+la liste du profil de distribution, en plus des protections d'APT. La
+simulation de la suppression de `zlib1g` (prédépendance de `dpkg`) échoue en
+`dep-resolution-failed` [MESURÉ] ; le comportement face aux paquets
+`Essential` et `Priority: required` en général reste à vérifier
+[À VALIDER]. Une suppression
+simulée de `cutefish-calculator` emporte `cutefish-desktop` [MESURÉ] : la
+liste du profil s'applique aussi aux paquets supplémentaires du plan.
+
+**Base expérimentale** : prototype 4, dépôt local
+`~/Dev/cutefish-store-prototypes/packagekit/` (rapport
+`docs/RESULTS.md`). Environnement : Debian 13, PackageKit 1.3.1 avec le
+backend `apt`, une seule machine (la machine d'audit, multiarch `i386`
+actif). Seules des requêtes en lecture et des transactions simulées ont été
+exécutées. Les simulations d'installation, de conflit et de suppression ont
+donné les mêmes plans qu'`apt-get -s`, versions comprises (6 comparaisons)
+[MESURÉ].
+
+**Reste à tester dans un environnement jetable** (aucun de ces points n'est
+validé) :
+
+- transactions réelles d'installation, de suppression et de mise à jour ;
+- dialogue graphique polkit : acceptation, refus, annulation ;
+- utilisateur non administrateur ;
+- conflit de verrou dpkg ;
+- arrêt du démon pendant une transaction ;
+- rafraîchissement du cache (`RefreshCache`) ;
+- questions debconf ;
+- correspondance entre simulation et transaction réelle.
 
 ### 7.3 Backend Flatpak (libflatpak)
 
@@ -1379,7 +1511,8 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 
 | Contexte | Nombre | Rôle | Possède |
 |---|---|---|---|
-| Thread principal de l'hôte (`base::EventLoop`) | 1 | API D-Bus de session, client PackageKit sur le bus système, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexions sd-bus, état des transactions, connexion d'écriture SQLite |
+| Thread principal de l'hôte (`base::EventLoop`) | 1 | API D-Bus de session, gestionnaire de transactions, planification des images, écritures dans `state.sqlite`, timers, lancement de l'indexeur | Connexion sd-bus de session, état des transactions, connexion d'écriture SQLite |
+| Thread du transport PackageKit (couche hôte) | 1 | Connexion au bus système et appels PackageKit, tous asynchrones, dans sa propre boucle d'événements ; résultats rendus par `post` | Sa connexion sd-bus au bus système, jamais touchée par un autre thread |
 | Lecteurs SQLite (`base::ThreadPool` de l'hôte) | 2 | Recherche, navigation, détails, par les fonctions synchrones du cœur | Une connexion en lecture seule par thread (`catalog.sqlite` avec `state.sqlite` attachée), jamais partagée |
 | Thread GLib « requêtes Flatpak » | 1 | Liste des installées, mises à jour, métadonnées des refs, mise à jour de l'appstream, remotes, pour les deux installations | Son `GMainContext`, ses deux `FlatpakInstallation` (utilisateur et système) |
 | Thread GLib « transactions Flatpak » | 1 | Une `FlatpakTransaction` à la fois, quel que soit le périmètre (P-009) | Son `GMainContext`, ses deux `FlatpakInstallation`, la transaction en cours |
@@ -1417,7 +1550,10 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
      un lot d'état installé), en WAL avec `synchronous=NORMAL` ;
    - en build de développement, tout gestionnaire qui dépasse 5 ms est
      journalisé.
-5. **PackageKit ne demande pas de thread** : tout est asynchrone sur sd-bus.
+5. **PackageKit a son thread de transport** (couche hôte) : une connexion
+   sd-bus dédiée et sa boucle, tous les appels asynchrones. Ni le thread
+   principal ni l'interface n'attendent jamais PackageKit [MESURÉ, prototype
+   4 : attente maximale du thread appelant 6 ms pendant les requêtes].
 6. **L'indexeur est mono-thread** et utilise GLib de façon synchrone, sans
    boucle principale.
 
@@ -1425,7 +1561,7 @@ chaque gestionnaire d'événement est mesuré en build de développement (§10.5
 
 | Ressource | Limite | Au-delà |
 |---|---|---|
-| Transaction PackageKit modificatrice | 1 active | File `queued` |
+| Requêtes PackageKit (backend APT), consultations comprises | 1 à la fois, par une file unique du service (P-009) ; au plus 1 transaction modificatrice active | File `queued` pour les transactions ; requêtes de consultation regroupées |
 | `FlatpakTransaction` | 1 active ; aucune pendant une attente de confirmation (double passe, P-008) | File `queued` |
 | Requêtes de lecture SQLite | 2 en parallèle | File du pool |
 | Requêtes Flatpak (hors transactions) | 1 à la fois | File du `GlibWorker` |
@@ -1468,7 +1604,10 @@ Chaque connexion appartient à un seul thread (ouverture avec
   (`cutefish-core/polkit-agent` [CODE]). Le service passe `interactive=true`
   seulement pour une action déclenchée par l'utilisateur ; un rafraîchissement
   en arrière-plan passe `interactive=false` et ne peut donc pas faire
-  apparaître de dialogue.
+  apparaître de dialogue. Sans `interactive=true`, une transaction qui exige
+  une authentification est refusée aussitôt (`not-authorized`) [MESURÉ,
+  prototype 4] ; les simulations n'en demandent aucune. Le dialogue de l'agent
+  Cutefish lui-même n'a pas encore été testé (§7.2).
 - Le service ne conserve aucune autorisation. Remarque : la politique
   `auth_admin_keep` de PackageKit [MESURÉ] fait que polkit garde une
   autorisation quelques minutes pour la session. C'est un comportement de
@@ -1553,7 +1692,10 @@ Chaque connexion appartient à un seul thread (ouverture avec
 - File par backend (P-009), refus `Busy` sur une offre déjà engagée (§5.5).
 - Verrous APT : laissés à PackageKit, qui attend le verrou dpkg et le signale
   (phase `waiting-for-lock`). La boutique n'ouvre ni ne supprime jamais de
-  fichier de verrou.
+  fichier de verrou. D'après le code, le backend APT réessaie 10 fois à une
+  seconde d'intervalle, puis échoue en `cannot-get-lock` [CODE] ; un conflit
+  réel n'a pas été testé [À VALIDER : prendre le verrou exige root].
+- Les simulations n'ouvrent pas le cache APT avec verrou [CODE].
 - Base `state.sqlite` : un seul écrivain. Instantané du catalogue : jamais
   modifié en place.
 
@@ -1607,6 +1749,10 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 | `pkcon search name` | ≈ 530 ms | Ne pas interroger PackageKit à chaque frappe |
 | `pkcon get-updates` | ≈ 890 ms | Calculer les mises à jour en arrière-plan |
 | `pkcon resolve --filter installed`, 1 843 noms | 0,52 s | L'état installé se reconstruit en arrière-plan en moins d'une seconde |
+| Prototype 4 : `Resolve` d'un nom / de 2 165 noms par sd-bus (médianes de 10) | 0,46 s / 0,54 s | Coût fixe par transaction (rechargement du cache APT) : grouper les requêtes |
+| Prototype 4 : 50 `Resolve` d'un nom envoyés ensemble | 25,4 s | PackageKit (backend APT) les sérialise |
+| Prototype 4 : `SearchDetails`, `GetUpdates`, simulation d'installation | 1,5 s, 0,95 s, 0,76 s | Rien de cela sur le chemin d'une interaction |
+| Prototype 4 : activation de `packagekitd` par D-Bus | 55 à 72 ms | Démarrage à froid du démon négligeable devant le chargement du cache |
 | `flatpak list --app` | ≈ 20 ms | Lecture de l'état Flatpak bon marché |
 | `appstreamcli convert` sur Flathub | 1,7 s, pic 459 Mo | Analyse **et** sérialisation : ne mesure pas l'indexeur |
 | `appstreamcli search` (`AsPool`, cache libxmlb) | pic 52 Mo | Piste pour limiter la mémoire de l'indexeur |
@@ -1627,7 +1773,9 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 - ouverture de SQLite (aucun parsing), publication du nom de bus, puis état
   `ready` ;
 - l'état installé est servi immédiatement depuis `state.sqlite` et réconcilié
-  ensuite avec PackageKit et libflatpak, en arrière-plan ;
+  ensuite avec PackageKit et libflatpak, en arrière-plan. `ready` n'attend
+  aucune requête PackageKit : un seul `Resolve` coûte déjà ≈ 0,5 s sur la
+  machine d'audit [MESURÉ, prototype 4] ;
 - les backends s'initialisent à la première utilisation.
 
 ### 10.3 Recherche instantanée
@@ -1898,7 +2046,7 @@ GoogleTest et `gtest_discover_tests`, comme dans l'écosystème [CODE].
 | Cœur (sans boucle d'événements ni bibliothèque Cutefish) | Normalisation des identifiants, fusion et alias, offre par défaut, construction des requêtes FTS5 (échappement), classement, politique de confirmation, machine d'états, file par backend, journal et reprise, planification des images (LIFO, annulation), traduction des erreurs | Tests unitaires purs ; catalogues produits par l'écriture de `core` | Non |
 | Indexeur | Lecture DEP-11 et XML Flathub, conversion des descriptions en blocs, langues, entrées malformées (code de sortie non nul, pas d'instantané) | Catalogues réduits en fixtures ; comparaison avec un résultat attendu | Non |
 | Catalogue et recherche | Jeu de requêtes de référence (« firefox », « éditeur », « photo », accents, préfixes, fautes légères) avec premiers résultats attendus | Instantané construit à partir des fixtures, puis à partir de copies complètes des catalogues | Non |
-| Backend PackageKit | Séparation générique / profil (aucune donnée Debian dans le code générique), résolution, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
+| Backend PackageKit | Séparation générique / profil (aucune donnée Debian dans le code générique), résolution groupée, plan, installation, suppression, mises à jour, erreurs, verrou, annulation, **présence d'`ONLY_TRUSTED`** ; cas relevés par le prototype 4 : version du plan différente de la version demandée, suppression en cascade malgré `allow_deps=false`, mise à jour à version identique, erreur D-Bus de la méthode sans `Finished`, annulation sans effet immédiat, gravité encodée dans `info`, file unique sous charge | Faux `org.freedesktop.PackageKit` sur un bus système privé (`dbus-run-session`), écrit avec `base::dbus::Object` [CODE], qui rejoue des scénarios. Puis `packagekitd` réel avec ses backends de test dans un conteneur [À VALIDER : `libpk_backend_test_*` présents, MESURÉ en 0.1] | Non |
 | Backend Flatpak | Plans, double passe et règles de comparaison sémantique (dont la dépendance déjà satisfaite et la différence impossible à classer), délai maximal, annulation, permissions et leurs différences, erreurs, séparation des périmètres `user` et `system` | Installation utilisateur temporaire (`FLATPAK_USER_DIR`) et dépôt OSTree local construit par `flatpak build-export`, sans réseau ni privilège : méthode validée par le prototype 1 ; parsing des permissions sur fixtures | Non |
 | API D-Bus | Méthodes, validation des entrées, erreurs, signaux, regroupement de la progression, `Busy`, reconnexion (arrêt et relance du service), journal `interrupted` | Service lancé sur un bus de session privé avec un **backend de test compilé** (un double de test, pas un plugin) | Non |
 | Transactions | Toutes les transitions de §3.5, annulation dans chaque état, plan modifié entre plan et confirmation, parallélisme PackageKit et Flatpak | Backends de test | Non |
@@ -1953,7 +2101,9 @@ avant chaque version, puis automatisation éventuelle avec
 | API de cutefish-toolkit jeune, un seul mainteneur visible [CODE] | Ruptures à absorber | Épingler la révision du toolkit en CI, dépendre de peu d'API, contribuer en amont (grille virtualisée) |
 | `ToolkitBase` livrée et construite avec le toolkit graphique | Seule la couche hôte est concernée (P-006) : un portage réécrit ou reconstruit cette couche, pas le cœur | O-008 : demande d'option « base seule » en amont |
 | Double passe Flatpak validée seulement en installation utilisateur, sur dépôt local (§7.3) | Coût de la seconde résolution sur Flathub inconnu ; comportement avec GPG, HTTP, plusieurs clients et `flatpak-system-helper` non testé | Mesures réseau et prototype de l'installation système (§14.4) ; règles de comparaison couvertes par des tests |
-| Rattachement à une transaction PackageKit après redémarrage du service | Progression perdue après un plantage | Repli simple déjà prévu : `interrupted` puis réconciliation |
+| Rattachement à une transaction PackageKit après redémarrage du service | Signaux émis pendant l'absence perdus ; relecture des propriétés non testée | Suivi des signaux par une autre connexion vérifié (prototype 4) ; repli : `interrupted` puis réconciliation |
+| PackageKit (backend APT) sérialise toutes ses transactions, requêtes comprises | Une longue installation retarde l'état installé et les mises à jour, y compris pour d'autres logiciels de la machine | File unique du service (P-009), requêtes groupées, interface servie depuis `state.sqlite` |
+| Pas de lien entre simulation et exécution PackageKit ; version d'un `package_id` non imposée ; `allow_deps=false` ignoré | Une exécution peut différer du plan confirmé | Simulation obligatoire, vérification des versions et des paquets supplémentaires, nouvelle simulation avant l'exécution ; fenêtre résiduelle documentée (§7.2) ; correspondance à tester en environnement jetable |
 | Mémoire et durée de l'indexeur | Objectifs §10 manqués | Mesure dès le prototype, avec `AsPool` et avec `AsMetadata` ; lecture source par source |
 | Erreurs de fusion des applications | Mauvaise offre proposée | Règles conservatrices (§6.4), tests sur les 444 applications communes |
 | Mise à jour d'une application APT qui entraîne celle de dépendances partagées | Effet sur d'autres programmes | Simulation, dépendances visibles dans le plan, `ONLY_TRUSTED` ; la boutique ne lance jamais de mise à jour complète (D-010) |
@@ -1987,9 +2137,13 @@ avant chaque version, puis automatisation éventuelle avec
 1. Prototype libflatpak : **fait** (prototype 1, P-008 validée). Restent :
    coût de la seconde résolution sur Flathub, remotes GPG et HTTP, plusieurs
    clients D-Bus.
-2. Prototype PackageKit sur sd-bus : `Resolve` par lots, simulation,
-   correspondance des `Status` et `ErrorCode`, signaux après un `apt` en ligne
-   de commande, rattachement à une transaction existante.
+2. Prototype PackageKit sur sd-bus : **fait** (prototype 4, requêtes et
+   simulations seulement, §7.2). Restent, dans un environnement jetable :
+   transactions réelles, dialogue polkit de Cutefish (acceptation, refus,
+   annulation), utilisateur non administrateur, conflit de verrou dpkg, arrêt
+   du démon pendant une transaction, `RefreshCache`, questions debconf,
+   correspondance entre simulation et exécution, signaux après un `apt` en
+   ligne de commande, relecture des propriétés d'une transaction rattachée.
 3. Prototype d'indexeur : comparaison `AsPool` / `AsMetadata` (durée, pic
    mémoire, provenance), taille de l'instantané, sélection des langues,
    conversion des descriptions.
