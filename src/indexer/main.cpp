@@ -163,11 +163,12 @@ int main(int argc, char** argv)
     }
     std::error_code ec;
     std::printf("catalogue %s applications=%lld offers=%lld texts=%lld aliases=%lld ambiguous_aliases=%lld "
-                "dropped_texts=%lld dropped_icons=%lld dropped_categories=%lld bytes=%lld import_s=%.3f "
+                "invalid_aliases=%lld dropped_texts=%lld dropped_icons=%lld dropped_categories=%lld bytes=%lld import_s=%.3f "
                 "finish_s=%.3f total_s=%.3f rss_after_import_kib=%ld max_rss_kib=%ld\n",
                 output.c_str(), static_cast<long long>(stats->applications), static_cast<long long>(stats->offers),
                 static_cast<long long>(stats->texts), static_cast<long long>(stats->aliases),
-                static_cast<long long>(stats->ambiguousAliases), static_cast<long long>(stats->droppedTexts),
+                static_cast<long long>(stats->ambiguousAliases), static_cast<long long>(stats->invalidAliases),
+                static_cast<long long>(stats->droppedTexts),
                 static_cast<long long>(stats->droppedIcons), static_cast<long long>(stats->droppedCategories),
                 static_cast<long long>(std::filesystem::file_size(output, ec)), seconds(start, finishStart),
                 seconds(finishStart, end), seconds(start, end), rssAfterImport, peakRssKiB());

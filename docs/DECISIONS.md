@@ -213,6 +213,37 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   aucun dialogue (P-008).
 - **Détails** : ARCHITECTURE §7.4.
 
+### D-012 — Identifiants `<provides><id>` : alias non ambigus, jamais de fusion
+
+- **Statut** : Validée (propriétaire, après le Core v0.2). Remplace la règle 2
+  « Alias explicites » de ARCHITECTURE §6.4, qui fusionnait deux applications
+  liées par un `<provides><id>`.
+- **Décision** :
+  - un identifiant déclaré dans `<provides><id>` est normalisé comme un
+    identifiant de composant (suffixe `.desktop` retiré) ;
+  - il devient un **alias** de l'application qui le déclare seulement si
+    **une seule** application le revendique et si **aucune** application ne
+    porte déjà cet identifiant, quel que soit l'ordre d'import ;
+  - sinon il est ignoré et compté comme ambigu ; un identifiant invalide est
+    compté à part ; un identifiant égal à celui du composant est ignoré ;
+  - un `<provides><id>` ne **fusionne jamais** deux applications et ne
+    déplace jamais d'offre ; la recherche par identifiant essaie toujours les
+    identifiants d'application avant les alias.
+- **Justification** :
+  - une revendication n'est qu'une correspondance probable : la fusion
+    aurait réuni des applications distinctes sur la seule déclaration d'une
+    source (par exemple `org.kde.kwalletmanager5` qui déclarerait
+    `org.kde.kwalletmanager`) ;
+  - la règle est déterministe et indépendante de l'ordre des sources.
+- **Mesure** [MESURÉ, catalogues Debian `main` et Flathub du 7 novembre
+  2026] : 225 alias gardés, 79 identifiants ambigus, aucun invalide.
+- **Tests** : `tests/core/testaliases.cpp` (revendication unique, forme
+  `.desktop`, double revendication, identifiant d'une application existante
+  dans les deux ordres d'import, même application revendiquant deux fois,
+  identifiant propre, identifiants invalides, ordre de recherche).
+- **Détails** : [CATALOG.md](CATALOG.md) §4,
+  [ARCHITECTURE §6.4](ARCHITECTURE.md#64-identifiants-correspondances-et-dédoublonnage).
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de

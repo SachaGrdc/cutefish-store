@@ -53,8 +53,10 @@ struct ComponentRecord
     std::vector<LocalizedKeywords> keywords = {};
     IconRef icon = {};
     std::vector<std::string> categories = {};
-    /// `<provides><id>` values. They become aliases when unambiguous; they
-    /// never merge two applications.
+    /// `<provides><id>` values, normalised like component ids. Rule D-012:
+    /// one becomes an alias only when exactly one application claims it and
+    /// no application has that id; it never merges two applications. A
+    /// value equal to the component's own id is ignored.
     std::vector<std::string> providedIds = {};
     std::string developer = {};
     bool verified = false;
@@ -84,8 +86,10 @@ struct CatalogBuildStats
     /// Translations dropped because invalid (bad UTF-8, too long...).
     std::int64_t droppedTexts = 0;
     /// Provided ids that were not kept as aliases: equal to the id of an
-    /// application, or claimed by several applications.
+    /// application, or claimed by several applications (D-012).
     std::int64_t ambiguousAliases = 0;
+    /// Provided ids that are not valid application ids.
+    std::int64_t invalidAliases = 0;
     std::int64_t droppedCategories = 0;
     std::int64_t droppedIcons = 0;
 };

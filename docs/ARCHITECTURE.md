@@ -1032,15 +1032,13 @@ résultats de recherche sans aller-retour supplémentaire.
    [MESURÉ] 419 applications communes à Debian `main` et Flathub sans
    normalisation, **444** avec : le catalogue fusionné compte environ 4 950
    applications de bureau.
-2. Alias explicites : si un composant déclare l'identifiant d'un autre dans
-   `<provides><id>`, ils sont fusionnés. Si deux applications distinctes
-   revendiquent le même alias, rien n'est fusionné et un avertissement est
-   journalisé.
-   **Écart du Core v0.2** : aucune fusion n'est faite sur un
-   `<provides><id>`. L'identifiant devient un alias s'il est revendiqué par
-   une seule application et ne désigne aucune application existante ;
-   sinon il est compté comme ambigu (79 cas sur les catalogues réels). La
-   règle ci-dessus reste à confirmer ou à remplacer [À VALIDER].
+2. Alias explicites (**D-012**, qui remplace la règle de fusion initiale) :
+   un `<provides><id>` devient un alias de l'application qui le déclare
+   seulement si une seule application le revendique et qu'aucune
+   application ne porte cet identifiant ; sinon il est ignoré et compté
+   comme ambigu (79 cas sur les catalogues réels). Il ne fusionne jamais
+   deux applications. Version remplacée : « si un composant déclare
+   l'identifiant d'un autre dans `<provides><id>`, ils sont fusionnés ».
 3. **Jamais de fusion sur le nom seul** : trop de faux positifs.
 
 **Métadonnées affichées** pour une application fusionnée :
@@ -2187,7 +2185,8 @@ avant chaque version, puis automatisation éventuelle avec
    ligne de commande, relecture des propriétés d'une transaction rattachée.
 3. Prototype d'indexeur : **fait** (prototype 3), puis implémenté en Core
    v0.2 ([CATALOG.md](CATALOG.md)). Restent : politique de langues (O-009),
-   règle des `<provides><id>` (§6.4), mesures sur une machine modeste.
+   mesures sur une machine modeste. Règle des `<provides><id>` : tranchée
+   (D-012).
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.

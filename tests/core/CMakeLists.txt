@@ -4,6 +4,7 @@ add_executable(store-core-tests
     catalogfixture.h
     fakes.h
     fixtures.h
+    testaliases.cpp
     testapplication.cpp
     testcatalog.cpp
     testcatalogfile.cpp

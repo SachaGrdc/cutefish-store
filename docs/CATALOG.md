@@ -206,13 +206,20 @@ importés, 470 d'un autre type ; Flathub 4 828 composants, 3 349 importés,
 - **Même lanceur, identifiants différents** (`org.kde.kwalletmanager5`,
   `org.kde.kwalletmanager`) : deux applications, jamais fusionnées ; le nom
   seul ne fusionne jamais rien.
-- **`<provides><id>`** : devient un alias seulement si une seule application
-  le revendique et qu'aucune application ne porte déjà cet identifiant ;
-  sinon il est compté comme ambigu et ignoré (225 alias gardés, 79 ambigus
-  sur les catalogues réels [MESURÉ]). **Écart avec §6.4, règle 2**, qui
-  prévoyait de fusionner deux applications liées par un `<provides><id>` :
-  la demande de cette étape interdit toute fusion sur une correspondance
-  probable. La règle §6.4 reste à trancher [À VALIDER].
+- **`<provides><id>`, décision D-012** (validée par le propriétaire ; elle
+  remplace la règle 2 du §6.4 de l'architecture, qui fusionnait deux
+  applications liées par un `<provides><id>`) :
+  - l'identifiant est normalisé (suffixe `.desktop` retiré) ;
+  - il devient un alias seulement si une seule application le revendique et
+    qu'aucune application ne porte déjà cet identifiant, quel que soit
+    l'ordre d'import ; sinon il est ignoré et compté comme ambigu ;
+  - un identifiant invalide est compté à part ; l'identifiant du composant
+    lui-même est ignoré ;
+  - il ne fusionne jamais deux applications et ne déplace aucune offre ; la
+    recherche essaie les identifiants d'application avant les alias ;
+  - catalogues réels [MESURÉ] : 225 alias gardés, 79 ambigus, aucun
+    invalide ;
+  - tests : `tests/core/testaliases.cpp`.
 - 444 applications ont une offre Debian et une offre Flathub [MESURÉ],
   comme mesuré pendant la phase 0.2.
 
@@ -401,12 +408,13 @@ par mode tirées du catalogue (graine fixe) [MESURÉ] :
 
 | Ensemble | Fichiers | Ce qui est couvert |
 |---|---|---|
+| Alias (D-012) | `tests/core/testaliases.cpp` | Chaque cas de la règle du §4 |
 | Catalogue | `tests/core/testcatalog.cpp`, `catalogfixture.h` | Construction, compteurs et rejets, application à plusieurs offres, provenance, identifiants hérités, branches, même lanceur, alias, langues, recherche par rang (exacte, préfixe, mots, accents, sous-chaîne, fautes, sans résultat, syntaxe FTS5), filtres, pages, résumés, fichiers non valides |
 | Remplacement | `tests/core/testcatalogfile.cpp` | §7 |
 | Import | `tests/indexer/testimport.cpp`, `testmarkup.cpp`, `data/` | DEP-11 et XML Flathub réduits, en clair et compressés ; mêmes résultats pour toutes les tailles de lots ; source absente, fichiers tronqués, contenu illisible ; balisage des descriptions |
 | Intégration | `scripts/measure-catalog.sh`, `tests/perf/catalogbench.cpp` | Catalogues réels du système, hors `ctest` |
 
-Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 123 tests,
+Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 131 tests,
 réussis avec GCC, avec ASan et UBSan [MESURÉ].
 
 ## 10. Limites connues
@@ -414,8 +422,6 @@ réussis avec GCC, avec ASan et UBSan [MESURÉ].
 - **D-009** : pas d'offre par défaut. Les textes affichés suivent la priorité
   des sources (règle provisoire).
 - **O-009** : aucune politique de langues n'est fixée ; les coûts sont au §5.
-- **§6.4, règle 2** : les `<provides><id>` ne fusionnent pas les applications
-  (§4) ; à trancher.
 - Composants autres que `desktop-application` (console, polices, modules
   complémentaires) non importés.
 - Rangs 1 et 2 sensibles aux accents (casse ASCII seulement).

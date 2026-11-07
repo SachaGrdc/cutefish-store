@@ -337,7 +337,11 @@ Result<void> CatalogWriter::addComponent(const SourceId& sourceId, ComponentReco
 
     for (const std::string& provided : record.providedIds) {
         auto alias = AppId::fromComponentId(provided);
-        if (!alias || *alias == *appId)
+        if (!alias) {
+            ++d->stats.invalidAliases;
+            continue;
+        }
+        if (*alias == *appId)
             continue;
         d->aliasClaims[alias->str()].insert(*app);
     }
@@ -350,8 +354,9 @@ Result<CatalogBuildStats> CatalogWriter::finish()
         return Error::conflict("catalogue already finished");
     Database& db = d->db;
 
-    // Aliases: kept only when one application claims them and no
-    // application has that id (ARCHITECTURE §6.4: never merge on a claim).
+    // Aliases (D-012): kept only when one application claims them and no
+    // application has that id, whatever the order of the components. A
+    // claim never merges applications.
     {
         auto insertAlias = Statement::prepare(db, "INSERT INTO aliases (alias, app) VALUES (?, ?)");
         if (!insertAlias)
