@@ -335,9 +335,9 @@ premier rang qui la trouve :
   accentuée différemment est trouvée par le rang 3.
 - Résultats : des applications, jamais des paquets ; les offres s'obtiennent
   par `application(id)`.
-- Filtres : catégorie, backend. `installedOnly` est refusé (`NotSupported`)
-  tant que `state.sqlite` n'existe pas ; `installed` et `hasUpdate` sont
-  faux dans les résumés.
+- Filtres : catégorie, backend, et `installedOnly` quand `state.sqlite` est
+  attachée (§11) ; sans elle, `installedOnly` est refusé (`NotSupported`).
+  `hasUpdate` reste faux : il n'existe pas encore de table des mises à jour.
 - La liste classée de la dernière recherche est gardée : changer de page ne
   relance pas la recherche. Le service applique déjà « la dernière requête
   gagne » côté interface (§10.3).
@@ -463,12 +463,16 @@ par mode tirées du catalogue (graine fixe) [MESURÉ] :
 | Alias (D-012) | `tests/core/testaliases.cpp` | Chaque cas de la règle du §4 |
 | Catalogue | `tests/core/testcatalog.cpp`, `catalogfixture.h` | Construction, compteurs et rejets, application à plusieurs offres, provenance, identifiants hérités, branches, même lanceur, alias, langues, recherche par rang (exacte, préfixe, mots, accents, sous-chaîne, fautes, sans résultat, syntaxe FTS5), filtres, pages, résumés, fichiers non valides |
 | Remplacement | `tests/core/testcatalogfile.cpp` | §7 |
-| Indexeur (contrat) | `tests/indexer/testcli.cpp` | Codes de sortie et ligne `result=` (§3, « Contrat de l'indexeur ») |
+| Indexeur (contrat) | `tests/indexer/testcli.cpp` | Codes de sortie et ligne `result=` (§3, « Contrat de l'indexeur ») ; empreintes, changement détecté, actualisation refusée et catalogue conservé (§11) |
+| Empreintes | `tests/core/testsourcefingerprint.cpp` | SHA-256, sondes, chaque état de `assessSources`, stockage et relecture (§11) |
+| Navigation | `tests/core/testbrowse.cpp` | Tri par nom affiché (C et français), pages, filtres, catégories (§11) |
+| Catalogue et état | `tests/core/testcatalogstate.cpp` | Liens par offre, identifiant, alias ; liens absents ou contradictoires ; fichier absent ou plus récent ; cohérence avec `StateStore` ; écrivain concurrent ; remplacements du catalogue (§11) |
 | Import | `tests/indexer/testimport.cpp`, `testmarkup.cpp`, `data/` | DEP-11 et XML Flathub réduits, en clair et compressés ; mêmes résultats pour toutes les tailles de lots ; source absente, fichiers tronqués, contenu illisible ; balisage des descriptions |
 | Intégration | `scripts/measure-catalog.sh`, `tests/perf/catalogbench.cpp` | Catalogues réels du système, hors `ctest` |
 
-Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 138 tests,
-réussis avec GCC, avec ASan et UBSan [MESURÉ].
+Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 138 tests
+en v0.2 ; 254 en Catalogue v0.3 (tout le dépôt), réussis avec GCC, Clang
+(`-Werror`), ASan et UBSan [MESURÉ].
 
 ## 10. Limites connues
 
@@ -478,11 +482,115 @@ réussis avec GCC, avec ASan et UBSan [MESURÉ].
 - Composants autres que `desktop-application` (console, polices, modules
   complémentaires) non importés.
 - Rangs 1 et 2 sensibles aux accents (casse ASCII seulement).
-- Pas d'état installé : `installedOnly` refusé, `installed` et `hasUpdate`
-  toujours faux (Core v0.3, `state.sqlite`).
+- `hasUpdate` toujours faux : la table des mises à jour viendra avec
+  `queryUpdates` (étapes D et F).
+- Tri de `browse` insensible à la casse ASCII seulement : un nom qui
+  commence par une lettre accentuée (« Éditeur ») est classé après « Z ».
+- Une source importée dont le fichier disparaît bloque tout réimport tant
+  qu'elle n'est pas revenue ou retirée de la configuration (§11) ; le
+  contenu du dossier d'icônes n'est pas couvert par l'empreinte.
 - Captures d'écran, versions publiées, URL, licence, classification du
   contenu non stockées (`app_details` du §6.3, à venir avec la page de
   détails).
 - Plausibilité du remplacement : 50 % par source, choisi par l'architecture,
   non éprouvé sur des actualisations réelles.
 - Mesures sur une seule machine, cache de pages chaud.
+
+## 11. Catalogue v0.3 : sources, navigation, état installé
+
+### Empreintes des sources (`sourcefingerprint.h`)
+
+Une **empreinte** identifie le fichier de métadonnées dont une source a été
+importée : chemin, taille, `mtime` (ns), **SHA-256 du contenu** et dossier
+d'icônes. Trois notions restent séparées :
+
+| Notion | Dit | Où |
+|---|---|---|
+| Empreinte | **Quoi** a été importé | `meta` du catalogue (`fingerprint:<source>`, objet JSON) |
+| Dernier rafraîchissement | **Quand** la boutique a rafraîchi, qu'il y ait eu un changement ou non (D-015) | `state.sqlite` (`StateStore::lastRefresh`) |
+| Provenance d'une offre | **D'où** elle vient (source, origine, périmètre) | `offers`, `sources` ; ne change pas avec le contenu |
+
+- **Calcul** : par l'indexeur, juste avant de lire chaque fichier
+  (`probeSource`). Si le fichier change pendant la lecture, l'empreinte
+  enregistrée est l'ancienne, et la vérification suivante réimporte la
+  source. Taille et `mtime` ne sont qu'un raccourci : inchangés, le hachage
+  précédent est réutilisé sans relire le fichier. SHA-256 est implémenté
+  dans le cœur (vecteurs FIPS 180-4 vérifiés) : aucune dépendance ajoutée.
+- **Ce qui est une modification** : contenu (hachage) ou chemin du fichier,
+  dossier d'icônes, ou descripteur de la source (nature, origine, périmètre,
+  libellé, URL, priorité, activation), puisqu'il change les lignes stockées
+  ou la priorité des textes. Un fichier réécrit à l'identique (nouvelle
+  date, même contenu) n'en est pas une. Le **contenu** du dossier d'icônes
+  n'est pas haché.
+- **Décision** (`assessSources`, fonction pure) :
+
+| État | Cas | Effet |
+|---|---|---|
+| `unchanged` | Même descripteur, même contenu | — |
+| `modified` | Voir ci-dessus, ou aucune empreinte enregistrée (source illisible au dernier import, catalogue antérieur) | Réimport |
+| `added` | Configurée, lisible, absente du catalogue | Réimport (premier import si aucun catalogue) |
+| `removed` | Dans le catalogue, plus configurée | Réimport ; déclarée à `replaceCatalog` comme retirée |
+| `missing`, `unreadable` d'une source **importée** | Fichier absent ou illisible | **Bloque** le réimport : le candidat perdrait ses offres et serait refusé (50 %) ; le catalogue en service reste |
+| `missing`, `unreadable` d'une source **jamais importée** | Remote ajoutée sans appstream encore | Ignorée, sans bloquer |
+
+- Un réimport n'est proposé que si au moins une source est lisible (l'indexeur
+  en exige une). `Catalog::sources()` rend les sources du catalogue avec leur
+  empreinte et leur nombre d'offres ; une empreinte stockée mal formée est
+  lue comme absente (la source est alors réimportée, ce qui est sûr).
+- Aucun changement de schéma : les empreintes sont dans `meta`.
+
+### Navigation (`browse`, `listCategories`)
+
+- `browse(BrowseQuery)` : applications sans texte, triées par **nom affiché**
+  (même règle que les textes : langues du lecteur, puis priorité de la
+  source, puis identifiant d'offre ; casse ASCII ignorée), puis par
+  identifiant. Mêmes filtres et mêmes bornes que la recherche (catégorie,
+  backend, `installedOnly`, 1 à 200 par page). Une application est une
+  ligne, quel que soit son nombre d'offres.
+- Seule la liste triée des **numéros de ligne** est gardée entre deux pages,
+  jamais les applications : 8 octets par application.
+- `listCategories()` : chaque catégorie avec son nombre d'applications, par
+  nom. Le nom traduit et l'icône d'une catégorie freedesktop relèvent de
+  l'interface.
+- Les filtres portent sur l'application : ses catégories sont l'union de
+  celles de ses offres.
+
+### État installé (`CatalogReadOptions::statePath`)
+
+- `state.sqlite` est **attachée en lecture seule** (`mode=ro`,
+  `query_only`) à chaque lecteur. Fichier absent : `NotFound` (jamais créé) ;
+  autre version de schéma : `NotSupported`.
+- Une application est **installée** si l'inventaire contient l'une de ses
+  offres ; pour une offre installée que le catalogue ne connaît pas, le lien
+  de l'inventaire vers l'application (son identifiant ou un alias) compte.
+  Si le catalogue connaît l'offre, **son** lien l'emporte sur un lien
+  contradictoire de l'inventaire. Une offre inconnue sans lien, ou un lien
+  vers une application absente, ne marque rien.
+- Ce n'est qu'un **cache d'affichage** du dernier inventaire : il ne décide
+  jamais d'une opération (SERVICE.md §8).
+- Chaque appel (`search`, `browse`, `summaries`) est **une transaction de
+  lecture** : une page voit un seul inventaire validé, jamais un inventaire
+  à moitié remplacé. Les listes `installedOnly` gardées en cache sont
+  indexées par `data_version` de `state.sqlite` : un nouvel inventaire n'est
+  jamais servi depuis une liste périmée.
+
+### Mesures (Catalogue v0.3)
+
+Catalogue réel Debian trixie `main` + Flathub (4 949 applications, 5 394
+offres), descriptions françaises, `store-catalog-bench` [MESURÉ, une
+machine, cache chaud] :
+
+| Mesure | Sans `state.sqlite` | Avec `state.sqlite` (3 393 lignes) |
+|---|---|---|
+| Construction (dont empreintes) | 4,1 s | — |
+| `browse`, première page du catalogue entier | 22 ms (44 ms lu en français) | 25 ms |
+| `browse`, pages suivantes, p95 | 0,83 ms | 3,7 ms |
+| `browse`, première page d'une catégorie, p50 | 2,4 ms | 3,9 ms |
+| `browse` `installedOnly`, première page | — | 22,5 ms |
+| `listCategories` (149 catégories) | 0,9 ms | 0,9 ms |
+| Résumés d'une page de 60 | 0,72 ms | 2,8 ms |
+
+L'écart avec `state.sqlite` vient du calcul d'`installed` par application
+(≈ 0,03 ms) ; le plan de requête utilise les index, sauf la vérification
+« offre inconnue du catalogue », qui parcourt `offers` pour les seules
+lignes de l'inventaire liées par identifiant d'application.

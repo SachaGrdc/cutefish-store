@@ -97,8 +97,8 @@ sous charge reste à vérifier par les premiers tests du service.
 | Résumé d'application (A §5.4) : `icon` (chemin) et `icon-url` | Deux clés | `AppSummary::icon` est un `IconRef` (chemin, URL ou nom) | Proposé §4.6 : `icon` + `icon-kind` |
 | Détails (A §5.4) : captures, versions, URL, licence, classification, lanceur | Prévus | Absents du catalogue (`app_details` non créée, CATALOG §10) | `GetDetails` v1 réduit (§4.6) ou extension du catalogue (Q-7) |
 | Offres (A §5.4) : `download-size`, `installed-size`, `default` | Prévus | Absents du catalogue | Tailles par le plan ; `default` calculé à la lecture (D-009, §4.8) |
-| Empreintes des sources (A §6.2, étape 1) | « Enregistrées dans l'instantané en service » | Non écrites par `CatalogWriter` | À ajouter à `meta` (étape C, §15) |
-| Lecteurs avec `state.sqlite` attachée (A §6.3, A §8.2) | `ATTACH … mode=ro` | `SqliteCatalog` n'attache rien | À ajouter avec `state.sqlite` (§8.4) |
+| Empreintes des sources (A §6.2, étape 1) | « Enregistrées dans l'instantané en service » | Écrites dans `meta` depuis le Catalogue v0.3 | Fait (CATALOG §11) |
+| Lecteurs avec `state.sqlite` attachée (A §6.3, A §8.2) | `ATTACH … mode=ro` | `CatalogReadOptions::statePath` depuis le Catalogue v0.3 | Fait (CATALOG §11) |
 | `Backend` (A §7.1) | 11 opérations | 3 en Core v0.1 (`availability`, `queryInstalled`, `sources`) | Extension proposée §5.4 |
 | Préférences | `settings.ini` (A §2) | — | La demande de phase cite `state.sqlite` ; ce document garde `settings.ini` (§8.1) |
 | Nom du catalogue | `catalog.sqlite` | Idem | La demande de phase écrit `catalogue.db` ; le nom existant est conservé |
@@ -328,9 +328,9 @@ réponse abandonnée, aucun effet.
 
 | Méthode | Entrée → sortie | Erreurs | Signaux liés | Source des données |
 |---|---|---|---|---|
-| `Search` | `s text, a{sv} options` → `t generation, u total, aa{sv} results` | `InvalidArgs` (texte > 256 octets, UTF-8 invalide, option inconnue, `limit` hors 1-200), `NotReady`, `NotSupported` (`installed-only` tant que l'état n'est pas branché) | `CatalogChanged` invalide les résultats | `SqliteCatalog::search` (5 rangs, CATALOG §6), état installé par `state.sqlite` attachée |
-| `Browse` | `s category, a{sv} options` → `t, u, aa{sv}` | `InvalidArgs`, `NotReady` | `CatalogChanged` | **Nouvelle fonction du catalogue** (navigation sans texte, à ajouter à `Catalog`) |
-| `ListCategories` | — → `t, aa{sv}` | `NotReady` | `CatalogChanged` | **Nouvelle fonction** (comptage par catégorie) |
+| `Search` | `s text, a{sv} options` → `t generation, u total, aa{sv} results` | `InvalidArgs` (texte > 256 octets, UTF-8 invalide, option inconnue, `limit` hors 1-200), `NotReady`, `NotSupported` (`installed-only` si le lecteur n'a pas `state.sqlite` attachée) | `CatalogChanged` invalide les résultats | `SqliteCatalog::search` (5 rangs, CATALOG §6), état installé par `state.sqlite` attachée |
+| `Browse` | `s category, a{sv} options` → `t, u, aa{sv}` | `InvalidArgs`, `NotReady`, `NotSupported` (comme `Search`) | `CatalogChanged` | `Catalog::browse` (Catalogue v0.3, CATALOG §11) |
+| `ListCategories` | — → `t, aa{sv}` | `NotReady` | `CatalogChanged` | `Catalog::listCategories` (Catalogue v0.3) ; nom traduit et icône ajoutés par l'interface |
 | `GetSummaries` | `as app_ids` → `t, aa{sv}` | `InvalidArgs` (> 200) | `CatalogChanged`, `InstalledChanged` | `Catalog::summaries` |
 | `GetDetails` | `s app_id` → `t, a{sv}` | `NotFound`, `InvalidArgs` | `CatalogChanged`, `InstalledChanged`, `UpdatesChanged` | `Catalog::application` + état installé + mises à jour |
 | `GetInstalled` | `a{sv} options` → `aa{sv}` | `InvalidArgs` | `InstalledChanged` | `InstalledState` |
@@ -775,8 +775,9 @@ proposition ci-dessous, qui reste la référence pour les tables à venir :
 - les raisons de confirmation ne sont pas stockées : elles sont recalculées
   depuis le plan, seul l'indicateur `plan_changed` est gardé ;
 - pas encore créées, elles viendront par migration avec leur composant :
-  `updates` (étape C), `images` (étape I), le consentement Flathub de
-  `source_state` (P-011, étape G), le lien `parent` d'`UpdateAll` (service).
+  `updates` (avec `queryUpdates`, étapes D et F ; prévue d'abord à l'étape
+  C), `images` (étape I), le consentement Flathub de `source_state` (P-011,
+  étape G), le lien `parent` d'`UpdateAll` (service).
 
 Proposition initiale :
 
@@ -1052,7 +1053,8 @@ sont des manques, sauf le premier, qui est un commentaire périmé.
 **État après le Core v0.3a** : les écarts 1, 2, 4 et 6 sont traités
 (`plan.h`, `confirmation.h`, `transaction.h`, `defaultoffer.h` ; détails dans
 [CORE.md](CORE.md)). **Après le Core v0.3b** : les écarts 3 et 10 aussi
-(`statestore.h`). Les autres restent aux étapes C et D.
+(`statestore.h`). **Après le Catalogue v0.3** : les écarts 7, 8 (sauf
+`has-update`, sans table des mises à jour) et 9. Reste l'écart 5 (étape D).
 
 | # | Écart | Où | Conséquence | Traitement |
 |---|---|---|---|---|

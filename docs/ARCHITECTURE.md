@@ -909,7 +909,11 @@ exactes, permissions Flatpak.
 1. **Détection d'un changement.** Le service calcule une empreinte de chaque
    fichier source (chemin, taille, `mtime`, puis SHA-256 si les deux premiers
    ont changé). Il la compare à celle enregistrée dans l'instantané en
-   service. Rien ne change ⇒ pas d'indexation.
+   service. Rien ne change ⇒ pas d'indexation. Implémenté en Catalogue v0.3
+   (`probeSource`, `assessSources`, [CATALOG.md](CATALOG.md) §11) :
+   l'indexeur enregistre l'empreinte calculée juste avant de lire chaque
+   fichier ; une source importée dont le fichier manque ou est illisible
+   bloque le réimport, et le catalogue en service reste.
    - Déclencheurs (gérés par la couche hôte) : fin d'un `Refresh`, signal
      `RepoListChanged` de PackageKit, `base::FileWatch` (inotify) [CODE] sur les dossiers des catalogues
      (pour un `apt update` lancé en ligne de commande). Le changement de
@@ -919,7 +923,8 @@ exactes, permissions Flatpak.
    - arguments : chemin de sortie temporaire dans le même dossier que
      `catalog.sqlite` (pour que le renommage soit atomique), langues
      (`--locale fr`, D-013), et une option `--source` par source (backend,
-     origine, scope, chemin, priorité, empreinte).
+     origine, scope, chemin, priorité). L'indexeur calcule lui-même
+     l'empreinte de chaque fichier au moment de le lire.
    - Une seule indexation à la fois. Une nouvelle demande pendant
      l'indexation est mémorisée et relancée une fois à la fin.
 3. **Dans l'indexeur** :

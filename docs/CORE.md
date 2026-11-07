@@ -1,4 +1,4 @@
-# Cutefish Store — Le cœur (`store-core`), v0.3b
+# Cutefish Store — Le cœur (`store-core`), v0.3
 
 `store-core` est la bibliothèque qui porte la logique métier de la boutique.
 Elle applique les décisions de [ARCHITECTURE.md](ARCHITECTURE.md) et de
@@ -19,6 +19,9 @@ documents qui font foi.
   la comparaison de plans, la machine d'états des transactions et le choix
   de l'offre proposée par défaut (D-009). Ce sont des fonctions pures : elles
   décident, mais n'appellent aucun backend.
+- Depuis la v0.3 (catalogue) : empreintes des sources et décision de
+  réimport, navigation (`browse`, `listCategories`), état installé lu avec
+  le catalogue ([CATALOG.md](CATALOG.md) §11).
 - Depuis la v0.3b : `state.sqlite` (`StateStore`) : cache de l'état
   installé, journal des transactions, dates de rafraîchissement, rétention
   D-018 et reprise après un arrêt.
@@ -31,8 +34,9 @@ Le cœur ne dépend que de C++20, de la bibliothèque standard et de SQLite
 - SQLite est lié en privé : aucun en-tête SQLite n'apparaît dans l'API
   publique ;
 - aucune boucle d'événements, aucun thread, aucune horloge, aucun accès
-  réseau ; les seuls fichiers touchés sont le catalogue et `state.sqlite`
-  qu'on lui désigne ;
+  réseau ; il écrit seulement le catalogue et `state.sqlite` qu'on lui
+  désigne, et lit en plus les fichiers de métadonnées des sources pour en
+  calculer l'empreinte (`probeSource`) ;
 - libcurl, prévu par P-006, n'est pas encore lié : il arrivera avec le cache
   d'images.
 
@@ -143,7 +147,7 @@ Précisions :
 
 | Interface | En-tête | Implémentation prévue | Appels |
 |---|---|---|---|
-| `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries` |
+| `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2, étendue en v0.3 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries`, `browse`, `listCategories`, `sources` ; avec `state.sqlite` attachée, `installed` et `installedOnly` |
 | `InstalledState` | `installedstate.h` | `StateStore` (thread principal) et `SqliteInstalledState` (threads de lecture), implémentées en v0.3b (`statestore.h`) | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
 | `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` | Asynchrones (§7.1) : `availability`, `queryInstalled`, `sources` |
 
