@@ -10,11 +10,13 @@ foreach(fixture debian.yml flathub.xml)
          PATHS ${INDEXER_TEST_GENERATED}/${fixture} FORMAT raw COMPRESSION GZip)
 endforeach()
 
-add_executable(store-indexer-tests testmarkup.cpp testimport.cpp)
+add_executable(store-indexer-tests testcli.cpp testimport.cpp testmarkup.cpp)
 target_include_directories(store-indexer-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
 target_compile_definitions(store-indexer-tests PRIVATE
     INDEXER_TEST_DATA="${INDEXER_TEST_DATA}"
-    INDEXER_TEST_GENERATED="${INDEXER_TEST_GENERATED}")
+    INDEXER_TEST_GENERATED="${INDEXER_TEST_GENERATED}"
+    INDEXER_BINARY="$<TARGET_FILE:cutefish-store-indexer>")
+add_dependencies(store-indexer-tests cutefish-store-indexer)
 target_compile_options(store-indexer-tests PRIVATE -Wall -Wextra)
 target_link_libraries(store-indexer-tests PRIVATE store-indexer GTest::gtest_main)
 gtest_discover_tests(store-indexer-tests)

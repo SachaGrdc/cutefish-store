@@ -101,7 +101,10 @@ struct CatalogBuildStats
 class CatalogWriter
 {
 public:
-    /// Creates `candidate`, replacing any previous candidate file.
+    /// Creates `candidate`, deleting any file already at that path (and its
+    /// journal): never pass the active catalogue. A successful finish()
+    /// means the file is complete, not that it is valid or in service:
+    /// replaceCatalog() decides that.
     static Result<CatalogWriter> create(const std::filesystem::path& candidate, CatalogBuildOptions options = {});
 
     CatalogWriter(CatalogWriter&&) noexcept;

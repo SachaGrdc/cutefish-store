@@ -906,11 +906,16 @@ exactes, permissions Flatpak.
    - construire l'index FTS5 (§6.3), `optimize`, `ANALYZE`, puis écrire
      `user_version` en dernier, dans une transaction journalisée et
      synchronisée, et fermer ;
-   - **changement par rapport à la version précédente** : le code de sortie
-     est 0 dès que le candidat est écrit. Une source illisible, tronquée ou
-     mal formée est signalée dans le rapport de l'indexeur sans arrêter les
-     autres ; c'est la validation (étape 4) qui refuse un candidat
-     invraisemblable. Les composants ignorés sont comptés par raison.
+   - **changement par rapport à la version précédente** (« code de sortie 0
+     seulement si tout a réussi ») : le code 0 signifie que le candidat est
+     **écrit et complet**, pas qu'il est valide. Une source illisible,
+     tronquée ou mal formée est signalée dans le rapport de l'indexeur sans
+     arrêter les autres ni changer le code ; c'est la validation (étape 4)
+     qui refuse un candidat invraisemblable. Codes : 0 écrit, 1 aucun
+     candidat utilisable, 2 erreur d'utilisation, 3 écrit mais refusé (avec
+     `--replace` seulement) ; contrat complet dans [CATALOG.md](CATALOG.md),
+     « Contrat de l'indexeur ». Le service lance l'indexeur sans `--replace`
+     et fait lui-même les étapes 4 et 5.
 4. **Validation par le service** :
    - aucun fichier `-journal` ni `-wal` à côté du candidat ;
    - ouverture en lecture seule ;

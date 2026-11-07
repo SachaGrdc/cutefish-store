@@ -81,7 +81,7 @@ installés. Les déclarations recopiées à la main des prototypes de la phase
 construit et teste le projet, sans root, dans une vue du système (bubblewrap)
 où `/usr/include` et les dossiers pkg-config et CMake ne contiennent que les
 fichiers des paquets ci-dessus et de leurs dépendances (203 paquets installés
-dans cette fermeture). Résultat : configuration, compilation et 123 tests
+dans cette fermeture). Résultat : configuration, compilation et 138 tests
 réussis. Retirer un seul des paquets `libsqlite3-dev`, `libappstream-dev`,
 `libxml2-dev` ou `libgtest-dev` fait échouer la configuration avec le
 message attendu. Limite : les bibliothèques d'exécution et les outils
@@ -191,6 +191,50 @@ importés, et ignorés par raison, avec quelques exemples. Sur les catalogues
 réels du 7 novembre 2026 [MESURÉ] : Debian `main` 2 515 composants, 2 045
 importés, 470 d'un autre type ; Flathub 4 828 composants, 3 349 importés,
 1 479 d'un autre type ; 3 traductions retirées.
+
+### Contrat de l'indexeur
+
+`cutefish-store-indexer` écrit un catalogue **candidat**. Écrire un candidat
+et le mettre en service sont deux étapes distinctes, et le code de sortie
+les distingue :
+
+| Code | Sans `--replace` | Avec `--replace ACTIF` |
+|---|---|---|
+| 0 | Candidat **écrit et complet** (`user_version` = 1). Il n'est **ni validé, ni comparé au catalogue actif, ni installé** | Candidat écrit, validé (`replaceCatalog`) et **installé** à la place de `ACTIF` |
+| 1 | Aucun candidat utilisable : l'écriture a échoué ; un fichier laissé à `--output` est incomplet (`user_version` = 0) et refusé par tous les lecteurs | Idem ; `ACTIF` inchangé |
+| 2 | Erreur d'utilisation (argument inconnu, manquant ou mal formé, `--output` identique à `ACTIF`) ; rien n'est écrit | Idem |
+| 3 | — | Candidat écrit mais **refusé** par la validation ; `ACTIF` inchangé, octet pour octet ; candidat gardé pour diagnostic |
+
+- La dernière ligne de la sortie standard répète l'issue sous une forme
+  lisible par un programme : `result=written|installed|refused|failed
+  sources=N unreadable_sources=M`.
+- **Une source illisible ne change pas le code de sortie.** Elle est
+  signalée (`readable=0` dans le rapport, `unreadable_sources`), et c'est la
+  validation qui refuse un candidat qui a perdu une source du catalogue
+  actif. Un code 0 sans `--replace` ne dit donc rien de la qualité du
+  contenu.
+- `--output` est supprimé puis recréé : ce ne doit jamais être le catalogue
+  actif. Avec `--replace`, le même chemin (après résolution) pour les deux est
+  refusé (code 2).
+- Les nombres mal formés (`--batch beaucoup`) sont des erreurs
+  d'utilisation, pas un arrêt brutal du programme.
+
+Règles pour les appelants :
+
+- **le service** lance l'indexeur **sans** `--replace` et considère le code 0
+  comme « candidat disponible », jamais comme « catalogue à jour ». Il appelle
+  ensuite lui-même `replaceCatalog()`, qui seul valide et installe
+  (ARCHITECTURE §6.2, étapes 4 et 5) ; le service n'existe pas encore ;
+- `--replace` sert aux usages manuels et aux tests ; l'API C++ sépare de la
+  même façon `CatalogWriter::finish()` (le fichier est complet) et
+  `replaceCatalog()` (il est validé et en service) ;
+- appelant actuel du dépôt : `scripts/measure-catalog.sh`, sans `--replace` ;
+  il n'installe rien et ses catalogues sont ouverts par `SqliteCatalog`, qui
+  refuse un fichier incomplet.
+
+Tests : `tests/indexer/testcli.cpp` lance le binaire et vérifie chaque code,
+la ligne `result=`, l'absence d'installation sans `--replace`, l'actif
+inchangé après un refus, et le refus de `--output` égal à l'actif.
 
 ## 4. Provenance, doublons et identifiants
 
@@ -411,10 +455,11 @@ par mode tirées du catalogue (graine fixe) [MESURÉ] :
 | Alias (D-012) | `tests/core/testaliases.cpp` | Chaque cas de la règle du §4 |
 | Catalogue | `tests/core/testcatalog.cpp`, `catalogfixture.h` | Construction, compteurs et rejets, application à plusieurs offres, provenance, identifiants hérités, branches, même lanceur, alias, langues, recherche par rang (exacte, préfixe, mots, accents, sous-chaîne, fautes, sans résultat, syntaxe FTS5), filtres, pages, résumés, fichiers non valides |
 | Remplacement | `tests/core/testcatalogfile.cpp` | §7 |
+| Indexeur (contrat) | `tests/indexer/testcli.cpp` | Codes de sortie et ligne `result=` (§3, « Contrat de l'indexeur ») |
 | Import | `tests/indexer/testimport.cpp`, `testmarkup.cpp`, `data/` | DEP-11 et XML Flathub réduits, en clair et compressés ; mêmes résultats pour toutes les tailles de lots ; source absente, fichiers tronqués, contenu illisible ; balisage des descriptions |
 | Intégration | `scripts/measure-catalog.sh`, `tests/perf/catalogbench.cpp` | Catalogues réels du système, hors `ctest` |
 
-Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 131 tests,
+Les tests unitaires n'ont besoin ni du réseau ni de privilèges : 138 tests,
 réussis avec GCC, avec ASan et UBSan [MESURÉ].
 
 ## 10. Limites connues

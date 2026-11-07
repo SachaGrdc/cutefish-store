@@ -9,9 +9,24 @@
 //                priority=N,file=PATH[,icons=DIR][,label=TEXT][,url=URL]
 //       [--source ...] [--replace ACTIVE [--removed-source ID]...]
 //
-// Exit status: 0 when the candidate was written (and, with --replace,
-// installed), 1 when it could not be, 2 on a usage error. Sources that
-// cannot be read are reported and do not stop the others.
+// Exit status (docs/CATALOG.md, "Contrat de l'indexeur"):
+//   0  without --replace: the candidate is WRITTEN and complete. It has NOT
+//      been validated, compared with the active catalogue nor installed:
+//      the caller must still call replaceCatalog() (catalogfile.h).
+//      With --replace: written, validated and installed in place of ACTIVE.
+//   1  no usable candidate: writing failed; any file left at CANDIDATE is
+//      incomplete (schema version 0) and refused by every reader.
+//   2  usage error; nothing was written.
+//   3  with --replace only: the candidate was written but refused by the
+//      validation; ACTIVE is unchanged, CANDIDATE is kept for diagnosis.
+// The last line of the standard output repeats the outcome:
+//   result=written|installed|refused|failed sources=N unreadable_sources=M
+// An unreadable source does not change the exit status: it is reported
+// (readable=0) and left to the validation, which refuses a candidate that
+// lost a source of the active catalogue.
+//
+// CANDIDATE is deleted and recreated: it must never be the active
+// catalogue. With --replace, the same path for both is a usage error.
 
 #include "importer.h"
 
@@ -21,6 +36,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <string>
 #include <vector>
@@ -34,10 +50,15 @@ using namespace cutefish::store::indexer;
 
 namespace {
 
+constexpr int kExitWritten = 0;
+constexpr int kExitFailed = 1;
+constexpr int kExitUsage = 2;
+constexpr int kExitRefused = 3;
+
 [[noreturn]] void usage(const std::string& message)
 {
     std::fprintf(stderr, "cutefish-store-indexer: %s\n(see the header of src/indexer/main.cpp)\n", message.c_str());
-    std::exit(2);
+    std::exit(kExitUsage);
 }
 
 std::map<std::string, std::string> keyValues(std::string_view text)
@@ -106,40 +127,57 @@ int main(int argc, char** argv)
     std::vector<SourceConfig> sources;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        auto value = [&]() -> std::string {
-            if (i + 1 >= argc)
-                usage("missing value after " + arg);
-            return argv[++i];
-        };
-        if (arg == "--output")
-            output = value();
-        else if (arg == "--generation")
-            build.generation = std::stoull(value());
-        else if (arg == "--locale")
-            import.descriptionLocales.push_back(value());
-        else if (arg == "--all-description-locales")
-            import.allDescriptionLocales = true;
-        else if (arg == "--batch")
-            import.batchSize = std::stoul(value());
-        else if (arg == "--source")
-            sources.push_back(parseSource(value()));
-        else if (arg == "--replace")
-            replace = value();
-        else if (arg == "--removed-source")
-            rules.removedSources.push_back(value());
-        else
-            usage("unknown argument " + arg);
+        try {
+            auto value = [&]() -> std::string {
+                if (i + 1 >= argc)
+                    usage("missing value after " + arg);
+                return argv[++i];
+            };
+            if (arg == "--output")
+                output = value();
+            else if (arg == "--generation")
+                build.generation = std::stoull(value());
+            else if (arg == "--locale")
+                import.descriptionLocales.push_back(value());
+            else if (arg == "--all-description-locales")
+                import.allDescriptionLocales = true;
+            else if (arg == "--batch")
+                import.batchSize = std::stoul(value());
+            else if (arg == "--source")
+                sources.push_back(parseSource(value()));
+            else if (arg == "--replace")
+                replace = value();
+            else if (arg == "--removed-source")
+                rules.removedSources.push_back(value());
+            else
+                usage("unknown argument " + arg);
+        } catch (const std::exception&) {
+            // std::stoul and friends: a malformed number is a usage error.
+            usage("invalid value after " + arg);
+        }
     }
     if (output.empty() || sources.empty())
         usage("--output and at least one --source are required");
+    if (!replace.empty()) {
+        std::error_code ec1;
+        std::error_code ec2;
+        if (std::filesystem::weakly_canonical(output, ec1) == std::filesystem::weakly_canonical(replace, ec2))
+            usage("--output must not be the active catalogue given to --replace");
+    }
     build.searchLocales = import.descriptionLocales;
     lowerPriority();
+
+    std::size_t unreadable = 0;
+    auto result = [&](const char* outcome, int status) {
+        std::printf("result=%s sources=%zu unreadable_sources=%zu\n", outcome, sources.size(), unreadable);
+        return status;
+    };
 
     const auto start = std::chrono::steady_clock::now();
     auto writer = CatalogWriter::create(output, build);
     if (!writer) {
         std::fprintf(stderr, "cannot create %s: %s\n", output.c_str(), writer.error().message().c_str());
-        return 1;
+        return result("failed", kExitFailed);
     }
     const std::vector<SourceReport> reports = importSources(*writer, sources, import);
     const long rssAfterImport = peakRssKiB();
@@ -149,6 +187,7 @@ int main(int argc, char** argv)
     auto seconds = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
 
     for (const SourceReport& r : reports) {
+        unreadable += !r.readable;
         std::printf("source %s readable=%d components=%lld imported=%lld seconds=%.3f%s%s\n", r.sourceId.c_str(),
                     r.readable, static_cast<long long>(r.components), static_cast<long long>(r.imported), r.seconds,
                     r.error.empty() ? "" : " error=", r.error.c_str());
@@ -159,7 +198,7 @@ int main(int argc, char** argv)
     }
     if (!stats) {
         std::fprintf(stderr, "cannot finish %s: %s\n", output.c_str(), stats.error().message().c_str());
-        return 1;
+        return result("failed", kExitFailed);
     }
     std::error_code ec;
     std::printf("catalogue %s applications=%lld offers=%lld texts=%lld aliases=%lld ambiguous_aliases=%lld "
@@ -173,14 +212,13 @@ int main(int argc, char** argv)
                 static_cast<long long>(std::filesystem::file_size(output, ec)), seconds(start, finishStart),
                 seconds(finishStart, end), seconds(start, end), rssAfterImport, peakRssKiB());
 
-    if (!replace.empty()) {
-        auto replaced = replaceCatalog(output, replace, rules);
-        if (!replaced) {
-            std::fprintf(stderr, "candidate refused, %s kept: %s\n", replace.c_str(), replaced.error().message().c_str());
-            return 1;
-        }
-        std::printf("replaced %s generation=%llu\n", replace.c_str(),
-                    static_cast<unsigned long long>(replaced->generation));
+    if (replace.empty())
+        return result("written", kExitWritten);
+    auto replaced = replaceCatalog(output, replace, rules);
+    if (!replaced) {
+        std::fprintf(stderr, "candidate refused, %s kept: %s\n", replace.c_str(), replaced.error().message().c_str());
+        return result("refused", kExitRefused);
     }
-    return 0;
+    std::printf("replaced %s generation=%llu\n", replace.c_str(), static_cast<unsigned long long>(replaced->generation));
+    return result("installed", kExitWritten);
 }
