@@ -115,6 +115,11 @@ public:
         return page;
     }
 
+    /// What sources() returns; set by the test.
+    std::vector<RecordedSource> recordedSources;
+
+    Result<std::vector<RecordedSource>> sources() const override { return recordedSources; }
+
     Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const override
     {
         std::vector<AppSummary> out;

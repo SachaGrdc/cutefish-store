@@ -19,6 +19,7 @@ add_executable(store-core-tests
     testplan.cpp
     testsearch.cpp
     testsource.cpp
+    testsourcefingerprint.cpp
     teststatestore.cpp
     testtransaction.cpp
     testversion.cpp

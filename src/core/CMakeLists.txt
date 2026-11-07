@@ -27,6 +27,7 @@ set(STORE_CORE_PUBLIC_HEADERS
     include/cutefish/store/result.h
     include/cutefish/store/search.h
     include/cutefish/store/source.h
+    include/cutefish/store/sourcefingerprint.h
     include/cutefish/store/sqlitecatalog.h
     include/cutefish/store/statestore.h
     include/cutefish/store/transaction.h
@@ -44,12 +45,16 @@ add_library(store-core STATIC
     src/error.cpp
     src/identifiers.cpp
     src/installed.cpp
+    src/jsontext.h
     src/offer.cpp
     src/plan.cpp
     src/planjson.cpp
     src/planjson.h
     src/search.cpp
+    src/sha256.cpp
+    src/sha256.h
     src/source.cpp
+    src/sourcefingerprint.cpp
     src/sqlite.cpp
     src/sqlite.h
     src/sqlitecatalog.cpp

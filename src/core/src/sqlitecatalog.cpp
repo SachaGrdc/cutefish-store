@@ -643,6 +643,46 @@ Result<SearchPage> SqliteCatalog::search(const SearchQuery& query) const
     return page;
 }
 
+Result<std::vector<RecordedSource>> SqliteCatalog::sources() const
+{
+    auto stmt = Statement::prepare(
+            d->db, "SELECT s.id, coalesce(CAST(c.value AS INTEGER), 0), f.value, json_valid(f.value),"
+                   " json_extract(f.value, '$.path'), json_type(f.value, '$.size'), json_extract(f.value, '$.size'),"
+                   " json_type(f.value, '$.mtimeNs'), json_extract(f.value, '$.mtimeNs'),"
+                   " json_extract(f.value, '$.sha256'), json_extract(f.value, '$.icons')"
+                   " FROM sources s"
+                   " LEFT JOIN meta c ON c.key = 'offers:' || s.source_id"
+                   " LEFT JOIN meta f ON f.key = 'fingerprint:' || s.source_id"
+                   " ORDER BY s.source_id");
+    if (!stmt)
+        return std::move(stmt).error();
+    std::vector<RecordedSource> out;
+    int rc;
+    while ((rc = stmt->step()) == SQLITE_ROW) {
+        const auto it = d->sources.find(stmt->columnInt(0));
+        if (it == d->sources.end())
+            return Error::internal("source row missing from the catalogue");
+        RecordedSource r{.source = it->second, .fingerprint = std::nullopt, .offers = stmt->columnInt(1)};
+        if (!stmt->columnIsNull(2)) {
+            // A malformed fingerprint is reported as absent: the source then
+            // counts as modified and is imported again, which is safe.
+            const bool usable = stmt->columnInt(3) == 1 && stmt->columnText(5) == "integer"
+                    && stmt->columnText(7) == "integer" && stmt->columnInt(6) >= 0
+                    && stmt->columnText(9).size() == 64 && !stmt->columnText(4).empty();
+            if (usable)
+                r.fingerprint = SourceFingerprint{.path = std::string(stmt->columnText(4)),
+                                                  .size = static_cast<std::uint64_t>(stmt->columnInt(6)),
+                                                  .mtimeNs = stmt->columnInt(8),
+                                                  .sha256 = std::string(stmt->columnText(9)),
+                                                  .iconsPath = std::string(stmt->columnText(10))};
+        }
+        out.push_back(std::move(r));
+    }
+    if (rc != SQLITE_DONE)
+        return d->db.error("reading the catalogue sources");
+    return out;
+}
+
 Result<std::vector<AppSummary>> SqliteCatalog::summaries(std::span<const AppId> ids) const
 {
     std::vector<AppSummary> out;

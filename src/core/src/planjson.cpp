@@ -1,8 +1,8 @@
 #include "planjson.h"
 
+#include "jsontext.h"
 #include "sqlite.h"
 
-#include <cstdio>
 #include <limits>
 
 namespace cutefish::store::detail {
@@ -11,25 +11,7 @@ namespace {
 
 void appendString(std::string& out, std::string_view text)
 {
-    out += '"';
-    for (const char c : text) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buffer[8];
-                std::snprintf(buffer, sizeof buffer, "\\u%04x", static_cast<unsigned>(c));
-                out += buffer;
-            } else {
-                out += c; // valid UTF-8, checked by Plan::create
-            }
-        }
-    }
-    out += '"';
+    detail::appendJsonString(out, text);
 }
 
 void appendKey(std::string& out, std::string_view key)

@@ -5,6 +5,7 @@
 #include <cutefish/store/offer.h>
 #include <cutefish/store/result.h>
 #include <cutefish/store/source.h>
+#include <cutefish/store/sourcefingerprint.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -111,8 +112,11 @@ public:
     CatalogWriter& operator=(CatalogWriter&&) noexcept;
     ~CatalogWriter();
 
-    /// Sources come first; each component names its source.
-    Result<void> addSource(const Source& source);
+    /// Sources come first; each component names its source. The
+    /// fingerprint is the one computed just before reading the source's file
+    /// (probeSource); none when the file could not be read. It is stored in
+    /// the catalogue's `meta` table and returned by Catalog::sources().
+    Result<void> addSource(const Source& source, std::optional<SourceFingerprint> fingerprint = std::nullopt);
 
     /// Adds one component as one offer. Errors (the component is skipped,
     /// the build goes on): InvalidArgument for an invalid id, name or

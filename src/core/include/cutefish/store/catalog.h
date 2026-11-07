@@ -4,6 +4,7 @@
 #include <cutefish/store/identifiers.h>
 #include <cutefish/store/result.h>
 #include <cutefish/store/search.h>
+#include <cutefish/store/sourcefingerprint.h>
 
 #include <cstdint>
 #include <span>
@@ -38,6 +39,10 @@ public:
     /// Summaries for the given ids, in the same order; unknown ids are left
     /// out. The caller bounds the number of ids (200 over D-Bus, §5.2).
     virtual Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const = 0;
+
+    /// The sources this snapshot was built from, sorted by id, with the
+    /// fingerprint of what was imported and the number of offers.
+    virtual Result<std::vector<RecordedSource>> sources() const = 0;
 
 protected:
     Catalog() = default;

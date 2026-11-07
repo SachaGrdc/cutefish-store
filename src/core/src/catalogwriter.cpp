@@ -1,9 +1,11 @@
 #include <cutefish/store/catalogwriter.h>
 
 #include "catalogschema.h"
+#include "jsontext.h"
 #include "sqlite.h"
 #include "text.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <system_error>
@@ -69,6 +71,7 @@ struct CatalogWriter::Impl
     bool finished = false;
 
     std::map<SourceId, std::pair<Source, std::int64_t>> sources; // id -> (source, rowid)
+    std::map<SourceId, SourceFingerprint> fingerprints;
     std::unordered_map<std::string, std::int64_t> apps;           // app_id -> rowid
     std::map<std::string, std::set<std::int64_t>> aliasClaims;    // alias -> claiming apps
 
@@ -186,12 +189,21 @@ Result<CatalogWriter> CatalogWriter::create(const std::filesystem::path& candida
     return CatalogWriter(std::move(impl));
 }
 
-Result<void> CatalogWriter::addSource(const Source& source)
+Result<void> CatalogWriter::addSource(const Source& source, std::optional<SourceFingerprint> fingerprint)
 {
     if (d->finished)
         return Error::conflict("catalogue already finished");
     if (d->sources.contains(source.id()))
         return Error::conflict("source " + source.id().str() + " added twice");
+    if (fingerprint) {
+        const std::string& h = fingerprint->sha256;
+        const bool hex = h.size() == 64 && std::all_of(h.begin(), h.end(), [](char c) {
+                             return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                         });
+        if (!hex || fingerprint->path.empty() || !detail::isValidUtf8(fingerprint->path)
+            || !detail::isValidUtf8(fingerprint->iconsPath))
+            return Error::invalidArgument("invalid fingerprint for source " + source.id().str());
+    }
     auto& s = d->insertSource;
     s.bind(1, source.id().str())
             .bind(2, toString(source.backend()))
@@ -205,6 +217,8 @@ Result<void> CatalogWriter::addSource(const Source& source)
     if (auto ok = s.run(); !ok)
         return std::move(ok).error();
     d->sources.emplace(source.id(), std::pair{source, sqlite3_last_insert_rowid(d->db.handle())});
+    if (fingerprint)
+        d->fingerprints.emplace(source.id(), std::move(*fingerprint));
     ++d->stats.sources;
     return {};
 }
@@ -449,6 +463,20 @@ DROP TABLE fts_locales;
             const std::string key = "offers:" + std::string(counts->columnText(0));
             const std::string value = std::to_string(counts->columnInt(1));
             if (auto ok = put(key, value); !ok)
+                return std::move(ok).error();
+        }
+        // Fingerprints of the imported files (ARCHITECTURE §6.2), one JSON
+        // object per source, read back with SQLite's JSON functions.
+        for (const auto& [id, fp] : d->fingerprints) {
+            std::string json = "{\"path\":";
+            detail::appendJsonString(json, fp.path);
+            json += ",\"size\":" + std::to_string(fp.size) + ",\"mtimeNs\":" + std::to_string(fp.mtimeNs)
+                    + ",\"sha256\":";
+            detail::appendJsonString(json, fp.sha256);
+            json += ",\"icons\":";
+            detail::appendJsonString(json, fp.iconsPath);
+            json += '}';
+            if (auto ok = put("fingerprint:" + id.str(), json); !ok)
                 return std::move(ok).error();
         }
     }

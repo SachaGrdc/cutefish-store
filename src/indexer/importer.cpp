@@ -1,5 +1,7 @@
 #include "importer.h"
 
+#include <cutefish/store/sourcefingerprint.h>
+
 #include "markup.h"
 
 #include <appstream.h>
@@ -514,11 +516,14 @@ std::vector<SourceReport> importSources(CatalogWriter& writer, const std::vector
     for (const SourceConfig& config : sources) {
         const auto start = std::chrono::steady_clock::now();
         SourceImport import(writer, config, options);
-        std::error_code ec;
-        if (auto ok = writer.addSource(config.source); !ok) {
+        // Fingerprint first, then read (ARCHITECTURE §6.2): if the file
+        // changes while it is read, the recorded fingerprint is the older
+        // one, and the next check imports the source again.
+        const SourceProbe probe = probeSource({config.file, config.icons});
+        if (auto ok = writer.addSource(config.source, probe.fingerprint); !ok) {
             import.fail(ok.error().message());
-        } else if (!std::filesystem::is_regular_file(config.file, ec)) {
-            import.fail("no such file " + config.file.string());
+        } else if (probe.state != SourceFileState::Present) {
+            import.fail(probe.detail);
         } else if (options.batchSize > 0 && isYaml(config.file)) {
             parseYamlInBatches(config, options.batchSize, import);
         } else if (options.batchSize > 0) {
