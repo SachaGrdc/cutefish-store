@@ -6,6 +6,7 @@ add_executable(store-core-tests
     fixtures.h
     testapplication.cpp
     testcatalog.cpp
+    testcatalogfile.cpp
     testerror.cpp
     testidentifiers.cpp
     testinstalled.cpp
@@ -15,7 +16,8 @@ add_executable(store-core-tests
     testsource.cpp
     testversion.cpp
 )
-target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main)
+find_package(Threads REQUIRED)
+target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main Threads::Threads)
 target_compile_options(store-core-tests PRIVATE -Wall -Wextra)
 gtest_discover_tests(store-core-tests)
 
