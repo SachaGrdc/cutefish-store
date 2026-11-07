@@ -3,10 +3,10 @@ A universal Linux software store for the Cutefish desktop environment.
 
 ## Status
 
-The core library (`store-core`, version 0.3a: business models, interfaces,
-the SQLite catalogue, transaction plans and the confirmation policy) and the
-AppStream indexer exist; there is no user interface, D-Bus service or
-package backend yet.
+The core library (`store-core`, version 0.3b: business models, interfaces,
+the SQLite catalogue, transaction plans, the confirmation policy and the
+state database) and the AppStream indexer exist; there is no user
+interface, D-Bus service or package backend yet.
 
 - Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
   [docs/DECISIONS.md](docs/DECISIONS.md)

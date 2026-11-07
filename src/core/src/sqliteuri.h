@@ -5,10 +5,9 @@
 
 namespace cutefish::store::detail {
 
-/// `file:` URI opening `path` read-only; with `immutable`, SQLite takes no
-/// lock and never looks for a journal: only valid for a file that nobody
-/// modifies in place, which is the case of a catalogue snapshot.
-inline std::string readOnlyUri(const std::filesystem::path& path, bool immutable)
+/// `file:` URI of `path`, with the characters SQLite gives a meaning to
+/// escaped.
+inline std::string fileUri(const std::filesystem::path& path)
 {
     std::string uri = "file:";
     for (const char c : path.string()) {
@@ -22,7 +21,15 @@ inline std::string readOnlyUri(const std::filesystem::path& path, bool immutable
             uri += c;
         }
     }
-    uri += "?mode=ro";
+    return uri;
+}
+
+/// `file:` URI opening `path` read-only; with `immutable`, SQLite takes no
+/// lock and never looks for a journal: only valid for a file that nobody
+/// modifies in place, which is the case of a catalogue snapshot.
+inline std::string readOnlyUri(const std::filesystem::path& path, bool immutable)
+{
+    std::string uri = fileUri(path) + "?mode=ro";
     if (immutable)
         uri += "&immutable=1";
     return uri;

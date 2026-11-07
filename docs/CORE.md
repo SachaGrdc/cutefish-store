@@ -1,4 +1,4 @@
-# Cutefish Store — Le cœur (`store-core`), v0.3a
+# Cutefish Store — Le cœur (`store-core`), v0.3b
 
 `store-core` est la bibliothèque qui porte la logique métier de la boutique.
 Elle applique les décisions de [ARCHITECTURE.md](ARCHITECTURE.md) et de
@@ -19,6 +19,9 @@ documents qui font foi.
   la comparaison de plans, la machine d'états des transactions et le choix
   de l'offre proposée par défaut (D-009). Ce sont des fonctions pures : elles
   décident, mais n'appellent aucun backend.
+- Depuis la v0.3b : `state.sqlite` (`StateStore`) : cache de l'état
+  installé, journal des transactions, dates de rafraîchissement, rétention
+  D-018 et reprise après un arrêt.
 
 Le cœur ne dépend que de C++20, de la bibliothèque standard et de SQLite
 (P-006) :
@@ -27,8 +30,9 @@ Le cœur ne dépend que de C++20, de la bibliothèque standard et de SQLite
   libflatpak, ni libappstream (confinée à l'indexeur, `src/indexer/`) ;
 - SQLite est lié en privé : aucun en-tête SQLite n'apparaît dans l'API
   publique ;
-- aucune boucle d'événements, aucun thread, aucun accès réseau ; les seuls
-  fichiers touchés sont ceux du catalogue qu'on lui désigne ;
+- aucune boucle d'événements, aucun thread, aucune horloge, aucun accès
+  réseau ; les seuls fichiers touchés sont le catalogue et `state.sqlite`
+  qu'on lui désigne ;
 - libcurl, prévu par P-006, n'est pas encore lié : il arrivera avec le cache
   d'images.
 
@@ -56,8 +60,7 @@ tests/perf/                        store-catalog-bench (hors ctest)
 - Les détails d'implémentation (`cutefish::store::detail`) restent dans
   `src/core/src/`.
 
-L'état installé (`state.sqlite`) et les images viendront dans
-`src/core/src/` avec les composants correspondants.
+Les images viendront dans `src/core/src/` avec le composant correspondant.
 
 ## Erreurs et résultats
 
@@ -141,7 +144,7 @@ Précisions :
 | Interface | En-tête | Implémentation prévue | Appels |
 |---|---|---|---|
 | `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries` |
-| `InstalledState` | `installedstate.h` | Lecture de `state.sqlite` | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
+| `InstalledState` | `installedstate.h` | `StateStore` (thread principal) et `SqliteInstalledState` (threads de lecture), implémentées en v0.3b (`statestore.h`) | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
 | `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` | Asynchrones (§7.1) : `availability`, `queryInstalled`, `sources` |
 
 Contrat de `Backend` :
@@ -289,6 +292,65 @@ SQLite, ni de l'ordre de `installed`. Elle n'utilise jamais
 `Source::priority`, qui ne règle que les textes affichés (priorité
 éditoriale, CATALOG §4). La fonction est appliquée à la lecture et jamais
 stockée, puisqu'elle dépend de l'état installé.
+
+## `state.sqlite` (v0.3b, `statestore.h`)
+
+Ce que la boutique sait du système et de son propre travail (P-003,
+SERVICE.md §8). Un seul écrivain, `StateStore`, sur le thread principal de
+l'hôte ; des lecteurs `SqliteInstalledState`, un par thread de lecture.
+
+**Ce que la base n'est pas** : la source de vérité de ce qui est installé.
+PackageKit et libflatpak le sont. La table `installed` est une copie du
+dernier inventaire de chaque backend et installation, pour que l'interface
+n'attende jamais ; elle n'est modifiée que par un inventaire complet
+(`replaceInstalled`), jamais par une mise à jour optimiste, et ne sert jamais
+à décider une opération (c'est le plan du backend qui décide).
+
+| Table | Contenu |
+|---|---|
+| `meta` | Date de création, `last_refresh`, `reconciled:<backend>:<scope>` |
+| `installed` | Cache d'inventaire : offre, backend, installation, application, version, origine |
+| `transactions` | Journal : type, backend, installation, état, plan présenté et plan accepté (JSON), confirmation, erreur, référence du backend (chemin PackageKit), dates |
+| `transaction_offers` | Offres désignées par le client, dans leur ordre ; supprimées avec la transaction |
+| `source_state` | Dernier rafraîchissement réussi de chaque source (D-015) |
+
+Choix de persistance :
+
+- **Cohérence après un arrêt brutal** : journal WAL, `synchronous = FULL`,
+  chaque modification dans une seule transaction SQLite (`BEGIN
+  IMMEDIATE`). Un inventaire, l'enregistrement d'une transaction (avec ses
+  offres et la purge) ou une reprise sont entiers ou absents. `quick_check`
+  à l'ouverture.
+- **Versions** : `PRAGMA user_version` (1), une migration par version.
+  Un fichier plus récent, étranger ou endommagé est refusé **sans être
+  modifié** ; le renommer et repartir d'une base neuve est le choix de
+  l'hôte (SERVICE.md §8.6).
+- **Aucune horloge** (D-019) : toutes les dates (`UnixSeconds`) viennent de
+  l'hôte.
+- **Plans en JSON versionné** (`"v": 1`) : écrits par le cœur, relus par les
+  fonctions JSON de SQLite (`json_each`, `json_extract`), puis validés de
+  nouveau par `Plan::create`. Aucune bibliothèque JSON. Un plan illisible
+  ou incohérent est une erreur, jamais une donnée acceptée.
+- **Transactions** : `TransactionRecord` contient un `TransactionSnapshot`
+  (`Transaction::snapshot()` / `Transaction::restore()`). Les raisons de
+  confirmation sont recalculées depuis le plan ; seul `plan-changed` est
+  gardé. Un enregistrement que `restore` refuserait n'est pas écrit.
+- **Rétention (D-018)** : au plus 200 transactions terminées et au plus
+  90 jours après leur fin, la plus stricte l'emporte ; appliquée à chaque
+  enregistrement d'une transaction terminée (à sa date de fin) et par
+  `purgeHistory(now)`. Une transaction non terminée n'est jamais supprimée ;
+  les plans restent avec la transaction pendant toute la rétention.
+- **Reprise** (`recoverAfterRestart(now)`, SERVICE.md §5.6) : `queued` et
+  `planning` → `interrupted` ; `awaiting-confirmation` → `cancelled` ;
+  `running` → `interrupted`, sauf une transaction PackageKit dont le chemin
+  est connu, rendue à l'hôte pour un rattachement. `reconcile` est vrai si
+  une transaction `running` a été interrompue : elle a pu modifier le
+  système. Une transaction en `planning` n'a rien exécuté (D-017).
+- **Concurrence** : chaque lecture est une seule requête, donc un seul état
+  validé (isolation des instantanés WAL) : un lecteur ne voit jamais un
+  inventaire à moitié remplacé. Un second écrivain attend (délai de 5 s).
+- **Occupation** : `openTransactionFor(offer)` donne la transaction non
+  terminée qui porte déjà sur une offre (erreur `Busy`, A §5.5).
 
 ## Performance
 

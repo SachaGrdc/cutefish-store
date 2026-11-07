@@ -19,11 +19,15 @@ add_executable(store-core-tests
     testplan.cpp
     testsearch.cpp
     testsource.cpp
+    teststatestore.cpp
     testtransaction.cpp
     testversion.cpp
 )
 find_package(Threads REQUIRED)
-target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main Threads::Threads)
+# SQLite directly, only to damage or inspect state.sqlite from the tests.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+target_link_libraries(store-core-tests PRIVATE store-core GTest::gtest_main Threads::Threads PkgConfig::SQLITE3)
 target_compile_options(store-core-tests PRIVATE -Wall -Wextra)
 gtest_discover_tests(store-core-tests)
 

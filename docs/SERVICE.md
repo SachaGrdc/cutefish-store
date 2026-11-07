@@ -757,7 +757,28 @@ font foi pour ce qui est installé. La base garde une copie de ce qui est
 utile à l'affichage, pour ne jamais faire attendre l'interface, et ce que les
 backends ne conservent pas (journal, plans confirmés, consentements).
 
-### 8.2 Schéma proposé (non créé)
+### 8.2 Schéma
+
+**Version 1, implémentée en Core v0.3b** (`StateStore`, [CORE.md](CORE.md) ;
+schéma exact : `src/core/src/stateschema.h`) : tables `meta`, `installed`,
+`transactions`, `transaction_offers`, `source_state`. Écarts avec la
+proposition ci-dessous, qui reste la référence pour les tables à venir :
+
+- `synchronous = FULL` au lieu de `NORMAL` : les écritures sont rares, et le
+  dernier état validé d'une transaction survit ainsi à une coupure de
+  courant ;
+- `installed` a pour clé l'identifiant d'offre, qui contient déjà backend,
+  installation et paquet ; la date du dernier inventaire est gardée par
+  `(backend, scope)` dans `meta` (`reconciled:<backend>:<scope>`) ;
+- les offres d'une transaction (`transaction_offers`) sont gardées dans
+  l'ordre donné par le client ;
+- les raisons de confirmation ne sont pas stockées : elles sont recalculées
+  depuis le plan, seul l'indicateur `plan_changed` est gardé ;
+- pas encore créées, elles viendront par migration avec leur composant :
+  `updates` (étape C), `images` (étape I), le consentement Flathub de
+  `source_state` (P-011, étape G), le lien `parent` d'`UpdateAll` (service).
+
+Proposition initiale :
 
 ```sql
 -- PRAGMA user_version = 1 ; WAL ; synchronous = NORMAL ; foreign_keys = ON
@@ -894,6 +915,10 @@ Choix :
   journal et les consentements sont perdus ; l'état installé se reconstruit
   par réconciliation. Le consentement Flathub est alors redemandé.
 - Base corrompue (`quick_check` en échec) : même traitement.
+- Partage des rôles (Core v0.3b) : `StateStore::open` refuse ces fichiers
+  sans les modifier (`NotSupported` pour une version plus récente,
+  `InvalidArgument` pour un fichier étranger ou endommagé) ; le renommage et
+  la création d'une base neuve appartiennent au service.
 
 ---
 
@@ -1026,7 +1051,8 @@ sont des manques, sauf le premier, qui est un commentaire périmé.
 
 **État après le Core v0.3a** : les écarts 1, 2, 4 et 6 sont traités
 (`plan.h`, `confirmation.h`, `transaction.h`, `defaultoffer.h` ; détails dans
-[CORE.md](CORE.md)). Les autres restent aux étapes B à D.
+[CORE.md](CORE.md)). **Après le Core v0.3b** : les écarts 3 et 10 aussi
+(`statestore.h`). Les autres restent aux étapes C et D.
 
 | # | Écart | Où | Conséquence | Traitement |
 |---|---|---|---|---|
