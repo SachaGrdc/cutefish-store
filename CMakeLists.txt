@@ -24,9 +24,13 @@ if(CUTEFISH_STORE_SANITIZERS)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
-# The core has no external dependency in v0.1: SQLite and libcurl will be
-# added with the catalogue and the image cache, when they are needed.
+option(CUTEFISH_STORE_BUILD_INDEXER "Build cutefish-store-indexer (needs libappstream and libxml2)" ON)
+
+# store-core depends on SQLite only; libcurl will come with the image cache.
 add_subdirectory(src/core)
+if(CUTEFISH_STORE_BUILD_INDEXER)
+    add_subdirectory(src/indexer)
+endif()
 
 if(BUILD_TESTING)
     enable_testing()

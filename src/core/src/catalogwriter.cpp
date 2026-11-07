@@ -22,16 +22,29 @@ constexpr std::size_t kMaxSummaryBytes = 1024;
 constexpr std::size_t kMaxBlockBytes = 64 * 1024;
 constexpr std::size_t kMaxKeywordBytes = 256;
 
-// "fr_FR.UTF-8@euro" -> "fr_FR@euro"; locales stored as AppStream gives
-// them, apart from the encoding.
 bool isValidLocale(std::string_view locale) noexcept
 {
     if (locale.empty() || locale.size() > 64)
         return false;
     for (const char c : locale)
-        if (!detail::isAsciiAlnum(c) && c != '_' && c != '@' && c != '-' && c != '.')
+        if (!detail::isAsciiAlnum(c) && c != '_' && c != '@' && c != '-')
             return false;
     return true;
+}
+
+// Locales are stored as AppStream gives them, without an encoding:
+// "fr_FR.UTF-8@euro" -> "fr_FR@euro", so that the reader's fallback chain
+// (fr_FR, fr, C) finds them.
+std::string withoutEncoding(std::string_view locale)
+{
+    const std::size_t dot = locale.find('.');
+    if (dot == std::string_view::npos)
+        return std::string(locale);
+    const std::size_t at = locale.find('@', dot);
+    std::string out(locale.substr(0, dot));
+    if (at != std::string_view::npos)
+        out.append(locale.substr(at));
+    return out;
 }
 
 char markerOf(DescriptionBlockType type) noexcept
@@ -261,14 +274,14 @@ Result<void> CatalogWriter::addComponent(const SourceId& sourceId, ComponentReco
     ++d->stats.offers;
 
     auto addAll = [&](const std::vector<LocalizedText>& texts, TextField field, std::size_t max) -> Result<void> {
-        std::set<std::string_view> seen;
+        std::set<std::string> seen;
         for (const LocalizedText& t : texts) {
-            if (!isValidLocale(t.locale) || !seen.insert(t.locale).second ||
-                !detail::checkText(t.text, "text", max, true)) {
+            std::string locale = withoutEncoding(t.locale);
+            if (!isValidLocale(locale) || !detail::checkText(t.text, "text", max, true) || !seen.insert(locale).second) {
                 ++d->stats.droppedTexts;
                 continue;
             }
-            if (auto ok = d->addText(offerRow, field, t.locale, t.text); !ok)
+            if (auto ok = d->addText(offerRow, field, locale, t.text); !ok)
                 return ok;
         }
         return {};
@@ -278,22 +291,25 @@ Result<void> CatalogWriter::addComponent(const SourceId& sourceId, ComponentReco
     if (auto ok = addAll(record.summaries, TextField::Summary, kMaxSummaryBytes); !ok)
         return ok;
 
-    std::set<std::string_view> seenDescriptions;
+    std::set<std::string> seenDescriptions;
     for (const LocalizedDescription& desc : record.descriptions) {
-        bool valid = isValidLocale(desc.locale) && !desc.blocks.empty() && seenDescriptions.insert(desc.locale).second;
+        const std::string locale = withoutEncoding(desc.locale);
+        bool valid = isValidLocale(locale) && !desc.blocks.empty() && !seenDescriptions.contains(locale);
         for (const DescriptionBlock& b : desc.blocks)
             valid = valid && detail::checkText(b.text, "description", kMaxBlockBytes, true, true).hasValue();
         if (!valid) {
             ++d->stats.droppedTexts;
             continue;
         }
+        seenDescriptions.insert(locale);
         const std::string encoded = encodeBlocks(desc.blocks);
-        if (auto ok = d->addText(offerRow, TextField::Description, desc.locale, encoded); !ok)
+        if (auto ok = d->addText(offerRow, TextField::Description, locale, encoded); !ok)
             return ok;
     }
 
-    std::set<std::string_view> seenKeywords;
+    std::set<std::string> seenKeywords;
     for (const LocalizedKeywords& kw : record.keywords) {
+        const std::string locale = withoutEncoding(kw.locale);
         std::string joined;
         for (const std::string& k : kw.keywords) {
             if (!detail::checkText(k, "keyword", kMaxKeywordBytes, true)) {
@@ -304,9 +320,9 @@ Result<void> CatalogWriter::addComponent(const SourceId& sourceId, ComponentReco
                 joined += detail::kKeywordSeparator;
             joined += k;
         }
-        if (joined.empty() || !isValidLocale(kw.locale) || !seenKeywords.insert(kw.locale).second)
+        if (joined.empty() || !isValidLocale(locale) || !seenKeywords.insert(locale).second)
             continue;
-        if (auto ok = d->addText(offerRow, TextField::Keywords, kw.locale, joined); !ok)
+        if (auto ok = d->addText(offerRow, TextField::Keywords, locale, joined); !ok)
             return ok;
     }
 

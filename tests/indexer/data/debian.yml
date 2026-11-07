@@ -1,0 +1,75 @@
+---
+File: DEP-11
+Version: '1.0'
+Origin: test-main
+MediaBaseUrl: https://example.org/media
+---
+Type: desktop-application
+ID: org.example.Editor.desktop
+Package: example-editor
+Name:
+  C: Example Editor
+  fr: Éditeur exemple
+Summary:
+  C: "Edit\ttext   files"
+  fr: Modifier des fichiers texte
+Description:
+  C: >-
+    <p>An editor for <em>plain</em> text.</p>
+    <ul><li>Fast</li><li>Small</li></ul>
+  fr: >-
+    <p>Un éditeur de texte.</p>
+Categories:
+  - Utility
+  - TextEditor
+Keywords:
+  C:
+    - notepad
+    - text
+Icon:
+  cached:
+    - name: example-editor_example.png
+      width: 64
+      height: 64
+Provides:
+  ids:
+    - example-editor.desktop
+---
+Type: console-application
+ID: org.example.Tool
+Package: example-tool
+Name:
+  C: Tool
+Summary:
+  C: A command-line tool
+---
+Type: desktop-application
+ID: org.example.NoPackage
+Name:
+  C: No package
+Summary:
+  C: Has no package
+---
+Type: desktop-application
+ID: org..bad
+Package: bad
+Name:
+  C: Bad id
+Summary:
+  C: Invalid id
+---
+Type: desktop-application
+ID: org.example.NoName
+Package: noname
+Summary:
+  C: Has no name
+---
+Type: desktop-application
+ID: org.gimp.GIMP
+Package: gimp
+Name:
+  C: GNU Image Manipulation Program
+Summary:
+  C: Create images and edit photographs
+Categories:
+  - Graphics
