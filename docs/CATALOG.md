@@ -267,12 +267,20 @@ inchangé après un refus, et le refus de `--output` égal à l'actif.
 - 444 applications ont une offre Debian et une offre Flathub [MESURÉ],
   comme mesuré pendant la phase 0.2.
 
-**Textes affichés** (règle provisoire validée par le propriétaire, en
-attendant D-009) : pour chaque champ, le texte de l'offre dont la source a la
-plus haute priorité parmi celles qui le fournissent dans la meilleure langue
-disponible ; à priorité égale, l'identifiant d'offre départage. Les offres
-d'une application sont rendues dans le même ordre. **Aucune offre par défaut
-n'est choisie** : `Offer` ne porte pas de marque « par défaut ».
+**Textes affichés : priorité éditoriale** (validée par le propriétaire ;
+confirmée en phase 0.4 comme indépendante de l'offre proposée) : pour chaque
+champ, le texte de l'offre dont la source a la plus haute priorité
+éditoriale (`Source::priority`) parmi celles qui le fournissent dans la
+meilleure langue disponible ; à priorité égale, l'identifiant d'offre
+départage. Les offres d'une application sont rendues dans le même ordre.
+
+**Offre proposée par défaut** : règle distincte (D-009 : installée, puis
+Flathub, puis la distribution, puis une remote Flatpak tierce), fondée sur la
+nature des sources et l'état installé. Elle n'est pas dans le catalogue :
+`Offer` ne porte pas de marque « par défaut », et l'ordre des offres rendu par
+le catalogue suit la priorité éditoriale, **pas** la priorité
+d'installation. La fonction qui l'applique est prévue en Core v0.3
+(SERVICE.md §14 et §15, étape A).
 
 ## 5. Localisation
 
@@ -297,11 +305,11 @@ Répartition des 25 Mo [MESURÉ] : textes 11,4 Mo (dont noms et résumés
 2,1 Mo, mots-clés 1,2 Mo, descriptions `C` 2,8 Mo), index FTS5 5,0 Mo,
 index des noms 1,4 Mo, offres 1,3 Mo.
 
-**O-009 reste ouverte.** Le mécanisme permet chacune des politiques
-ci-dessus ; la commande de l'indexeur reçoit les langues. Aucune langue
-n'est choisie par défaut : sans `--locale`, seules les descriptions `C` sont
-stockées, et les noms et résumés restent disponibles dans toutes les
-langues.
+**Politique retenue (D-013, tranche O-009)** : noms, résumés et mots-clés
+dans toutes les langues ; descriptions en `C` et en français. Le service
+lancera l'indexeur avec `--locale fr` (catalogue de 28,2 Mo mesuré). Utilisé
+seul, l'indexeur ne choisit aucune langue : sans `--locale`, seules les
+descriptions `C` sont stockées.
 
 ## 6. Recherche FTS5
 
@@ -464,9 +472,8 @@ réussis avec GCC, avec ASan et UBSan [MESURÉ].
 
 ## 10. Limites connues
 
-- **D-009** : pas d'offre par défaut. Les textes affichés suivent la priorité
-  des sources (règle provisoire).
-- **O-009** : aucune politique de langues n'est fixée ; les coûts sont au §5.
+- **D-009** : l'offre par défaut n'est pas encore calculée (Core v0.3) ; le
+  catalogue n'en stocke pas.
 - Composants autres que `desktop-application` (console, polices, modules
   complémentaires) non importés.
 - Rangs 1 et 2 sensibles aux accents (casse ASCII seulement).

@@ -9,7 +9,9 @@ transactions réelles encore non testées). Le code a commencé : cœur v0.1
 ([CORE.md](CORE.md)), puis catalogue SQLite et indexeur v0.2
 ([CATALOG.md](CATALOG.md)) ; le service, les backends et l'interface
 n'existent pas encore. La conception détaillée du service est proposée dans
-[SERVICE.md](SERVICE.md) (phase 0.4, à valider). Ce document décrit ce qui sera construit. Les décisions qu'il
+[SERVICE.md](SERVICE.md) (phase 0.4 : orientation validée ; D-009
+précisée ; D-013 à D-016 ; P-002, P-003, P-004, P-005, P-007, P-010, P-012
+validées). Ce document décrit ce qui sera construit. Les décisions qu'il
 applique, et celles qui restent ouvertes, sont tenues à jour dans
 [DECISIONS.md](DECISIONS.md) (identifiants `D-`, `P-`, `O-`).
 
@@ -101,7 +103,9 @@ Flatpak (D-003).
 - Gestion générale des mises à jour système APT : ni mise à jour complète, ni
   bibliothèques ou noyau, ni mises à jour hors ligne (D-010).
 - Nouvelles installations Flatpak au niveau système (O-013). Les applications
-  déjà installées en système sont, elles, gérées (D-011).
+  déjà installées en système sont, elles, gérées (D-011), y compris une mise
+  à jour qui installe un nouveau runtime système, avec confirmation explicite
+  (D-014).
 - Sessions X11.
 
 ---
@@ -374,7 +378,7 @@ est dérivée du `Status` de PackageKit ou des opérations de `FlatpakTransactio
 - affichage de la progression des transactions à partir des propriétés D-Bus ;
 - confirmation des plans (suppressions, permissions, périmètre système) ;
 - choix explicite de l'offre à installer, par exemple le paquet DEB plutôt que
-  l'offre Flatpak proposée par défaut (D-009) ;
+  l'offre Flathub proposée par défaut (D-009) ;
 - affichage distinct des périmètres Flatpak `user` et `system` (D-011) ;
 - lancement d'une application installée via `org.cutefish.AppRuntime` [CODE].
 
@@ -412,9 +416,12 @@ choix.
 - **Catalogue** : ouverture de l'instantané en lecture seule, requêtes de
   navigation et de détail, génération courante, remplacement atomique.
 - **Recherche** : traduction de la saisie en requête FTS5, classement, filtres.
-- **Dédoublonnage** : règles de fusion et de choix de l'offre par défaut. Elles
-  sont appliquées par l'indexeur, mais définies dans `core` pour être testables
-  et partagées.
+- **Dédoublonnage** : règles de fusion, appliquées par l'indexeur mais
+  définies dans `core` pour être testables et partagées.
+- **Offre par défaut** (D-009) : fonction de `core` calculée à la lecture,
+  parce qu'elle dépend de l'état installé ; elle n'est jamais stockée dans
+  le catalogue et reste distincte de la priorité éditoriale des textes
+  (§6.4).
 - **État** : `state.sqlite` (installé, mises à jour, journal), réconciliation
   avec les backends.
 - **Transactions** : file par backend, machine d'états (§3.5), politique de
@@ -823,9 +830,9 @@ Cas particuliers observés avec libflatpak (prototype 1, §7.3) :
     `queued` et `awaiting-confirmation`), une indexation ou un
     rafraîchissement ;
   - il s'arrête après un délai défini suivant la disparition du dernier
-    client, quand plus rien n'est en cours : 5 minutes proposées
-    [À VALIDER]. Un démarrage par le timer, sans client, suit la même règle
-    une fois le travail terminé.
+    client, quand plus rien n'est en cours : 5 minutes (P-010, validée).
+    Un démarrage par le timer, sans client, suit la même règle une fois le
+    travail terminé.
 
 ### 5.8 Accès des clients aux fichiers (images et icônes)
 
@@ -883,14 +890,14 @@ exactes, permissions Flatpak.
    service. Rien ne change ⇒ pas d'indexation.
    - Déclencheurs (gérés par la couche hôte) : fin d'un `Refresh`, signal
      `RepoListChanged` de PackageKit, `base::FileWatch` (inotify) [CODE] sur les dossiers des catalogues
-     (pour un `apt update` lancé en ligne de commande), changement de langue
-     de session.
+     (pour un `apt update` lancé en ligne de commande). Le changement de
+     langue de session n'en est plus un (D-013).
    - Les déclencheurs sont regroupés sur 30 s.
 2. **Lancement de l'indexeur** par la couche hôte (`base::Process` [CODE]) :
    - arguments : chemin de sortie temporaire dans le même dossier que
      `catalog.sqlite` (pour que le renommage soit atomique), langues
-     (O-009), et une option `--source` par source (backend, origine, scope,
-     chemin, priorité, empreinte).
+     (`--locale fr`, D-013), et une option `--source` par source (backend,
+     origine, scope, chemin, priorité, empreinte).
    - Une seule indexation à la fois. Une nouvelle demande pendant
      l'indexation est mémorisée et relancée une fois à la fin.
 3. **Dans l'indexeur** :
@@ -968,8 +975,8 @@ Core v0.2 ; schéma complet, contraintes et index : [CATALOG.md](CATALOG.md)
 
 - les textes et l'icône sont rattachés à chaque offre, et non à
   l'application : chaque source garde les siens (§6.4) ;
-- pas de colonne `is_default` : aucune offre par défaut n'est stockée tant
-  que D-009 n'est pas précisée pour les remotes tiers ;
+- pas de colonne `is_default` : l'offre par défaut dépend de l'état
+  installé ; elle est calculée à la lecture (D-009, §6.4), jamais stockée ;
 - `app_details` (captures, versions, URL, licence, classification du
   contenu, lue seulement par `GetDetails`) n'est pas encore créée : elle
   viendra avec la page de détails. Format à choisir : tables annexes ou JSON
@@ -1048,42 +1055,56 @@ résultats de recherche sans aller-retour supplémentaire.
    l'identifiant d'un autre dans `<provides><id>`, ils sont fusionnés ».
 3. **Jamais de fusion sur le nom seul** : trop de faux positifs.
 
-**Métadonnées affichées** pour une application fusionnée :
+Deux règles distinctes, à ne jamais dériver l'une de l'autre :
 
-- chaque champ vient de la source de l'**offre par défaut** ;
-- un champ vide est complété par les autres sources, dans l'ordre de
-  priorité des sources ;
-- **règle provisoire du Core v0.2**, validée par le propriétaire en
-  attendant que D-009 soit précisée : chaque champ vient de l'offre dont la
-  source a la plus haute priorité parmi celles qui fournissent ce champ dans
-  la meilleure langue disponible ; aucune offre par défaut n'est choisie ;
-- la règle de choix de l'offre par défaut est une fonction de `core`, testée
-  isolément. Politique retenue (D-009) :
-  1. une offre déjà installée ;
-  2. sinon l'offre Flatpak, si une remote Flathub est activée ;
-  3. sinon le paquet de la distribution.
+**1. Priorité éditoriale : les textes affichés** pour une application
+fusionnée (nom, résumé, description, icône). Chaque champ vient de l'offre
+dont la source a la plus haute **priorité éditoriale** (`Source::priority`)
+parmi celles qui fournissent ce champ dans la meilleure langue disponible ; un
+champ absent est complété par les sources suivantes. Implémentée en Core v0.2
+(CATALOG §4) ; elle reste indépendante de l'offre proposée (D-009).
 
-  L'utilisateur peut toujours installer une autre offre, en particulier le
-  paquet DEB : la page de l'application liste toutes les offres avec leur
-  version et leur provenance, et `Install` prend l'offre désignée par le
-  client. La préférence pour Flatpak n'implique pas que sa version soit plus
-  récente ou meilleure : les versions ne sont jamais comparées entre
-  formats.
+**2. Priorité d'installation : l'offre proposée par défaut** (D-009,
+précisée en phase 0.4). C'est une fonction de `core`, testée isolément, qui
+s'appuie sur la **nature** des sources (`SourceKind`) et sur l'état installé,
+jamais sur `Source::priority` :
+
+1. une offre déjà installée ;
+2. sinon une offre **Flathub** ; entre une offre utilisateur et une offre
+   système de Flathub, l'offre utilisateur (D-005) ;
+3. sinon le paquet du **dépôt officiel de la distribution** ;
+4. sinon une offre d'une **remote Flatpak tierce**.
+
+Un paquet DEB d'un dépôt APT tiers n'est pas classé (il n'existe pas dans le
+catalogue v1) [À TRANCHER s'il apparaît].
+
+L'utilisateur peut toujours installer une autre offre : la page de
+l'application liste toutes les offres avec leur version et leur provenance,
+et `Install` prend l'offre désignée par le client. La préférence pour Flathub
+n'implique pas que sa version soit plus récente ou meilleure : les versions
+ne sont jamais comparées entre formats.
 
 ### 6.5 Langues
 
-- Noms, résumés, mots-clés et descriptions sont indexés dans la langue de
-  session, avec repli sur la forme non traduite. Langues supplémentaires :
-  O-009.
-- Le choix de la langue passe par l'API de libappstream
-  (`as_component_set_context_locale` [SYMBOLE] ou le réglage de langue
-  d'`AsMetadata`) [À VALIDER : sélection effective des traductions en
-  YAML DEP-11 et en XML Flathub].
-- Un changement de langue de session déclenche une nouvelle indexation ;
-  l'ancien instantané reste servi en attendant. Le suivi de la langue
-  appartient à la couche hôte : sous Cutefish, `base::SessionLanguage` [CODE],
-  qui dépend de cutefish-services ; une autre couche hôte peut se contenter de
-  lire la langue au démarrage.
+Politique validée (D-013, tranche O-009) :
+
+- noms, résumés et mots-clés : stockés dans **toutes** les langues des
+  catalogues ;
+- descriptions : texte original (`C`) et **français** ; le service lance
+  l'indexeur avec `--locale fr` ;
+- recherche par mots : `C` et français ; noms exacts et préfixes de noms :
+  toutes les langues (CATALOG §6) ;
+- lecture : langue de session, puis sa langue seule (`fr_FR` → `fr`), puis
+  `C` (mécanisme du Core v0.2, conservé) ;
+- la sélection des traductions passe par les tables de libappstream et, pour
+  les descriptions, par `as_component_set_context_locale` [MESURÉ, prototype
+  3 et Core v0.2].
+
+Un changement de langue de session **ne demande plus de réindexation** : le
+catalogue ne dépend pas de la langue de session, seule la lecture change. Le
+suivi de la langue appartient à la couche hôte : sous Cutefish,
+`base::SessionLanguage` [CODE] ; les connexions de lecture sont rouvertes avec
+la nouvelle langue.
 
 ---
 
@@ -1871,9 +1892,13 @@ Machine de référence : la machine d'audit, puis une machine modeste à défini
 
 ### 10.7 Travail en arrière-plan
 
-- Rafraîchissement par timer systemd utilisateur avec délai aléatoire
-  (`RandomizedDelaySec`), fréquence et comportement sur connexion limitée à
-  décider (O-012).
+- Rafraîchissement (D-015, tranche O-012) : import initial au premier
+  lancement ; automatique toutes les 24 heures (timer systemd utilisateur,
+  avec délai aléatoire `RandomizedDelaySec`) ; vérification de la date du
+  dernier rafraîchissement à l'ouverture de l'interface ; jamais automatique
+  sur une connexion limitée ; manuel toujours possible ; une seule
+  actualisation à la fois ; catalogue précédent conservé en cas d'échec.
+  Mise en œuvre : [SERVICE.md](SERVICE.md) §3.5.
 - `cache-age` transmis à PackageKit pour éviter les rafraîchissements
   rapprochés.
 - L'indexeur tourne à priorité réduite, CPU et E/S.
@@ -2193,9 +2218,9 @@ avant chaque version, puis automatisation éventuelle avec
    correspondance entre simulation et exécution, signaux après un `apt` en
    ligne de commande, relecture des propriétés d'une transaction rattachée.
 3. Prototype d'indexeur : **fait** (prototype 3), puis implémenté en Core
-   v0.2 ([CATALOG.md](CATALOG.md)). Restent : politique de langues (O-009),
-   mesures sur une machine modeste. Règle des `<provides><id>` : tranchée
-   (D-012).
+   v0.2 ([CATALOG.md](CATALOG.md)). Reste : mesures sur une machine modeste.
+   Règle des `<provides><id>` : tranchée (D-012) ; langues : tranchées
+   (D-013).
 4. Mesure d'un aller-retour D-Bus avec une recherche FTS5 sur le catalogue
    complet (P-004).
 5. Options de durcissement systemd utilisables dans une unité utilisateur.

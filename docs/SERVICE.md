@@ -1,7 +1,10 @@
 # Cutefish Store — Conception du service D-Bus (phase 0.4)
 
-Statut : **proposition de conception, à valider**. Aucune ligne du service
-n'est écrite. Ce document précise, pour l'implémentation, ce que
+Statut : **orientation validée par le propriétaire** (phase 0.4), décisions
+Q-1 à Q-6 prises et enregistrées (DECISIONS : D-009 précisée, D-013 à D-016,
+P-002, P-003, P-004, P-005, P-007, P-010, P-012 validées). Aucune ligne du
+service n'est écrite ; les points marqués [PROPOSITION] restent à confirmer
+à l'implémentation. Ce document précise, pour l'implémentation, ce que
 [ARCHITECTURE.md](ARCHITECTURE.md) (§3 à §10) décrit déjà : il ne remplace
 ni ce document ni [DECISIONS.md](DECISIONS.md), qui font foi pour les
 décisions. Il s'appuie sur le code existant ([CORE.md](CORE.md),
@@ -34,8 +37,9 @@ Renvois : « A §x.y » désigne une section d'[ARCHITECTURE.md](ARCHITECTURE.md
 10. [Erreurs](#10-erreurs)
 11. [Performance et fiabilité](#11-performance-et-fiabilité)
 12. [Risques et limites](#12-risques-et-limites)
-13. [Décisions à prendre avant le développement](#13-décisions-à-prendre-avant-le-développement)
-14. [Ordre d'implémentation proposé](#14-ordre-dimplémentation-proposé)
+13. [Décisions](#13-décisions)
+14. [Écarts avec le cœur actuel](#14-écarts-avec-le-cœur-actuel)
+15. [Plan d'implémentation](#15-plan-dimplémentation)
 
 ---
 
@@ -57,13 +61,12 @@ Renvois : « A §x.y » désigne une section d'[ARCHITECTURE.md](ARCHITECTURE.md
 | `cutefish-toolkit` 1.0 (`Cutefish::ToolkitBase`) | Couche hôte : boucle, D-Bus, threads, processus, fichiers, réglages, langue | Installé, avec ses en-têtes et sa configuration CMake (`CutefishToolkit`) [MESURÉ] |
 | libsystemd 257 (sd-bus) | Indirecte, par `base::dbus` | Installé avec en-têtes [MESURÉ] |
 | SQLite 3.46.1, libappstream 1.0.5, libxml2 | Catalogue, indexeur | Installés avec en-têtes [MESURÉ] |
-| libflatpak 1.16.6 | Backend Flatpak | Bibliothèque installée, **`libflatpak-dev` absent** [MESURÉ] |
-| libcurl | Cache d'images (P-005) | Bibliothèque installée, **aucun paquet de développement** (`libcurl4-openssl-dev` ou `libcurl4-gnutls-dev`) [MESURÉ] |
+| libflatpak 1.16.6 | Backend Flatpak | Bibliothèque installée, **`libflatpak-dev` absent** [MESURÉ] ; retenu (D-016), installé par le propriétaire |
+| libcurl | Cache d'images (P-005) | Bibliothèque installée, **aucun paquet de développement** [MESURÉ] ; `libcurl4-openssl-dev` retenu (D-016), installé par le propriétaire |
 | PackageKit 1.3.1, polkit 126, flatpak 1.16.6 | Exécution | Installés [MESURÉ] |
 
 Le backend Flatpak et le cache d'images ne pourront pas être compilés tant
-que ces deux paquets de développement ne sont pas installés (§13, question
-Q-1).
+que ces deux paquets de développement ne sont pas installés (D-016).
 
 ### 1.3 Ce que fournit `Cutefish::ToolkitBase` [CODE, en-têtes installés `/usr/include/cutefish-toolkit/base/`]
 
@@ -93,8 +96,8 @@ sous charge reste à vérifier par les premiers tests du service.
 | Type `h` dans `base::dbus` (A §5.8) | [À VALIDER] | `UnixFd` existe [CODE] | Correction factuelle dans ARCHITECTURE |
 | Résumé d'application (A §5.4) : `icon` (chemin) et `icon-url` | Deux clés | `AppSummary::icon` est un `IconRef` (chemin, URL ou nom) | Proposé §4.6 : `icon` + `icon-kind` |
 | Détails (A §5.4) : captures, versions, URL, licence, classification, lanceur | Prévus | Absents du catalogue (`app_details` non créée, CATALOG §10) | `GetDetails` v1 réduit (§4.6) ou extension du catalogue (Q-7) |
-| Offres (A §5.4) : `download-size`, `installed-size`, `default` | Prévus | Absents du catalogue ; `default` dépend de D-009 | Tailles par le plan ; `default` différé (Q-2) |
-| Empreintes des sources (A §6.2, étape 1) | « Enregistrées dans l'instantané en service » | Non écrites par `CatalogWriter` | À ajouter à `meta` (étape 14.2) |
+| Offres (A §5.4) : `download-size`, `installed-size`, `default` | Prévus | Absents du catalogue | Tailles par le plan ; `default` calculé à la lecture (D-009, §4.8) |
+| Empreintes des sources (A §6.2, étape 1) | « Enregistrées dans l'instantané en service » | Non écrites par `CatalogWriter` | À ajouter à `meta` (étape C, §15) |
 | Lecteurs avec `state.sqlite` attachée (A §6.3, A §8.2) | `ATTACH … mode=ro` | `SqliteCatalog` n'attache rien | À ajouter avec `state.sqlite` (§8.4) |
 | `Backend` (A §7.1) | 11 opérations | 3 en Core v0.1 (`availability`, `queryInstalled`, `sources`) | Extension proposée §5.4 |
 | Préférences | `settings.ini` (A §2) | — | La demande de phase cite `state.sqlite` ; ce document garde `settings.ini` (§8.1) |
@@ -196,7 +199,7 @@ flowchart TB
   est servi depuis `state.sqlite`, puis réconcilié en arrière-plan
   (ARCHITECTURE §10.2 ; un `Resolve` coûte ≈ 0,5 s [MESURÉ, prototype 4]).
 
-### 3.2 Clients et inactivité (P-010, délai de 5 minutes demandé par cette phase)
+### 3.2 Clients et inactivité (P-010, délai de 5 minutes validé)
 
 - **Client connu** : nom unique qui a appelé au moins une méthode, lecture de
   propriété comprise (`Message::sender()`). Le service suit sa disparition
@@ -231,6 +234,66 @@ flowchart TB
   terminale du journal est traitée selon son backend (§5.6). Une transaction
   PackageKit **continue** dans `packagekitd` sans le service [MESURÉ,
   prototype 4] ; une transaction Flatpak s'est arrêtée avec le service.
+
+### 3.5 Actualisation des catalogues (D-015)
+
+Les sept règles sont décidées (D-015) ; leur mise en œuvre ci-dessous est une
+[PROPOSITION].
+
+**Date de référence.** `LastRefresh` est la date du dernier rafraîchissement
+**réussi et mis en service** (catalogue remplacé). Elle est gardée dans
+`state.sqlite` : `source_state.last_refresh` par source, et une clé `meta`
+`last_refresh` pour l'ensemble (§8.2). Un échec ne la modifie pas.
+
+**Déclencheurs.**
+
+| Déclencheur | Condition | Réseau |
+|---|---|---|
+| Import initial | Démarrage sans catalogue valide (`State` = `indexing`) | Aucun : l'indexeur lit les métadonnées déjà présentes (`/var/lib/swcatalog`, appstream des remotes configurées) |
+| Démarrage du service | `LastRefresh` absente ou plus vieille que 24 h, connexion non limitée | Oui |
+| Nouveau client connu (ouverture de l'interface) | Même condition ; couvre le cas où le service tournait déjà | Oui |
+| Minuterie interne | Service actif au moment où `LastRefresh` atteint 24 h ; même condition | Oui |
+| Minuterie systemd utilisateur | Démarre le service, qui applique la condition de démarrage | Oui |
+| `Refresh` (client) | Toujours accepté, **même sur connexion limitée** ; `force` ignore le délai de 24 h | Oui |
+
+- Minuterie systemd : `cutefish-store-refresh.timer`, `OnCalendar=daily`,
+  `Persistent=true` (rattrape un réveil manqué pendant l'extinction),
+  `RandomizedDelaySec=1h` ; elle démarre `cutefish-store.service`, sans
+  méthode D-Bus dédiée [DOC systemd.timer ; à vérifier à l'implémentation].
+  Le service ne reçoit aucune information sur la cause de son démarrage : la
+  condition (24 h, connexion) est toujours évaluée par lui, jamais par
+  systemd.
+- Après l'import initial, l'actualisation automatique suit les mêmes règles :
+  sur connexion limitée, l'utilisateur voit le catalogue local et peut
+  demander `Refresh`.
+- La remote Flathub utilisateur n'est jamais créée par une actualisation :
+  elle relève de P-011, encore proposée.
+
+**Connexion limitée.** Propriété `Metered` (`u`) de
+`org.freedesktop.NetworkManager` sur le bus système, avec `PropertiesChanged`
+[MESURÉ : propriété présente, `emits-change`, valeur 4 sur la machine
+d'audit]. Valeurs : 0 inconnue, 1 oui, 2 non, 3 oui (estimé), 4 non (estimé)
+[DOC NetworkManager]. 1 et 3 sont traitées comme limitées. NetworkManager
+absent ou valeur 0 : **traitée comme non limitée** [PROPOSITION, Q-12]. Une
+actualisation automatique en cours est annulée si la connexion devient
+limitée ; une actualisation manuelle continue [PROPOSITION].
+
+**Déroulement.** `Backend::refresh` pour chaque backend disponible
+(PackageKit `RefreshCache`, appstream des remotes Flatpak), puis l'indexeur
+écrit un candidat (`--locale fr`, D-013), validé et mis en service par
+`replaceCatalog` ; `CatalogGeneration` augmente, `LastRefresh` est écrite.
+
+**Échec.** Erreur d'un backend, indexeur en code 1 ou 3, candidat refusé :
+le catalogue précédent reste en service (CATALOG §7), `LastRefresh` est
+inchangée, la transaction `refresh` se termine en `failed` avec son code
+(§10). Aucune nouvelle tentative automatique avant une heure [PROPOSITION],
+pour ne pas boucler à chaque nouveau client.
+
+**Une seule à la fois.** `Refreshing` vaut vrai pendant l'actualisation. Un
+`Refresh` reçu pendant ce temps rend le chemin de la transaction en cours ;
+un déclencheur automatique est ignoré. Une demande manuelle reçue pendant
+une actualisation automatique la rend non annulable par le passage en
+connexion limitée.
 
 ---
 
@@ -288,7 +351,7 @@ la mesure l'exige].
 |---|---|---|---|---|
 | `Install` | `s offer_id, a{sv} options` → `o` | `NotFound`, `Busy` (offre déjà engagée), `NotReady`, `BackendUnavailable`, `InvalidArgs` | PackageKit : `package-install` (avec `ONLY_TRUSTED`) ; Flatpak utilisateur : aucune ; Flatpak système : nouvelles installations hors v1 (O-013) | La transaction continue |
 | `Remove` | `s offer_id, a{sv} options` → `o` | Idem, plus `NotAllowed` (paquet protégé, A §7.2) | PackageKit : `package-remove` ; Flatpak système : `app-uninstall` (et `runtime-uninstall` si un runtime part) | Idem |
-| `Update` | `as offer_ids, a{sv} options` → `o` | Idem ; `InvalidArgs` si les offres relèvent de plusieurs backends ou périmètres | PackageKit : `system-update` [MESURÉ] ; Flatpak système : `app-update`, et **`app-install`** si un nouveau runtime est nécessaire [CODE, prototype 2] | Idem |
+| `Update` | `as offer_ids, a{sv} options` → `o` | Idem ; `InvalidArgs` si les offres relèvent de plusieurs backends ou périmètres | PackageKit : `system-update` [MESURÉ] ; Flatpak système : `app-update`, et **`app-install`** si un nouveau runtime est nécessaire [CODE, prototype 2] ; ce runtime est montré dans le plan et confirmé (D-014, §7.3) | Idem |
 | `UpdateAll` | `a{sv} options` → `o` | `NotReady` | Celles des mises à jour concernées | Idem |
 | `Refresh` | `a{sv} options` (`force` `b`) → `o` | — | PackageKit : `system-sources-refresh` (`yes` pour l'utilisateur actif [MESURÉ]) ; Flatpak système : `appstream-update` (`yes`) | Idem |
 | `EnableSource`, `DisableSource` | `s source_id` → `o` | `NotFound`, `NotAllowed` (sources en lecture seule) | Aucune (remote Flathub utilisateur, P-011) | Idem |
@@ -334,9 +397,9 @@ par transaction ; une transaction terminée reste 5 minutes sur le bus, puis
 - **Offre** : `id`, `backend`, `format`, `origin`, `source-kind`, `scope`,
   `package`, `architecture`, `version` (vide pour une offre deb : la version
   installable vient de PackageKit, CATALOG §2), `version-scheme`,
-  `installed` `b`, `installed-version`. **Pas de `default`** tant que D-009
-  n'est pas précisée (Q-2) ; pas de tailles avant le plan (`GetDetails` ne
-  lance pas de simulation).
+  `installed` `b`, `installed-version`, `default` `b` (une seule offre vraie
+  par application, D-009, §4.8). Pas de tailles avant le plan (`GetDetails`
+  ne lance pas de simulation).
 - **Plan** (A §5.4, inchangé dans son principe) : `requires-confirmation`,
   `reasons`, `download-size`, `installed-size-change`, puis par backend la
   liste des opérations avec **version et origine** (prototype 4 : la version
@@ -350,6 +413,33 @@ par transaction ; une transaction terminée reste 5 minutes sur le bus, puis
 `ImagesFailed(a{ss})` (A §5.2), plus **`SourcesChanged()`** [PROPOSITION] :
 les sources changent par `EnableSource`, par la configuration de la
 distribution ou par un `flatpak remote-add` extérieur.
+
+### 4.8 Offre par défaut et priorité éditoriale
+
+Deux règles indépendantes (D-009, ARCHITECTURE §6.4), à ne jamais dériver
+l'une de l'autre :
+
+| | Priorité éditoriale | Priorité d'installation |
+|---|---|---|
+| Choisit | Les **textes** affichés : nom, résumé, description, icône | L'**offre** marquée `default` |
+| Fondée sur | `Source::priority` de chaque source, et la langue | L'état installé, puis la **nature** de la source (`SourceKind`) et le backend |
+| Ordre | Priorité éditoriale décroissante, puis identifiant d'offre | Offre installée ; Flathub (utilisateur avant système) ; dépôt officiel de la distribution ; remote Flatpak tierce |
+| Où | `SqliteCatalog` (Core v0.2) | Fonction pure du cœur, appliquée par le service à la lecture (Core v0.3) |
+| Stockée dans le catalogue | Non (calculée à la lecture) | Non (dépend de `state.sqlite`) |
+
+Conséquences :
+
+- l'ordre des offres rendu par `Catalog::application` suit la priorité
+  éditoriale ; le client ne doit **jamais** en déduire l'offre par défaut :
+  seule la clé `default` le dit ;
+- la priorité éditoriale des sources est un réglage du service (arguments
+  de l'indexeur), indépendant de D-009 : modifier l'une ne change pas
+  l'autre ;
+- un `Install` porte toujours une offre désignée ; `default` n'est qu'une
+  indication pour l'interface ;
+- un paquet d'un dépôt APT tiers n'a pas de rang (D-009, cas non couvert) :
+  la fonction le met après toutes les offres classées et le signale dans les
+  journaux [PROPOSITION ; il n'existe pas dans le catalogue v1].
 
 ---
 
@@ -597,6 +687,13 @@ VM**).
   `app-update`. Le service ne doit donc jamais supposer l'action polkit d'après
   le type d'opération affiché ; il annonce seulement qu'une autorisation peut
   être demandée et traite le refus.
+- **Règle validée (D-014)** : une telle mise à jour est acceptée, avec le
+  runtime présenté dans le plan, une confirmation explicite (raison
+  `system-scope`), la double passe et une nouvelle confirmation si la
+  seconde passe change substantiellement le plan ; aucune installation
+  silencieuse d'un runtime système. Concrètement, la politique de
+  confirmation ajoute `system-scope` dès qu'une opération `install` vise
+  l'installation système, **même dans une transaction de mise à jour**.
 - Les runtimes devenus inutiles ne sont pas nettoyés en v1.
 
 ### 7.4 Polkit
@@ -865,58 +962,91 @@ aller-retour D-Bus d'une recherche (P-004, p95 < 50 ms visé), RSS au repos.
 | Simulation PackageKit ≠ exécution | Exécution différente du plan confirmé | Nouvelle simulation juste avant, comparaison des versions ; fenêtre documentée |
 | Signaux PackageKit diffusés | Autres clients informés des opérations | Hors du contrôle du service (Q-9) |
 | `background=true` annulé par d'autres clients | Rafraîchissement perdu | Pas de `background` pour `RefreshCache` (Q-10) |
-| Action `app-install` pour une mise à jour système qui ajoute un runtime | Dialogue inattendu, ou refus en arrière-plan | Q-4 (O-013) |
-| `libflatpak-dev` et libcurl absents | Backend Flatpak et images non compilables | Q-1 |
+| Action `app-install` pour une mise à jour système qui ajoute un runtime | Dialogue inattendu, ou refus en arrière-plan | D-014 : confirmation explicite ; jamais en arrière-plan sans interaction |
+| `libflatpak-dev` et libcurl absents | Backend Flatpak et images non compilables | D-016 : installation par le propriétaire |
 | API de `cutefish-toolkit` jeune | Ruptures | Couche hôte seule concernée (P-006) |
 | Rattachement PackageKit après redémarrage : propriétés non testées | Progression incomplète après une reprise | Repli `interrupted` |
 | Agent polkit absent (session sans agent) | Actions système refusées | Erreur `auth-denied` affichée [HYPOTHÈSE] |
 
-## 13. Décisions à prendre avant le développement
+## 13. Décisions
 
-Classées selon ce qu'elles bloquent. Aucune n'est prise ici.
+### 13.1 Prises en phase 0.4
 
-### 13.1 Bloquent une partie du service
-
-| Id | Question | Ce qui est bloqué | Ce qui peut avancer sans |
+| Id | Décision du propriétaire | Enregistrée | Effet sur ce document |
 |---|---|---|---|
-| **Q-1** | Installer `libflatpak-dev` et un paquet de développement libcurl (`libcurl4-openssl-dev` ou `libcurl4-gnutls-dev`) ? Lequel pour libcurl ? | Compilation du backend Flatpak et du cache d'images | Service, état, transactions, PackageKit |
-| **Q-2 (D-009)** | Rang d'une offre Flatpak d'une **remote tierce** face au paquet de la distribution (D-009 ne traite que Flathub ; entre offres utilisateur et système d'une même remote, ARCHITECTURE §6.4 tranche déjà : l'offre installée, sinon l'offre utilisateur) | La clé `default` des offres et un `Install` sans offre désignée ; la règle des textes affichés (aujourd'hui : priorité des sources) | Toute l'API, puisque `Install` prend une offre désignée par le client |
-| **Q-3 (O-009)** | Langues des descriptions données à l'indexeur : `C` + langue de session, ou davantage ? (coûts mesurés : CATALOG §5) | Les arguments de l'indexeur lancé par le service | Tout le reste (sans langue, descriptions `C` seulement) |
-| **Q-4 (O-013)** | Une mise à jour système qui exige un nouveau runtime système (action `app-install` prévue par le code) est-elle acceptée, avec quelle confirmation ? | Mises à jour Flatpak système avec nouveau runtime | Installations utilisateur, mises à jour système simples |
-| **Q-5 (O-012)** | Fréquence du rafraîchissement automatique et comportement en connexion limitée | Le minuteur systemd et `Refresh` automatique | `Refresh` manuel |
-| **Q-6** | Valider les décisions proposées sur lesquelles le service repose : P-002, P-003, P-004 (recherche par D-Bus), P-005, P-007, P-010 (délai de 5 minutes), P-012 ; et O-001 (licence, « avant le premier fichier source ») | L'ensemble, formellement | — |
+| Q-1 | `libflatpak-dev` et `libcurl4-openssl-dev`, installés par le propriétaire | D-016 | §1.2 |
+| Q-2 | Offre par défaut : installée, puis Flathub, dépôt de la distribution, remote Flatpak tierce ; choix manuel toujours possible ; priorité éditoriale indépendante | D-009 (précisée) | §4.6, §4.8 |
+| Q-3 | Noms, résumés, mots-clés : toutes les langues ; descriptions : français et `C` ; sélection et repli inchangés | D-013 | §3.5 (`--locale fr`) |
+| Q-4 | Mise à jour système avec nouveau runtime système : acceptée, montrée, confirmée, double passe, nouvelle confirmation si le plan change, polkit respecté, rien de silencieux | D-014 | §4.4, §7.3, §12 |
+| Q-5 | Import initial, 24 h, vérification à l'ouverture, rien d'automatique en connexion limitée, manuel toujours, catalogue précédent gardé, une seule à la fois | D-015 | §3.5 |
+| Q-6 | P-002, P-003, P-004, P-005, P-007, P-010, P-012 validées ; **O-001 (licence) reste ouverte** : ni `LICENSE`, ni déclaration SPDX | DECISIONS | — |
 
-### 13.2 Peuvent attendre
+### 13.2 Encore ouvertes
 
-| Id | Question | Pourquoi elle peut attendre |
+Aucune ne bloque les premières étapes du §15 ; la colonne de droite dit
+quand elle devient nécessaire.
+
+| Id | Question | Nécessaire avant |
 |---|---|---|
-| Q-7 | Étendre le catalogue (`app_details` : captures, versions publiées, URL, licence, classification) et son format | `GetDetails` peut commencer avec ce qui existe |
-| Q-8 | Durée de conservation du journal (proposé : 200 transactions ou 90 jours) et délai de confirmation (10 minutes proposées) | Valeurs modifiables sans changer l'API |
-| Q-9 | Prendre acte de la diffusion des signaux PackageKit | Aucun choix technique possible côté service |
-| Q-10 | `RefreshCache` sans `background=true` | Seulement le rafraîchissement |
-| Q-11 | Tout processus de la session peut confirmer une transaction ou installer en Flatpak utilisateur | Conforme à A §9.2 ; à confirmer seulement |
-| **O-010** | Serveur de notifications | Les notifications sont un ajout de la couche hôte |
-| **O-007** | Dépôts éditeurs | Après la v1 (D-003) |
-| O-011 | Contenu éditorial | Écran d'accueil seulement |
+| Q-7 | Étendre le catalogue (`app_details` : captures, versions publiées, URL, licence, classification) | Fiche complète (`GetDetails` commence avec l'existant) |
+| Q-8 | Conservation du journal (200 transactions ou 90 jours proposés) et délai de confirmation (10 minutes proposées) | Étape B (valeurs modifiables sans changer l'API) |
+| Q-9 | Prendre acte de la diffusion des signaux PackageKit | Étape F |
+| Q-10 | `RefreshCache` sans `background=true` | Étape F |
+| Q-11 | Tout processus de la session peut confirmer une transaction ou installer en Flatpak utilisateur (A §9.2) | Étape F |
+| **Q-12** | Connexion limitée quand NetworkManager est absent ou rend « inconnue » : proposé « non limitée » (§3.5) | Étape I |
+| **Q-13** | Rang d'un paquet deb d'un dépôt APT tiers (cas non couvert par D-009) ; proposé : après toutes les offres classées | Seulement si un tel dépôt entre dans le catalogue (pas en v1) |
+| O-013 | Nouvelle installation d'application en Flatpak système (la mise à jour est tranchée par D-014) | Étape H |
+| P-001, P-009, P-013 | Décisions proposées dont le service dépend (organisation, files, conventions) ; appliquées depuis Core v0.1 | Validation formelle souhaitée avant l'étape E |
+| P-011 | Remote Flathub utilisateur créée depuis un fichier embarqué, avec consentement | Étape G |
+| O-001 | Licence | Avant toute publication ; aucune action en attendant |
+| O-010 | Serveur de notifications | Étape I (notifications) |
+| O-007, O-011 | Dépôts éditeurs, contenu éditorial | Après la v1 / écran d'accueil |
 
-## 14. Ordre d'implémentation proposé
+## 14. Écarts avec le cœur actuel
 
-Chaque étape compile, a ses tests et peut être validée seule.
+Comparaison des interfaces de `store-core` v0.2 avec ce que les décisions
+D-009, D-013 à D-016 et ce document demandent [CODE : lecture des en-têtes
+de `src/core/include/cutefish/store/`]. Aucun ne contredit une décision : ce
+sont des manques, sauf le premier, qui est un commentaire périmé.
 
-1. **Core v0.3 : transactions et état.** Types `Plan`, `Transaction`,
-   machine d'états, comparaison des plans et politique de confirmation
-   (P-008) ; `StateStore` (`state.sqlite`, migrations) ; implémentation de
-   `InstalledState` ; extension de `Backend` (§5.4) avec un backend de test.
-2. **Catalogue v0.3** : empreintes des sources dans `meta`, navigation par
-   catégorie (`Browse`, `ListCategories`), lecture avec `state.sqlite`
-   attachée.
-3. **Service v0.1, lecture seule** : couche hôte, nom de bus, objets
-   `Store1`, cycle de vie (clients, 5 minutes), pool de lecture, indexation
-   et mise en service du catalogue, `Search`, `GetDetails`, `GetSummaries` ;
-   tests sur un bus de session privé (`dbus-run-session`).
-4. **Backend PackageKit** : transport, requêtes d'état, plans, exécution ;
-   tests avec un faux PackageKit sur un bus privé, puis en VM.
-5. **Backend Flatpak utilisateur** : double passe, exécution, permissions ;
-   tests avec `FLATPAK_USER_DIR` et un dépôt local (méthode du prototype 1).
-6. **Flatpak système** : en VM seulement, après Q-4.
-7. **Images, notifications, minuteur** : après Q-1, O-010, Q-5.
+| # | Écart | Où | Conséquence | Traitement |
+|---|---|---|---|---|
+| 1 | Le commentaire de `SqliteCatalog` qualifie la règle des textes de provisoire et renvoie à D-009 | `sqlitecatalog.h` | Laisse croire que D-009 changera les textes ; c'est faux (§4.8) | Corriger le commentaire, étape A |
+| 2 | Aucune fonction ne choisit l'offre par défaut | cœur | Pas de clé `default` | Fonction pure (offres, offres installées) → offre, fondée sur `Offer::sourceKind()`, `backend()`, `scope()` ; étape A |
+| 3 | « Installée d'abord » exige l'état installé, qui n'a pas d'implémentation réelle (`InstalledState` n'existe qu'en faux de test) | `installedstate.h` | La règle D-009 ne peut être appliquée qu'avec des faux | `StateStore`, étape B |
+| 4 | `SourceKind::ThirdParty` ne distingue pas une remote Flatpak tierce d'un dépôt APT tiers | `source.h` | Le rang « remote tierce » de D-009 doit lire aussi le backend | Pas de nouveau type : la fonction combine `kind` et `backend` ; deb tiers → Q-13 |
+| 5 | `Backend` n'a que `availability`, `queryInstalled`, `sources` | `backend.h` | Ni plan, ni exécution, ni annulation, ni mises à jour, ni rafraîchissement | Extension du §5.4, étape D |
+| 6 | Aucun modèle `Plan` / `Transaction`, ni politique de confirmation | cœur | P-008 et D-014 non représentables | Étape A ; D-014 = raison `system-scope` pour toute opération `install` système, même dans une mise à jour |
+| 7 | `Catalog` n'a ni `Browse` ni `ListCategories` | `catalog.h` | Navigation par catégorie impossible | Étape C |
+| 8 | `SqliteCatalog` refuse `installedOnly` et ne connaît pas l'état installé | `sqlitecatalog.cpp` | `installed`, `has-update`, filtre installé absents des résultats | `state.sqlite` attachée en lecture, étape C |
+| 9 | Pas d'empreintes des sources dans `meta` du catalogue | `catalogwriter` | Impossible de savoir si une actualisation a changé quelque chose | Étape C |
+| 10 | Pas de `LastRefresh` stockée | — | D-015 inapplicable | `meta.last_refresh` et `source_state`, étape B |
+| 11 | La recherche plein texte (FTS) n'indexe que les langues de recherche (`C` et le français) ; les noms des autres langues ne sont trouvés que par les paliers exact et préfixe ; leurs mots-clés sont stockés mais ne servent pas à la recherche | `catalogwriter.cpp` (`fts_locales`) | Conforme à D-013 (noms en toutes langues stockés) ; limite connue | Documentée (CATALOG §5) ; pas de changement |
+| 12 | L'ordre des offres rendu par `Catalog::application` suit la priorité éditoriale | `sqlitecatalog.cpp` | Un client qui prendrait la première offre ferait une erreur | Contrat écrit (§4.8, CATALOG §4) ; `default` seule fait foi |
+
+Rien dans le cœur ne lie déjà la priorité éditoriale (`Source::priority`) au
+choix d'une offre : la séparation demandée existe dans le code, il reste à
+écrire la seconde règle.
+
+## 15. Plan d'implémentation
+
+Chaque étape compile, a ses tests, ne dépend que des précédentes et peut être
+validée seule. Aucune n'exige de commande root sur la machine de
+développement ; les étapes marquées « VM » se testent dans une machine
+virtuelle.
+
+| Étape | Contenu | Tests | Prérequis |
+|---|---|---|---|
+| **A. Core v0.3a : plans et règles** | `Plan`, `PlanItem`, `Transaction` et sa machine d'états (§5.1), comparaison de plans (§7.2), politique de confirmation (P-008, D-014), fonction d'offre par défaut (D-009) ; correction du commentaire de `sqlitecatalog.h` | Fonctions pures, GoogleTest, cas D-009 (installée, Flathub utilisateur/système, deb, remote tierce, deb tiers) et D-014 | Aucun |
+| **B. Core v0.3b : `state.sqlite`** | `StateStore` : schéma §8.2, migrations, journal, `last_refresh` ; implémentation réelle de `InstalledState` | Base temporaire, migrations, reprise après arrêt simulé | Q-8 souhaitée (valeurs par défaut sinon) |
+| **C. Catalogue v0.3** | Empreintes des sources dans `meta` ; `Browse`, `ListCategories` ; `state.sqlite` attachée en lecture (`installed`, `has-update`, `installedOnly`) | Catalogues réduits existants, mesures `store-catalog-bench` sans régression | B |
+| **D. `Backend` étendu** | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
+| **E. Service v0.1, lecture seule** | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |
+| **F. Backend PackageKit** | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) | Faux PackageKit sur bus privé, puis VM | E ; Q-9 à Q-11 |
+| **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
+| **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
+| **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
+
+Le Refresh manuel (E) précède l'automatique (I) : la mécanique
+d'actualisation (backends, indexeur, remplacement, fusion des demandes) est
+écrite une fois, puis seulement déclenchée autrement.

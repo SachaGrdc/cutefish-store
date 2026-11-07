@@ -126,25 +126,44 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   nécessaire ; il est peu coûteux avant la première publication et coûteux
   après (clients, fichiers `.service`, identifiant AppStream).
 
-### D-009 — Flatpak est la source privilégiée (tranche O-004)
+### D-009 — Offre proposée par défaut : Flathub, puis la distribution, puis les remotes tiers (tranche O-004)
 
-- **Statut** : Validée (propriétaire, après la matrice de validation de la
-  phase 0.2).
+- **Statut** : Validée (phase 0.2), **précisée par le propriétaire en phase
+  0.4** (question Q-2 de [SERVICE.md](SERVICE.md)) : ordre complet, remotes
+  Flatpak tiers compris.
 - **Décision** :
-  - quand une application existe à la fois en paquet de la distribution (DEB)
-    et sur Flathub, l'offre Flatpak est proposée par défaut ;
-  - l'utilisateur peut toujours choisir explicitement le paquet DEB : toutes
-    les offres sont affichées sur la page de l'application, et l'API installe
+  - une offre **déjà installée** reste l'offre mise en avant pour cette
+    application (inchangé) ;
+  - sinon, l'offre proposée par défaut est choisie dans cet ordre :
+    1. une offre **Flathub** ;
+    2. le paquet du **dépôt officiel de la distribution** (DEB) ;
+    3. une offre d'une **remote Flatpak tierce** ;
+  - entre deux offres Flathub de la même application, l'une dans
+    l'installation utilisateur et l'autre en système : l'offre installée,
+    sinon l'offre utilisateur (D-005, ARCHITECTURE §6.4) ;
+  - l'utilisateur peut **toujours** choisir une autre offre : toutes les
+    offres sont affichées sur la page de l'application, et l'API installe
     l'offre que le client désigne ;
-  - une offre déjà installée reste l'offre mise en avant pour cette
-    application ;
-  - sans remote Flathub activée, il n'y a pas d'offre Flatpak et le paquet DEB
-    est proposé.
+  - sans remote Flathub activée, il n'y a pas d'offre Flathub : le paquet de
+    la distribution vient en premier.
+- **Indépendance de la priorité éditoriale** : cet ordre choisit **l'offre à
+  installer**. Il ne choisit pas les **textes affichés** (nom, résumé,
+  description, icône), qui suivent la priorité éditoriale des sources
+  (`Source::priority`, CATALOG §4). Les deux règles ne doivent jamais être
+  dérivées l'une de l'autre : une application peut afficher les textes de
+  Debian et proposer l'offre Flathub.
+- **Cas non couvert** : un paquet DEB venu d'un dépôt APT tiers (source
+  PackageKit de nature `third-party`). Il n'existe pas dans le catalogue v1,
+  qui n'indexe que le DEP-11 de la distribution ; s'il apparaissait, son rang
+  serait à trancher avant d'être proposé par défaut [À TRANCHER].
 - **Ce que la préférence ne signifie pas** : elle n'affirme pas que la version
   Flatpak est plus récente ni meilleure. Les versions diffèrent selon la
   source, et un paquet Debian peut recevoir des correctifs de sécurité sans
   changer de version amont. L'interface affiche la version et la provenance de
   chaque offre, sans comparer les versions entre formats.
+- **Version précédente, remplacée** : « l'offre Flatpak, si une remote
+  Flathub est activée ; sinon le paquet de la distribution » ; le rang des
+  remotes tierces n'était pas défini.
 - **Détails** : ARCHITECTURE §6.4.
 
 ### D-010 — Mises à jour : applications seulement (tranche O-005)
@@ -243,6 +262,70 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   identifiant propre, identifiants invalides, ordre de recherche).
 - **Détails** : [CATALOG.md](CATALOG.md) §4,
   [ARCHITECTURE §6.4](ARCHITECTURE.md#64-identifiants-correspondances-et-dédoublonnage).
+
+### D-013 — Langues du catalogue (tranche O-009)
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-3).
+- **Décision** :
+  - noms, résumés et mots-clés : **toutes** les langues disponibles dans les
+    catalogues ;
+  - descriptions : le texte original non traduit (`C`) et le **français** ;
+  - le mécanisme existant de sélection et de repli est conservé : à la
+    lecture, la langue de session, puis sa langue seule (`fr_FR` → `fr`),
+    puis `C`.
+- **Mise en œuvre** : le service lance l'indexeur avec `--locale fr`. L'index
+  de recherche par mots couvre `C` et le français ; les noms exacts et les
+  préfixes de noms sont trouvés dans toutes les langues (CATALOG §6).
+- **Conséquences** :
+  - une session dans une autre langue voit les noms et résumés traduits, et
+    la description en `C` ;
+  - un changement de langue de session ne demande plus de réindexation : seule
+    la lecture change ;
+  - coût mesuré : 28,2 Mo contre 25,0 Mo avec `C` seulement, durée
+    inchangée à la mesure près [MESURÉ, CATALOG §5].
+
+### D-014 — Mise à jour Flatpak système qui installe un runtime (tranche partielle O-013)
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-4).
+- **Décision** : une mise à jour d'une application installée **en système**
+  peut installer un nouveau runtime système si elle l'exige, aux conditions
+  suivantes :
+  - le runtime figure dans le plan présenté ;
+  - une confirmation explicite est demandée (raison `system-scope`, P-008) ;
+  - le mécanisme B (double passe) s'applique ; une différence substantielle
+    à la seconde passe exige une nouvelle confirmation ;
+  - l'authentification polkit demandée par `flatpak-system-helper` est
+    respectée ; selon le code de Flatpak 1.16.6, ce runtime est déployé sous
+    l'action `org.freedesktop.Flatpak.app-install` [CODE, prototype 2 ; à
+    confirmer en VM] ;
+  - **aucune installation silencieuse** d'un runtime système supplémentaire.
+- **Ce qui reste ouvert (O-013)** : proposer une **nouvelle** installation
+  d'application en système.
+
+### D-015 — Actualisation des catalogues (tranche O-012)
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-5).
+- **Décision** :
+  - **import initial** au premier lancement, quand aucun catalogue n'existe ;
+  - **actualisation automatique toutes les 24 heures** ;
+  - **vérification de la date du dernier rafraîchissement à l'ouverture** de
+    l'interface : au-delà de 24 heures, une actualisation est lancée ;
+  - **aucune actualisation automatique sur une connexion limitée** ;
+  - **actualisation manuelle toujours possible**, y compris sur une connexion
+    limitée ;
+  - en cas d'échec, **le catalogue précédent reste en service** (remplacement
+    atomique, CATALOG §7) ;
+  - **une seule actualisation à la fois** : une demande pendant une
+    actualisation est fusionnée avec elle.
+- **Mise en œuvre proposée** : [SERVICE.md](SERVICE.md) §3.5.
+
+### D-016 — Dépendances de compilation du service
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-1).
+- **Décision** : le backend Flatpak utilise `libflatpak-dev` ; le cache
+  d'images utilise libcurl dans sa variante OpenSSL (`libcurl4-openssl-dev`).
+  Le propriétaire installe ces paquets ; aucune commande root n'est lancée par
+  les outils de développement.
 
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
@@ -380,45 +463,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Détails** : [ARCHITECTURE §7.3](ARCHITECTURE.md#73-backend-flatpak-libflatpak)
   et [§5.5](ARCHITECTURE.md#55-annulation-concurrence-et-ordre).
 
----
-
-## Décisions proposées (phase 0.2, à valider)
-
-### P-001 — Un seul service, bibliothèques internes statiques, pas de plugins
-
-- **Statut** : Proposée, corrigée après la matrice de validation. Le point
-  « backend `backend-packagekit`, qui parle à PackageKit par D-Bus avec
-  sd-bus » est **validé** (propriétaire, phase 0.3, après le prototype 4) ;
-  le reste de la décision reste proposé.
-- **Décision** :
-  - un seul service (`cutefish-store-service`) ;
-  - le code est découpé en bibliothèques statiques internes : `common`,
-    `core`, `backend-packagekit`, `backend-flatpak`, `service` ;
-  - les backends sont enregistrés à la compilation (options CMake), sans
-    chargement dynamique ni ABI de plugin ;
-  - **correction** : le backend autrefois nommé `backend-apt` devient
-    `backend-packagekit`. PackageKit ne dépend pas de la distribution ; les
-    particularités Debian (catalogue DEP-11, champ « données » des
-    `package_id`, classement des dépôts, paquets protégés, format `deb`) sont
-    isolées dans un **profil de distribution**. Le code générique ne contient
-    aucune donnée propre à Debian (ARCHITECTURE §7.2).
-- **Justification** :
-  - il n'y a que deux backends en v1 ;
-  - un système de plugins `dlopen` imposerait une ABI stable, du versionnage
-    et une validation au chargement, sans bénéfice tant que les backends sont
-    livrés avec le service ;
-  - le découpage en bibliothèques suffit à tester chaque partie isolément.
-  - C'est la même organisation que les applications Cutefish
-    (`calculator-engine`, `calculator-ui`) [CODE].
-- **Alternatives écartées** :
-  - un service par backend : plus d'IPC, plus de cycles de vie, aucun gain ;
-  - des plugins dynamiques : complexité prématurée ;
-  - un backend « APT » mêlant PackageKit et Debian : il aurait fallu le
-    réécrire pour une autre distribution.
-
 ### P-002 — Indexation AppStream dans un sous-processus éphémère
 
-- **Statut** : Proposée, justification corrigée après la matrice de
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée, justification corrigée après la matrice de
   validation. C'est un écart par rapport à une lecture littérale de « service
   seul écrivain », expliqué ci-dessous.
 - **Décision** :
@@ -474,7 +522,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-003 — Deux bases SQLite : catalogue (instantané) et état
 
-- **Statut** : Proposée.
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée.
 - **Décision** :
   - `catalog.sqlite` est un instantané en lecture seule, reconstruit
     entièrement à chaque changement de catalogue et remplacé atomiquement ;
@@ -490,7 +539,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-004 — Toute la communication interface ↔ service passe par D-Bus, recherche comprise
 
-- **Statut** : Proposée, corrigée après la matrice de validation. Écart par
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée, corrigée après la matrice de validation. Écart par
   rapport à l'audit 0.1, qui suggérait une lecture SQLite directe par
   l'interface pour la recherche.
 - **Décision** : l'interface n'ouvre aucune base de données du service, aucun
@@ -514,7 +564,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-005 — Le service télécharge et met en cache les images
 
-- **Statut** : Proposée, précisée après la matrice de validation.
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée, précisée après la matrice de validation.
 - **Décision** :
   - le service gère le téléchargement (libcurl, HTTPS uniquement), le cache
     disque et la déduplication des captures d'écran et des icônes distantes ;
@@ -543,7 +594,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 
 ### P-007 — Aucun composant privilégié propre en v1
 
-- **Statut** : Proposée.
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée.
 - **Décision** : la v1 ne livre aucun helper root. Les opérations
   privilégiées sont entièrement déléguées :
   - à PackageKit (APT) ;
@@ -553,6 +605,89 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   privilégié (PackageKit ne sait pas ajouter un dépôt avec sa clé [CODE]),
   sont hors périmètre v1 (D-003). Sans eux, aucun code privilégié n'est
   nécessaire.
+
+### P-010 — Cycle de vie du service : activation D-Bus, timer, arrêt sur inactivité
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée, règle d'inactivité précisée après la matrice de
+  validation.
+- **Décision** :
+  - le service est activé par D-Bus (bus de session) et décrit par une unité
+    systemd utilisateur (`Type=dbus`) ;
+  - un timer systemd utilisateur le démarre périodiquement pour rafraîchir
+    les catalogues et vérifier les mises à jour ;
+  - **règle d'inactivité** :
+    1. un *client connu* est une connexion D-Bus (nom unique) qui a appelé au
+       moins une méthode du service, lecture des propriétés comprise. Le
+       service suit sa disparition (`NameOwnerChanged`). Un simple abonné aux
+       signaux n'est pas compté : l'interface lit les propriétés dès son
+       démarrage ;
+    2. le service reste actif tant qu'au moins un client connu est connecté ;
+    3. il ne s'arrête jamais pendant une transaction non terminale (y compris
+       `queued` et `awaiting-confirmation`), une indexation ou un
+       rafraîchissement ;
+    4. il s'arrête après un délai défini suivant la disparition du dernier
+       client, quand plus rien n'est en cours : **5 minutes** (validé en
+       phase 0.4). Un démarrage par le timer, sans client, suit la même
+       règle une fois le travail terminé ;
+    5. les téléchargements d'images en file sont abandonnés à l'arrêt ; un
+       fichier en cours d'écriture est supprimé (§5.8).
+- **Justification** :
+  - zéro mémoire consommée quand la boutique ne sert pas ;
+  - modèle identique aux services de cutefish-core et de l'installeur
+    (activation D-Bus et arrêt sur inactivité [CODE]) ;
+  - une fenêtre ouverte garde le service actif : elle continue de recevoir
+    les signaux de progression et de catalogue.
+
+### P-012 — API D-Bus versionnée par le nom d'interface
+
+- **Statut** : Validée (propriétaire, phase 0.4, question Q-6 de SERVICE.md).
+  Statut précédent : proposée.
+- **Décision** :
+  - les interfaces portent un numéro de version (`…Store1`,
+    `…Store1.Transaction`) ;
+  - les ajouts compatibles (nouvelles clés `a{sv}`, nouvelles méthodes) ne
+    changent pas ce numéro ;
+  - une rupture crée `…Store2`, et les deux versions coexistent le temps de
+    la migration.
+- **Justification** : les dictionnaires `a{sv}` permettent d'étendre l'API
+  sans casser les clients existants.
+
+---
+
+## Décisions proposées (à valider)
+
+### P-001 — Un seul service, bibliothèques internes statiques, pas de plugins
+
+- **Statut** : Proposée, corrigée après la matrice de validation. Le point
+  « backend `backend-packagekit`, qui parle à PackageKit par D-Bus avec
+  sd-bus » est **validé** (propriétaire, phase 0.3, après le prototype 4) ;
+  le reste de la décision reste proposé.
+- **Décision** :
+  - un seul service (`cutefish-store-service`) ;
+  - le code est découpé en bibliothèques statiques internes : `common`,
+    `core`, `backend-packagekit`, `backend-flatpak`, `service` ;
+  - les backends sont enregistrés à la compilation (options CMake), sans
+    chargement dynamique ni ABI de plugin ;
+  - **correction** : le backend autrefois nommé `backend-apt` devient
+    `backend-packagekit`. PackageKit ne dépend pas de la distribution ; les
+    particularités Debian (catalogue DEP-11, champ « données » des
+    `package_id`, classement des dépôts, paquets protégés, format `deb`) sont
+    isolées dans un **profil de distribution**. Le code générique ne contient
+    aucune donnée propre à Debian (ARCHITECTURE §7.2).
+- **Justification** :
+  - il n'y a que deux backends en v1 ;
+  - un système de plugins `dlopen` imposerait une ABI stable, du versionnage
+    et une validation au chargement, sans bénéfice tant que les backends sont
+    livrés avec le service ;
+  - le découpage en bibliothèques suffit à tester chaque partie isolément.
+  - C'est la même organisation que les applications Cutefish
+    (`calculator-engine`, `calculator-ui`) [CODE].
+- **Alternatives écartées** :
+  - un service par backend : plus d'IPC, plus de cycles de vie, aucun gain ;
+  - des plugins dynamiques : complexité prématurée ;
+  - un backend « APT » mêlant PackageKit et Debian : il aurait fallu le
+    réécrire pour une autre distribution.
 
 ### P-009 — Transactions sérialisées par backend, parallèles entre backends
 
@@ -589,38 +724,6 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - un seul `FlatpakTransaction` à la fois évite les contentions de verrou
     du dépôt OSTree et simplifie l'annulation.
 
-### P-010 — Cycle de vie du service : activation D-Bus, timer, arrêt sur inactivité
-
-- **Statut** : Proposée, règle d'inactivité précisée après la matrice de
-  validation.
-- **Décision** :
-  - le service est activé par D-Bus (bus de session) et décrit par une unité
-    systemd utilisateur (`Type=dbus`) ;
-  - un timer systemd utilisateur le démarre périodiquement pour rafraîchir
-    les catalogues et vérifier les mises à jour ;
-  - **règle d'inactivité** :
-    1. un *client connu* est une connexion D-Bus (nom unique) qui a appelé au
-       moins une méthode du service, lecture des propriétés comprise. Le
-       service suit sa disparition (`NameOwnerChanged`). Un simple abonné aux
-       signaux n'est pas compté : l'interface lit les propriétés dès son
-       démarrage ;
-    2. le service reste actif tant qu'au moins un client connu est connecté ;
-    3. il ne s'arrête jamais pendant une transaction non terminale (y compris
-       `queued` et `awaiting-confirmation`), une indexation ou un
-       rafraîchissement ;
-    4. il s'arrête après un délai défini suivant la disparition du dernier
-       client, quand plus rien n'est en cours : 5 minutes proposées
-       [À VALIDER]. Un démarrage par le timer, sans client, suit la même
-       règle une fois le travail terminé ;
-    5. les téléchargements d'images en file sont abandonnés à l'arrêt ; un
-       fichier en cours d'écriture est supprimé (§5.8).
-- **Justification** :
-  - zéro mémoire consommée quand la boutique ne sert pas ;
-  - modèle identique aux services de cutefish-core et de l'installeur
-    (activation D-Bus et arrêt sur inactivité [CODE]) ;
-  - une fenêtre ouverte garde le service actif : elle continue de recevoir
-    les signaux de progression et de catalogue.
-
 ### P-011 — Remote Flathub utilisateur créée depuis un fichier embarqué
 
 - **Statut** : Proposée.
@@ -633,19 +736,6 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Justification** :
   - la clé de confiance ne transite pas par le réseau au moment de l'ajout ;
   - ajouter une source tierce reste un choix explicite de l'utilisateur.
-
-### P-012 — API D-Bus versionnée par le nom d'interface
-
-- **Statut** : Proposée.
-- **Décision** :
-  - les interfaces portent un numéro de version (`…Store1`,
-    `…Store1.Transaction`) ;
-  - les ajouts compatibles (nouvelles clés `a{sv}`, nouvelles méthodes) ne
-    changent pas ce numéro ;
-  - une rupture crée `…Store2`, et les deux versions coexistent le temps de
-    la migration.
-- **Justification** : les dictionnaires `a{sv}` permettent d'étendre l'API
-  sans casser les clients existants.
 
 ### P-013 — Conventions de code Cutefish
 
@@ -690,9 +780,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 | O-006 | Tranchée → D-011 | **Flatpaks déjà installés en système**. | Éviter de proposer un doublon utilisateur ; périmètre polkit | — |
 | O-007 | Ouverte | **Dépôts éditeurs** (ex. Claude Desktop) : version cible, gouvernance du manifeste, helper privilégié. | Seul cas qui demande du code privilégié | Après la v1 |
 | O-008 | Ouverte | **`ToolkitBase` hors Cutefish** : demander en amont une option de build « base seule » et/ou un paquet séparé. | Ne concerne plus que la couche hôte et le transport PackageKit : le cœur, l'indexeur et l'adaptateur Flatpak n'en dépendent pas (P-006) | Avant un portage de la couche hôte |
-| O-009 | Ouverte | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation. Coûts mesurés en Core v0.2 (descriptions `C` : 25 Mo ; + français : 28 Mo ; toutes : 58 Mo ; durée 4,4 à 4,9 s) : [CATALOG.md](CATALOG.md) §5 | Avant le service (l'indexeur reçoit déjà les langues en argument) |
+| O-009 | Tranchée → D-013 | **Langues indexées** : langue de session et `C` seulement, ou toutes les langues configurées ? | Taille de l'index, temps d'indexation. Coûts mesurés en Core v0.2 (descriptions `C` : 25 Mo ; + français : 28 Mo ; toutes : 58 Mo ; durée 4,4 à 4,9 s) : [CATALOG.md](CATALOG.md) §5 | Avant le service (l'indexeur reçoit déjà les langues en argument) |
 | O-010 | Ouverte | **Serveur de notifications** : quel serveur `org.freedesktop.Notifications` est disponible sous Cutefish ? Non vérifié en 0.1. | Notifications de mises à jour en arrière-plan | Phase 0.3 |
 | O-011 | Ouverte | **Contenu éditorial** (mises en avant, sélections) : source et format. | Écran d'accueil | Avant le design de l'accueil |
-| O-012 | Ouverte | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
-| O-013 | Ouverte | **Nouvelles installations Flatpak en système** : la boutique doit-elle permettre de choisir l'installation système pour une nouvelle application, et pour qui ? | Effet sur tous les utilisateurs ; autorisations différentes selon le groupe `sudo` (D-011) | Après la v1, ou avant si le propriétaire le souhaite |
+| O-012 | Tranchée → D-015 | **Fréquence du rafraîchissement en arrière-plan** et comportement sur connexion limitée (NetworkManager `Metered`). | Consommation réseau | Phase 0.3 |
+| O-013 | Ouverte (mises à jour avec nouveau runtime : tranché → D-014) | **Nouvelles installations Flatpak en système** : la boutique doit-elle permettre de choisir l'installation système pour une nouvelle application, et pour qui ? | Effet sur tous les utilisateurs ; autorisations différentes selon le groupe `sudo` (D-011) | Après la v1, ou avant si le propriétaire le souhaite |
 | O-014 | Ouverte | **Formatage automatique** : faut-il un `.clang-format` propre au projet, et lequel ? Cutefish n'en fournit aucun (P-013). | Homogénéité du code, vérification en CI | Avant le premier fichier source |
