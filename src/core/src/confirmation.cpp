@@ -165,4 +165,9 @@ PlanComparison comparePlans(const Plan& accepted, const Plan& fresh)
     return result;
 }
 
+bool mayExecute(const Plan& accepted, const Plan& fresh)
+{
+    return comparePlans(accepted, fresh).verdict != PlanVerdict::NeedsConfirmation;
+}
+
 } // namespace cutefish::store

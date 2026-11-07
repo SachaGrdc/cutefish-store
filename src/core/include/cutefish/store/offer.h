@@ -86,4 +86,26 @@ private:
     SourceKind m_sourceKind;
 };
 
+/// What an offer id designates. Offer ids stay opaque to clients
+/// (ARCHITECTURE §5.1); the core, which builds them in Offer::create, can
+/// read them back, so that a backend asked to act on an offer it did not
+/// list itself (an installed ref from another remote, a package to remove)
+/// knows what to act on.
+struct OfferAddress
+{
+    BackendKind backend;
+    Scope scope;
+    /// Flatpak remote; empty for PackageKit, whose ids do not name the
+    /// repository (APT chooses it).
+    std::string origin;
+    /// Package name or full Flatpak ref.
+    std::string package;
+
+    bool operator==(const OfferAddress&) const = default;
+};
+
+/// Reads `packagekit:<package>` or `flatpak:<scope>:<remote>:<ref>` back,
+/// with the same checks as Offer::create. InvalidArgument otherwise.
+Result<OfferAddress> decodeOfferId(const OfferId& id);
+
 } // namespace cutefish::store

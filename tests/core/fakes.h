@@ -5,6 +5,7 @@
 
 #include <cutefish/store/backend.h>
 #include <cutefish/store/catalog.h>
+#include <cutefish/store/confirmation.h>
 #include <cutefish/store/installedstate.h>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -193,6 +195,15 @@ class PostQueue
 public:
     void post(std::function<void()> f) { m_queue.push_back(std::move(f)); }
     std::size_t pending() const { return m_queue.size(); }
+    /// Runs the oldest queued task, if any.
+    void runOne()
+    {
+        if (m_queue.empty())
+            return;
+        auto f = std::move(m_queue.front());
+        m_queue.pop_front();
+        f();
+    }
     void runAll()
     {
         while (!m_queue.empty()) {
@@ -206,28 +217,232 @@ private:
     std::deque<std::function<void()>> m_queue;
 };
 
-/// A backend whose answers are set by the test and delivered through the
-/// PostQueue, never from inside the call.
+/// A scriptable backend. Answers are set by the test; every completion and
+/// event goes through the PostQueue, never from inside the call. Long
+/// operations advance one step per posted task, so that a test can cancel
+/// or start another operation between two steps.
 class FakeBackend final : public Backend
 {
 public:
-    FakeBackend(BackendKind kind, PostQueue& queue) : m_kind(kind), m_queue(queue) {}
+    static BackendCapabilities defaultCapabilities(BackendKind kind)
+    {
+        if (kind == BackendKind::PackageKit)
+            return {.userScope = false, .systemScope = true, .permissions = false, .refresh = true,
+                    .cancelAnytime = false, .reattach = true, .verifiesExecutedPlan = false};
+        return {.userScope = true, .systemScope = true, .permissions = true, .refresh = true,
+                .cancelAnytime = true, .reattach = false, .verifiesExecutedPlan = true};
+    }
 
+    FakeBackend(BackendKind kind, PostQueue& queue)
+        : m_kind(kind), m_queue(queue), m_capabilities(defaultCapabilities(kind))
+    {
+    }
+
+    // --- Script -----------------------------------------------------------
     Result<void> availabilityAnswer = Result<void>::success();
     Result<std::vector<InstalledItem>> installedAnswer = std::vector<InstalledItem>{};
     Result<std::vector<Source>> sourcesAnswer = std::vector<Source>{};
-    int calls = 0;
+    Result<std::vector<SourceMetadata>> catalogSourcesAnswer = std::vector<SourceMetadata>{};
+    Result<std::vector<AvailableUpdate>> updatesAnswer = std::vector<AvailableUpdate>{};
+    Result<std::vector<std::string>> permissionsAnswer = std::vector<std::string>{};
+    /// First-pass plans (plan()).
+    std::function<Result<Plan>(const PlanRequest&)> planner;
+    /// Plan found at execution time; planner when empty.
+    std::function<Result<Plan>(const PlanRequest&)> executionPlanner;
+    /// Progress reported during an execution, refresh or reattach, one step each.
+    std::vector<Progress> progressSteps;
+    /// Error reported after the progress steps instead of success.
+    std::optional<Error> executionError;
+    /// Handle reported by execute() (`events.handle`), if not empty.
+    std::string handleToReport;
+    /// Handles reattach() still knows.
+    std::vector<std::string> knownHandles;
 
+    // --- Observation --------------------------------------------------------
+    int calls = 0;
+    /// Plans the fake actually executed (after `started`).
+    std::vector<Plan> executed;
+
+    void setCapabilities(BackendCapabilities c) { m_capabilities = c; }
+    /// A change made outside the store, delivered through the queue.
+    void emitChanges(BackendChanges changes)
+    {
+        m_queue.post([this, changes] {
+            if (m_listener)
+                m_listener(changes);
+        });
+    }
+    bool busy() const { return !m_modifying.empty(); }
+
+    // --- Backend ------------------------------------------------------------
     BackendKind kind() const noexcept override { return m_kind; }
+    BackendCapabilities capabilities() const noexcept override { return m_capabilities; }
 
     void availability(Completion<void> done) override { deliver(std::move(done), availabilityAnswer); }
-    void queryInstalled(Completion<std::vector<InstalledItem>> done) override
-    {
-        deliver(std::move(done), installedAnswer);
-    }
+    void queryInstalled(Completion<std::vector<InstalledItem>> done) override { deliver(std::move(done), installedAnswer); }
     void sources(Completion<std::vector<Source>> done) override { deliver(std::move(done), sourcesAnswer); }
+    void catalogSources(Completion<std::vector<SourceMetadata>> done) override
+    {
+        deliver(std::move(done), catalogSourcesAnswer);
+    }
+    void queryUpdates(Completion<std::vector<AvailableUpdate>> done) override { deliver(std::move(done), updatesAnswer); }
+    void permissions(const OfferId&, Completion<std::vector<std::string>> done) override
+    {
+        if (!m_capabilities.permissions)
+            return deliver(std::move(done), Result<std::vector<std::string>>(Error::notSupported("no permissions")));
+        deliver(std::move(done), permissionsAnswer);
+    }
+
+    void plan(const std::string& id, const PlanRequest& request, Completion<Plan> done) override
+    {
+        ++calls;
+        auto op = start(id, false);
+        m_queue.post([this, op, request, done = std::move(done)]() mutable {
+            Result<Plan> r = op->cancelRequested ? Result<Plan>(Error::cancelled("plan cancelled"))
+                    : planner                    ? planner(request)
+                                                 : Result<Plan>(Error::internal("no planner"));
+            finish(op);
+            done(std::move(r));
+        });
+    }
+
+    void execute(const std::string& id, const PlanRequest& request, const Plan& accepted, OperationEvents events,
+                 Completion<ExecutionResult> done) override
+    {
+        ++calls;
+        if (busy())
+            return deliver(std::move(done), Result<ExecutionResult>(Error::conflict("busy: " + m_modifying)));
+        auto op = start(id, true);
+        m_queue.post([this, op, request, accepted, events = std::move(events), done = std::move(done)]() mutable {
+            if (op->cancelRequested) {
+                finish(op);
+                return done(Error::cancelled("cancelled before execution"));
+            }
+            auto& plans = executionPlanner ? executionPlanner : planner;
+            Result<Plan> fresh = plans ? plans(request) : Result<Plan>(Error::internal("no planner"));
+            if (!fresh) {
+                finish(op);
+                return done(std::move(fresh).error());
+            }
+            // D-017: nothing changes unless the fresh plan may run.
+            if (!mayExecute(accepted, *fresh)) {
+                finish(op);
+                return done(ExecutionResult{ExecutionResult::Outcome::PlanChanged, std::move(fresh).value()});
+            }
+            if (events.started)
+                events.started(*fresh);
+            executed.push_back(*fresh);
+            if (!handleToReport.empty() && events.handle)
+                events.handle(handleToReport);
+            runSteps(op, std::move(events), [done = std::move(done)](Result<void> r) mutable {
+                if (!r)
+                    return done(std::move(r).error());
+                done(ExecutionResult{ExecutionResult::Outcome::Completed});
+            });
+        });
+    }
+
+    void reattach(const std::string& id, const std::string& backendRef, OperationEvents events,
+                  Completion<ExecutionResult> done) override
+    {
+        ++calls;
+        if (!m_capabilities.reattach)
+            return deliver(std::move(done), Result<ExecutionResult>(Error::notSupported("no reattach")));
+        if (std::find(knownHandles.begin(), knownHandles.end(), backendRef) == knownHandles.end())
+            return deliver(std::move(done), Result<ExecutionResult>(Error::notFound("unknown " + backendRef)));
+        if (busy())
+            return deliver(std::move(done), Result<ExecutionResult>(Error::conflict("busy: " + m_modifying)));
+        auto op = start(id, true);
+        m_queue.post([this, op, events = std::move(events), done = std::move(done)]() mutable {
+            runSteps(op, std::move(events), [done = std::move(done)](Result<void> r) mutable {
+                if (!r)
+                    return done(std::move(r).error());
+                done(ExecutionResult{ExecutionResult::Outcome::Completed});
+            });
+        });
+    }
+
+    void refresh(const std::string& id, OperationEvents events, Completion<void> done) override
+    {
+        ++calls;
+        if (!m_capabilities.refresh)
+            return deliver(std::move(done), Result<void>(Error::notSupported("no refresh")));
+        if (busy())
+            return deliver(std::move(done), Result<void>(Error::conflict("busy: " + m_modifying)));
+        auto op = start(id, true);
+        m_queue.post([this, op, events = std::move(events), done = std::move(done)]() mutable {
+            runSteps(op, std::move(events), std::move(done));
+        });
+    }
+
+    Result<void> cancel(const std::string& id) override
+    {
+        const auto it = m_operations.find(id);
+        if (it == m_operations.end())
+            return Error::notFound("no operation " + id);
+        Operation& op = *it->second;
+        if (op.modifying && op.started && !m_capabilities.cancelAnytime && !op.cancellableNow)
+            return Error::notSupported("not cancellable now");
+        op.cancelRequested = true;
+        return {};
+    }
+
+    void setChangeListener(std::function<void(const BackendChanges&)> listener) override
+    {
+        m_listener = std::move(listener);
+    }
 
 private:
+    struct Operation
+    {
+        std::string id;
+        bool modifying = false;
+        bool started = false;
+        bool cancellableNow = false;
+        bool cancelRequested = false;
+    };
+
+    std::shared_ptr<Operation> start(const std::string& id, bool modifying)
+    {
+        auto op = std::make_shared<Operation>(Operation{.id = id, .modifying = modifying});
+        m_operations[id] = op;
+        if (modifying)
+            m_modifying = id;
+        return op;
+    }
+
+    void finish(const std::shared_ptr<Operation>& op)
+    {
+        m_operations.erase(op->id);
+        if (op->modifying && m_modifying == op->id)
+            m_modifying.clear();
+    }
+
+    // One progress step per posted task; checks for a cancellation between
+    // steps; then the error or success.
+    void runSteps(std::shared_ptr<Operation> op, OperationEvents events, std::function<void(Result<void>)> done,
+                  std::size_t step = 0)
+    {
+        op->started = true;
+        if (op->cancelRequested) {
+            finish(op);
+            return done(Error::cancelled("cancelled"));
+        }
+        if (step < progressSteps.size()) {
+            op->cancellableNow = progressSteps[step].cancellable;
+            if (events.progress)
+                events.progress(progressSteps[step]);
+            m_queue.post([this, op, events = std::move(events), done = std::move(done), step]() mutable {
+                runSteps(op, std::move(events), std::move(done), step + 1);
+            });
+            return;
+        }
+        finish(op);
+        if (executionError)
+            return done(*executionError);
+        done(Result<void>::success());
+    }
+
     template <typename T>
     void deliver(Completion<T> done, Result<T> answer)
     {
@@ -237,6 +452,10 @@ private:
 
     BackendKind m_kind;
     PostQueue& m_queue;
+    BackendCapabilities m_capabilities;
+    std::map<std::string, std::shared_ptr<Operation>> m_operations;
+    std::string m_modifying;
+    std::function<void(const BackendChanges&)> m_listener;
 };
 
 } // namespace fakes

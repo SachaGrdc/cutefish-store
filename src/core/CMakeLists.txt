@@ -37,6 +37,7 @@ set(STORE_CORE_PUBLIC_HEADERS
 add_library(store-core STATIC
     ${STORE_CORE_PUBLIC_HEADERS}
     src/application.cpp
+    src/backend.cpp
     src/catalogfile.cpp
     src/catalogschema.h
     src/catalogwriter.cpp

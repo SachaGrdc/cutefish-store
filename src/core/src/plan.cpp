@@ -187,4 +187,46 @@ std::uint64_t Plan::downloadSize() const noexcept
     return total;
 }
 
+Result<PlanRequest> PlanRequest::create(TransactionKind kind, std::vector<OfferId> offers)
+{
+    if (offers.empty() || offers.size() > kMaxRequestOffers)
+        return Error::invalidArgument("a request names 1 to 200 offers");
+    std::vector<OfferAddress> targets;
+    targets.reserve(offers.size());
+    for (const OfferId& id : offers) {
+        auto address = decodeOfferId(id);
+        if (!address)
+            return std::move(address).error();
+        if (!targets.empty()
+            && (address->backend != targets.front().backend || address->scope != targets.front().scope))
+            return Error::invalidArgument("a request spans one backend and one installation");
+        for (const OfferAddress& t : targets)
+            if (t.package == address->package)
+                return Error::invalidArgument("duplicate package in request: " + t.package);
+        targets.push_back(std::move(address).value());
+    }
+    return PlanRequest(kind, std::move(offers), std::move(targets));
+}
+
+Result<void> checkPlanForRequest(const PlanRequest& request, const Plan& plan)
+{
+    if (plan.kind() != request.kind() || plan.backend() != request.backend() || plan.scope() != request.scope())
+        return Error::invalidArgument("the plan does not match the request's kind, backend or installation");
+    std::size_t matched = 0;
+    for (const PlanItem& item : plan.items()) {
+        if (!item.requested())
+            continue;
+        const bool asked = std::any_of(request.targets().begin(), request.targets().end(),
+                                       [&](const OfferAddress& t) { return t.package == item.package(); });
+        if (!asked)
+            return Error::invalidArgument("the plan requests " + item.package() + ", which was not asked for");
+        ++matched;
+    }
+    if (request.kind() != TransactionKind::Update && matched != request.targets().size())
+        return Error::invalidArgument("the plan leaves out a requested package");
+    if (matched == 0)
+        return Error::invalidArgument("the plan does nothing that was asked for");
+    return {};
+}
+
 } // namespace cutefish::store

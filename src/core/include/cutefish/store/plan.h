@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cutefish/store/identifiers.h>
+#include <cutefish/store/offer.h>
 #include <cutefish/store/result.h>
 #include <cutefish/store/source.h>
 #include <cutefish/store/version.h>
@@ -167,5 +169,44 @@ private:
     BackendKind m_backend;
     Scope m_scope;
 };
+
+/// Most offers one request may name (as many as a D-Bus array accepts,
+/// ARCHITECTURE §5.2).
+inline constexpr std::size_t kMaxRequestOffers = 200;
+
+/// What a transaction asks a backend to plan and execute: one kind, one
+/// backend, one installation (a request that spans several is split by the
+/// service, SERVICE.md §4.4).
+class PlanRequest
+{
+public:
+    /// Rules: 1 to 200 offers, without duplicates, every id readable by
+    /// decodeOfferId(), all of the same backend and installation.
+    static Result<PlanRequest> create(TransactionKind kind, std::vector<OfferId> offers);
+
+    TransactionKind kind() const noexcept { return m_kind; }
+    BackendKind backend() const noexcept { return m_targets.front().backend; }
+    Scope scope() const noexcept { return m_targets.front().scope; }
+    std::span<const OfferId> offers() const noexcept { return m_offers; }
+    /// The decoded offers, in the same order.
+    std::span<const OfferAddress> targets() const noexcept { return m_targets; }
+
+private:
+    PlanRequest(TransactionKind kind, std::vector<OfferId> offers, std::vector<OfferAddress> targets)
+        : m_offers(std::move(offers)), m_targets(std::move(targets)), m_kind(kind)
+    {
+    }
+    std::vector<OfferId> m_offers;
+    std::vector<OfferAddress> m_targets;
+    TransactionKind m_kind;
+};
+
+/// Whether a plan computed by a backend answers the request: same kind,
+/// backend and installation; every requested item is one of the requested
+/// packages; for an install or a removal, every requested package is in the
+/// plan. An update may leave out a package already up to date, but not all
+/// of them. A plan that does not answer its request is a backend error:
+/// the host refuses it (InvalidArgument) instead of showing it.
+Result<void> checkPlanForRequest(const PlanRequest& request, const Plan& plan);
 
 } // namespace cutefish::store

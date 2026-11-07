@@ -156,4 +156,11 @@ struct PlanComparison
 /// that disappears, or a removal that disappears, is ItemDropped.
 PlanComparison comparePlans(const Plan& accepted, const Plan& fresh);
 
+/// The check a backend makes before changing anything (D-017): the plan it
+/// is about to execute (`fresh`) may run only if it needs no new
+/// confirmation compared with the accepted plan. Same rule as
+/// Transaction::verifyExecutionPlan(), so the backend's decision and the
+/// transaction's state always agree. Callable from any thread (pure).
+bool mayExecute(const Plan& accepted, const Plan& fresh);
+
 } // namespace cutefish::store

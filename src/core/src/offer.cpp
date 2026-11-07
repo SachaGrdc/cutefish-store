@@ -151,4 +151,33 @@ Result<Offer> Offer::create(OfferSpec spec, const Source& source)
     return Offer(OfferId(std::move(id)), std::move(spec), source);
 }
 
+Result<OfferAddress> decodeOfferId(const OfferId& id)
+{
+    const std::string_view text = id.str();
+    auto invalid = [&] { return Error::invalidArgument("not an offer id built by the core: " + id.str()); };
+    if (text.starts_with("packagekit:")) {
+        const std::string_view package = text.substr(11);
+        if (!checkDebPackageName(package))
+            return invalid();
+        return OfferAddress{BackendKind::PackageKit, Scope::System, {}, std::string(package)};
+    }
+    if (!text.starts_with("flatpak:"))
+        return invalid();
+    std::string_view rest = text.substr(8);
+    const std::size_t colon = rest.find(':');
+    if (colon == std::string_view::npos)
+        return invalid();
+    const auto scope = parseScope(rest.substr(0, colon));
+    rest = rest.substr(colon + 1);
+    // A ref contains no ':', so the last one ends the remote name.
+    const std::size_t last = rest.rfind(':');
+    if (!scope || last == std::string_view::npos || last == 0)
+        return invalid();
+    const std::string_view remote = rest.substr(0, last);
+    const std::string_view ref = rest.substr(last + 1);
+    if (!checkFlatpakRef(ref))
+        return invalid();
+    return OfferAddress{BackendKind::Flatpak, *scope, std::string(remote), std::string(ref)};
+}
+
 } // namespace cutefish::store
