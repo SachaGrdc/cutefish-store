@@ -243,20 +243,34 @@ pas de l'ordre des éléments.
 ### Machine d'états (`transaction.h`)
 
 `Transaction` enregistre et décide ; l'hôte la pilote depuis son thread
-principal. États et transitions : ARCHITECTURE §3.5.
+principal. États et transitions : ARCHITECTURE §3.5. Règle de D-017 : la
+transaction reste en `planning` jusqu'à la vérification du plan d'exécution ;
+`running` signifie toujours que le backend peut modifier le système, et il
+n'existe pas de retour de `running` vers `awaiting-confirmation`.
 
-- `planReady(plan)` : premier plan sans raison ⇒ `running` (accepté tel
-  quel) ; sinon `awaiting-confirmation`. Après `confirm()`, le plan est
-  comparé au plan accepté : `running` s'il est compatible, sinon retour en
-  `awaiting-confirmation` avec `plan-changed`.
-- `verifyExecutionPlan(plan)` : dernière vérification du plan que le backend
-  va exécuter, même comparaison. Sur une différence : retour en
-  `awaiting-confirmation`, rien n'est exécuté. `succeed()` est refusé tant
-  que cette vérification n'a pas eu lieu : aucune opération non confirmée ne
-  s'exécute en silence, même quand le premier plan n'exigeait rien (D-014).
+- `planReady(plan)` : plan calculé sans rien exécuter (première passe
+  Flatpak, simulation PackageKit). Sans plan accepté : `awaiting-confirmation`
+  si les règles l'exigent, sinon le plan est accepté tel quel et la
+  transaction **reste en `planning`**. Avec un plan accepté (après
+  `confirm()`) : comparaison ; reste en `planning` si le plan est
+  compatible, sinon `awaiting-confirmation` avec `plan-changed`.
+- `confirm()` : le plan présenté devient le plan accepté
+  (`acceptedPlan()`), retour en `planning`.
+- `verifyExecutionPlan(plan)` : le plan que le backend va réellement
+  exécuter (seconde passe Flatpak dans `ready`, nouvelle simulation
+  PackageKit), comparé au plan accepté. Compatible : `running`, et seulement
+  alors le backend exécute. Sinon : `awaiting-confirmation` avec
+  `plan-changed`, rien n'est exécuté (par exemple un runtime système apparu,
+  D-014). Refusé sans plan accepté, et refusé en `running`.
+- `succeed()` n'est possible qu'en `running`, donc après cette
+  vérification.
+- **Limite PackageKit** : la vérification porte sur une simulation, qui est
+  une transaction distincte de l'exécution ; elle réduit la fenêtre entre
+  plan et exécution sans la fermer (D-017). Seule la seconde passe Flatpak
+  vérifie le plan de la transaction exécutée elle-même.
 - Une transition interdite rend `Conflict` et ne change rien ; un plan d'un
   autre type rend `InvalidArgument`.
-- Ni délai ni horloge : le délai de confirmation (SERVICE.md §5.3) est
+- Ni délai ni horloge : le délai de confirmation de 10 minutes (D-019) est
   appliqué par l'hôte, qui appelle `cancel()`.
 
 ## Offre proposée par défaut (`defaultoffer.h`, D-009)

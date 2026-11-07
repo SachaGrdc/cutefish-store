@@ -58,13 +58,25 @@ void Transaction::awaitConfirmation(Plan plan, bool changed)
     m_state = TransactionState::AwaitingConfirmation;
 }
 
-void Transaction::accept(Plan plan)
+bool Transaction::consider(Plan& plan)
 {
+    if (m_accepted) {
+        PlanComparison comparison = comparePlans(*m_accepted, plan);
+        const bool changed = comparison.verdict == PlanVerdict::NeedsConfirmation;
+        m_lastComparison = std::move(comparison);
+        if (changed) {
+            awaitConfirmation(std::move(plan), true);
+            return false;
+        }
+    } else if (assessPlan(plan, m_policy).required()) {
+        awaitConfirmation(std::move(plan), false);
+        return false;
+    }
     m_accepted = plan;
     m_plan = std::move(plan);
     m_reasons = {};
     m_concerns.clear();
-    m_state = TransactionState::Running;
+    return true;
 }
 
 Result<void> Transaction::startPlanning()
@@ -81,22 +93,9 @@ Result<void> Transaction::planReady(Plan plan)
         return ok;
     if (plan.kind() != m_kind)
         return Error::invalidArgument("the plan does not match the transaction kind");
-
-    if (m_accepted) {
-        // Second plan, after a confirmation (P-008).
-        PlanComparison comparison = comparePlans(*m_accepted, plan);
-        const bool changed = comparison.verdict == PlanVerdict::NeedsConfirmation;
-        m_lastComparison = std::move(comparison);
-        if (changed)
-            awaitConfirmation(std::move(plan), true);
-        else
-            accept(std::move(plan));
-        return {};
-    }
-    if (assessPlan(plan, m_policy).required())
-        awaitConfirmation(std::move(plan), false);
-    else
-        accept(std::move(plan));
+    // Accepted or not, the transaction stays in planning until the
+    // execution plan is verified (D-017).
+    consider(plan);
     return {};
 }
 
@@ -114,31 +113,23 @@ Result<void> Transaction::confirm()
 
 Result<PlanVerdict> Transaction::verifyExecutionPlan(Plan plan)
 {
-    if (auto ok = expect({TransactionState::Running}, "an execution plan"); !ok)
+    if (auto ok = expect({TransactionState::Planning}, "an execution plan"); !ok)
         return std::move(ok).error();
-    if (m_executing)
-        return Error::conflict("the transaction is already executing");
+    if (!m_accepted)
+        return Error::conflict("no plan has been accepted yet");
     if (plan.kind() != m_kind)
         return Error::invalidArgument("the plan does not match the transaction kind");
 
-    PlanComparison comparison = comparePlans(*m_accepted, plan);
-    const PlanVerdict verdict = comparison.verdict;
-    m_lastComparison = std::move(comparison);
-    if (verdict == PlanVerdict::NeedsConfirmation) {
-        awaitConfirmation(std::move(plan), true);
-        return verdict;
-    }
-    accept(std::move(plan));
-    m_executing = true;
-    return verdict;
+    if (!consider(plan))
+        return PlanVerdict::NeedsConfirmation;
+    m_state = TransactionState::Running;
+    return m_lastComparison->verdict;
 }
 
 Result<void> Transaction::succeed()
 {
     if (auto ok = expect({TransactionState::Running}, "success"); !ok)
         return ok;
-    if (!m_executing)
-        return Error::conflict("success before the execution plan was verified");
     m_state = TransactionState::Succeeded;
     return {};
 }
