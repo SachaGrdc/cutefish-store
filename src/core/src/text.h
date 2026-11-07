@@ -2,6 +2,7 @@
 
 // Internal text checks shared by the models. Not part of the public API.
 
+#include <cutefish/store/application.h>
 #include <cutefish/store/result.h>
 
 #include <cstddef>
@@ -29,6 +30,9 @@ Result<void> checkAsciiToken(std::string_view text, std::string_view what, std::
 /// Empty text is accepted unless required.
 Result<void> checkText(std::string_view text, std::string_view what, std::size_t maxBytes, bool required,
                        bool allowNewlines = false);
+
+/// Icon reference consistent with its kind (see Application::create).
+Result<void> checkIcon(const IconRef& icon);
 
 inline bool isAsciiDigit(char c) noexcept { return c >= '0' && c <= '9'; }
 inline bool isAsciiAlpha(char c) noexcept { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }

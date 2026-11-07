@@ -91,4 +91,27 @@ Result<void> checkText(std::string_view text, std::string_view what, std::size_t
     return {};
 }
 
+Result<void> checkIcon(const IconRef& icon)
+{
+    switch (icon.kind) {
+    case IconKind::None:
+        if (!icon.value.empty())
+            return Error::invalidArgument("icon without kind has a value");
+        return {};
+    case IconKind::LocalPath:
+        if (icon.value.empty() || icon.value.front() != '/')
+            return Error::invalidArgument("local icon path must be absolute");
+        if (icon.value.find("/../") != std::string::npos || icon.value.ends_with("/.."))
+            return Error::invalidArgument("local icon path must not contain ..");
+        return checkText(icon.value, "local icon path", 4096, true);
+    case IconKind::RemoteUrl:
+        if (!icon.value.starts_with("https://"))
+            return Error::invalidArgument("remote icon must be an https URL");
+        return checkAsciiToken(icon.value, "remote icon URL", 2048);
+    case IconKind::StockName:
+        return checkOpaqueIdentifier(icon.value, "stock icon name");
+    }
+    return Error::invalidArgument("unknown icon kind");
+}
+
 } // namespace cutefish::store::detail

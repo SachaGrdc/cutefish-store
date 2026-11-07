@@ -1,0 +1,60 @@
+#pragma once
+
+#include <cutefish/store/catalog.h>
+#include <cutefish/store/result.h>
+
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace cutefish::store {
+
+struct CatalogReadOptions
+{
+    /// Preferred languages, most preferred first (`fr_FR.UTF-8`, `de`).
+    /// Each brings its fallbacks (`fr_FR` then `fr`); the untranslated `C`
+    /// text always comes last.
+    std::vector<std::string> locales = {};
+};
+
+/// The catalogue snapshot (catalog.sqlite), read-only (ARCHITECTURE §6.3).
+///
+/// The file is opened read-only with SQLite's `immutable` flag: the
+/// snapshot is never modified in place, only replaced as a whole by
+/// replaceCatalog(). An open SqliteCatalog keeps reading the snapshot it
+/// opened, even after a replacement; open a new one to see the new
+/// generation (docs/CATALOG.md, "Reconstruction atomique").
+///
+/// Displayed texts: for each field, the text of the offer whose source has
+/// the highest priority among those that provide it in the best available
+/// language. This interim rule does not choose a default offer (D-009).
+///
+/// One instance per thread; it keeps prepared statements and the result
+/// list of the last search, so that turning pages does not search again.
+class SqliteCatalog final : public Catalog
+{
+public:
+    static Result<SqliteCatalog> open(const std::filesystem::path& path, CatalogReadOptions options = {});
+
+    SqliteCatalog(SqliteCatalog&&) noexcept;
+    SqliteCatalog& operator=(SqliteCatalog&&) noexcept;
+    ~SqliteCatalog() override;
+
+    std::uint64_t generation() const noexcept override;
+    Result<Application> application(const AppId& id) const override;
+    /// Ranking in tiers, documented in docs/CATALOG.md: exact name, name
+    /// prefix, words (FTS5, bm25), substring of the name (trigrams), and only
+    /// when those find nothing, approximate names (trigrams and edit
+    /// distance ≤ 2). `installedOnly` needs state.sqlite and is refused with
+    /// NotSupported; `installed` and `hasUpdate` are always false here.
+    Result<SearchPage> search(const SearchQuery& query) const override;
+    Result<std::vector<AppSummary>> summaries(std::span<const AppId> ids) const override;
+
+private:
+    struct Impl;
+    explicit SqliteCatalog(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> d;
+};
+
+} // namespace cutefish::store

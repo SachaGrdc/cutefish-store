@@ -8,29 +8,6 @@ namespace cutefish::store {
 
 namespace {
 
-Result<void> checkIcon(const IconRef& icon)
-{
-    switch (icon.kind) {
-    case IconKind::None:
-        if (!icon.value.empty())
-            return Error::invalidArgument("icon without kind has a value");
-        return {};
-    case IconKind::LocalPath:
-        if (icon.value.empty() || icon.value.front() != '/')
-            return Error::invalidArgument("local icon path must be absolute");
-        if (icon.value.find("/../") != std::string::npos || icon.value.ends_with("/.."))
-            return Error::invalidArgument("local icon path must not contain ..");
-        return detail::checkText(icon.value, "local icon path", 4096, true);
-    case IconKind::RemoteUrl:
-        if (!icon.value.starts_with("https://"))
-            return Error::invalidArgument("remote icon must be an https URL");
-        return detail::checkAsciiToken(icon.value, "remote icon URL", 2048);
-    case IconKind::StockName:
-        return detail::checkOpaqueIdentifier(icon.value, "stock icon name");
-    }
-    return Error::invalidArgument("unknown icon kind");
-}
-
 // Small lists (a few categories, aliases or offers): a quadratic scan is
 // cheaper than building a set.
 template <typename T, typename Key>
@@ -54,7 +31,7 @@ Result<Application> Application::create(ApplicationSpec spec)
     for (const DescriptionBlock& block : spec.description)
         if (auto ok = detail::checkText(block.text, "description block", 64 * 1024, true, true); !ok)
             return std::move(ok).error();
-    if (auto ok = checkIcon(spec.icon); !ok)
+    if (auto ok = detail::checkIcon(spec.icon); !ok)
         return std::move(ok).error();
     for (const std::string& category : spec.categories)
         if (auto ok = detail::checkOpaqueIdentifier(category, "category"); !ok)
