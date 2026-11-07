@@ -327,6 +327,60 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   Le propriétaire installe ces paquets ; aucune commande root n'est lancée par
   les outils de développement.
 
+### D-017 — Vérification du plan d'exécution et modèle d'états (précise P-008)
+
+- **Statut** : Validée (propriétaire, phase 0.4, après le Core v0.3a).
+- **Décision** :
+  - une transaction reste en `planning` jusqu'à ce que le plan que le backend
+    va **réellement exécuter** soit accepté par `verifyExecutionPlan()` (même
+    comparaison sémantique que P-008, contre le plan accepté) ;
+  - plan compatible : `planning → running`. `running` signifie donc toujours
+    que le backend peut modifier le système ;
+  - plan qui exige une nouvelle confirmation : `planning →
+    awaiting-confirmation`, raison `plan-changed` ; rien n'est exécuté ;
+  - la transition `running → awaiting-confirmation` n'existe pas ;
+  - une transaction ne peut pas réussir sans cette vérification ;
+  - transitions validées en plus du diagramme initial : `planning →
+    cancelled`, `queued → interrupted`, `planning → interrupted`.
+- **Flatpak** : la vérification a lieu dans le signal `ready` de la
+  transaction exécutée (seconde passe) ; `ready` est émis avant toute
+  opération, avec toutes les opérations résolues, et retourner `FALSE`
+  arrête la transaction sans rien télécharger ni déployer [MESURÉ en
+  installation utilisateur, prototype 1 ; à confirmer en installation
+  système, en VM]. La comparaison est une fonction pure du cœur, appelable
+  depuis le thread Flatpak.
+- **Limite PackageKit, maintenue explicitement** : la vérification ne peut
+  porter que sur une **nouvelle simulation**, transaction distincte de
+  l'exécution. La vraie transaction recalcule tout, et rien ne lie les deux
+  appels [CODE et MESURÉ, prototype 4]. La simulation **ne garantit pas** à
+  elle seule que le plan exécuté sera identique : la fenêtre est réduite, pas
+  fermée. Garde-fous proposés, à tester en VM : nouvelle simulation juste
+  avant l'exécution dans la file PackageKit unique, nouvelle simulation si
+  l'état de dpkg ou des listes APT a changé depuis, annulation si
+  `DownloadSizeRemaining` diffère du plan tant que l'annulation est
+  possible, comparaison après coup des paquets traités avec le plan.
+- **Détails** : ARCHITECTURE §3.5, SERVICE.md §5.1, CORE.md.
+
+### D-018 — Conservation du journal des transactions (question Q-8a)
+
+- **Statut** : Validée (propriétaire, phase 0.4).
+- **Décision** : les deux limites s'appliquent, la plus stricte l'emporte :
+  - au plus **200 transactions terminées** ;
+  - au plus **90 jours** après leur fin ;
+  - une transaction **non terminée** n'est jamais supprimée ;
+  - les plans JSON (plan accepté, dernier plan) sont conservés avec la
+    transaction pendant toute la durée de rétention.
+- **Mise en œuvre** : `state.sqlite` (SERVICE.md §8.2), étape B.
+
+### D-019 — Délai de confirmation (question Q-8b)
+
+- **Statut** : Validée (propriétaire, phase 0.4).
+- **Décision** : une transaction en `awaiting-confirmation` attend au plus
+  **10 minutes**, puis passe en `cancelled`. Le délai est géré par le
+  service (minuterie de la boucle principale), sans thread ni verrou
+  conservé pendant l'attente. Le cœur n'a pas d'horloge : le service appelle
+  `Transaction::cancel()` à l'échéance.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de
@@ -374,6 +428,7 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Statut** : Validée (propriétaire, phase 0.3, après le prototype 1). Le
   mécanisme Flatpak retenu est la **double passe** (mécanisme B), avec une
   comparaison **sémantique** des plans. L'identifiant `P-008` est conservé.
+  Précisée par D-017 (vérification du plan d'exécution, modèle d'états).
 - **Décision** : toute transaction calcule d'abord un plan :
   - pour PackageKit, `SIMULATE` ;
   - pour Flatpak, le signal `ready` d'une première `FlatpakTransaction`.

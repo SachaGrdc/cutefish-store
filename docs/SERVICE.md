@@ -445,14 +445,14 @@ Conséquences :
 
 ## 5. Modèle des transactions
 
-### 5.1 Machine d'états (ARCHITECTURE §3.5, complétée en Core v0.3a)
+### 5.1 Machine d'états (ARCHITECTURE §3.5, D-017)
 
 ```mermaid
 stateDiagram-v2
     [*] --> queued
     queued --> planning
     planning --> awaiting_confirmation: plan à confirmer
-    planning --> running: plan sans raison de confirmation, ou compatible avec le plan confirmé
+    planning --> running: plan d'exécution vérifié, compatible avec le plan accepté
     awaiting_confirmation --> planning: Confirm()
     awaiting_confirmation --> cancelled: Cancel() ou délai
     planning --> failed
@@ -461,7 +461,6 @@ stateDiagram-v2
     running --> failed
     running --> cancelled: annulation acceptée par le backend
     running --> interrupted: service arrêté (Flatpak), transaction PackageKit perdue
-    running --> awaiting_confirmation: plan d'exécution différent du plan accepté
     planning --> cancelled: Cancel()
     queued --> interrupted: reprise (§5.6)
     planning --> interrupted: reprise (§5.6)
@@ -470,6 +469,12 @@ stateDiagram-v2
     cancelled --> [*]
     interrupted --> [*]
 ```
+
+La transaction reste en `planning` jusqu'à `verifyExecutionPlan()` : le plan
+que le backend va réellement exécuter est comparé au plan accepté (accepté
+par l'utilisateur, ou d'office s'il n'exigeait aucune confirmation). `running`
+signifie que le backend peut modifier le système ; il n'y a pas de retour de
+`running` vers `awaiting-confirmation` (D-017).
 
 ### 5.2 Planifier, confirmer, exécuter (P-008)
 
@@ -489,17 +494,22 @@ sequenceDiagram
     alt confirmation nécessaire
         M-->>C: State = awaiting-confirmation, Plan
         C->>M: Confirm()
-        M->>B: plan(request), seconde passe
-        B-->>M: nouveau Plan
-        M->>M: comparaison sémantique avec le plan confirmé
     end
+    Note over M: State = planning, plan accepté
+    M->>B: execute(request, plan accepté)
+    B->>P: seconde passe jusqu'à ready, ou nouvelle simulation
+    P-->>B: plan d'exécution
+    B->>B: comparaison sémantique (fonction pure du cœur)
+    B-->>M: plan d'exécution
+    M->>M: verifyExecutionPlan()
     alt compatible
-        M->>B: execute(plan)
-        B->>P: transaction réelle (interactive=true)
+        Note over M: State = running
+        B->>P: ready retourne TRUE, ou transaction réelle (interactive=true)
         P-->>B: progression, fin
         B-->>M: événements (post)
         M-->>C: PropertiesChanged, Finished
     else différence pertinente
+        B->>P: ready retourne FALSE (Flatpak), ou pas de transaction réelle
         M-->>C: awaiting-confirmation, raison plan-changed
     end
 ```
@@ -512,13 +522,13 @@ Différence essentielle entre les deux backends, à ne jamais masquer :
   de l'exécution, qui recalcule tout ; rien ne garantit que l'exécution suive
   ce plan [CODE et MESURÉ, prototype 4]. La fenêtre est réduite, pas fermée.
 
-### 5.3 Paramètres [PROPOSITION, valeurs à valider]
+### 5.3 Paramètres
 
 | Paramètre | Valeur | Origine |
 |---|---|---|
-| Délai d'attente de confirmation | 10 minutes | ARCHITECTURE §5.5 [À VALIDER] |
+| Délai d'attente de confirmation | 10 minutes, minuterie du service, sans thread ni verrou | **D-019** |
 | Conservation d'une transaction terminée sur le bus | 5 minutes | A §5.3 |
-| Conservation dans le journal | 200 dernières transactions, ou 90 jours | **Nouveau**, à valider (Q-8) |
+| Conservation dans le journal | Au plus 200 transactions terminées **et** au plus 90 jours (la plus stricte) ; non terminées jamais supprimées ; plans JSON gardés | **D-018** |
 | Délai maximal côté service d'un appel PackageKit sans `Finished` | 30 minutes pour une transaction réelle, 2 minutes pour une requête | **Nouveau** : PackageKit peut répondre par une erreur D-Bus sans `Finished` [MESURÉ, prototype 4] |
 
 ### 5.4 Interface `Backend` étendue [PROPOSITION]
@@ -984,6 +994,8 @@ aller-retour D-Bus d'une recherche (P-004, p95 < 50 ms visé), RSS au repos.
 | Q-4 | Mise à jour système avec nouveau runtime système : acceptée, montrée, confirmée, double passe, nouvelle confirmation si le plan change, polkit respecté, rien de silencieux | D-014 | §4.4, §7.3, §12 |
 | Q-5 | Import initial, 24 h, vérification à l'ouverture, rien d'automatique en connexion limitée, manuel toujours, catalogue précédent gardé, une seule à la fois | D-015 | §3.5 |
 | Q-6 | P-002, P-003, P-004, P-005, P-007, P-010, P-012 validées ; **O-001 (licence) reste ouverte** : ni `LICENSE`, ni déclaration SPDX | DECISIONS | — |
+| Q-8 | Journal : 200 transactions terminées et 90 jours au plus, la plus stricte ; non terminées jamais supprimées ; plans JSON gardés. Délai de confirmation : 10 minutes, géré par le service | D-018, D-019 | §5.3 |
+| — | Après le Core v0.3a : `planning` jusqu'à la vérification du plan d'exécution ; pas de `running → awaiting-confirmation` ; limite PackageKit maintenue | D-017 | §5.1, §5.2 |
 
 ### 13.2 Encore ouvertes
 
@@ -993,7 +1005,6 @@ quand elle devient nécessaire.
 | Id | Question | Nécessaire avant |
 |---|---|---|
 | Q-7 | Étendre le catalogue (`app_details` : captures, versions publiées, URL, licence, classification) | Fiche complète (`GetDetails` commence avec l'existant) |
-| Q-8 | Conservation du journal (200 transactions ou 90 jours proposés) et délai de confirmation (10 minutes proposées) | Étape B (valeurs modifiables sans changer l'API) |
 | Q-9 | Prendre acte de la diffusion des signaux PackageKit | Étape F |
 | Q-10 | `RefreshCache` sans `background=true` | Étape F |
 | Q-11 | Tout processus de la session peut confirmer une transaction ou installer en Flatpak utilisateur (A §9.2) | Étape F |
@@ -1046,7 +1057,7 @@ virtuelle.
 | Étape | Contenu | Tests | Prérequis |
 |---|---|---|---|
 | **A. Core v0.3a : plans et règles** | `Plan`, `PlanItem`, `Transaction` et sa machine d'états (§5.1), comparaison de plans (§7.2), politique de confirmation (P-008, D-014), fonction d'offre par défaut (D-009) ; correction du commentaire de `sqlitecatalog.h` | Fonctions pures, GoogleTest, cas D-009 (installée, Flathub utilisateur/système, deb, remote tierce, deb tiers) et D-014 | Aucun |
-| **B. Core v0.3b : `state.sqlite`** | `StateStore` : schéma §8.2, migrations, journal, `last_refresh` ; implémentation réelle de `InstalledState` | Base temporaire, migrations, reprise après arrêt simulé | Q-8 souhaitée (valeurs par défaut sinon) |
+| **B. Core v0.3b : `state.sqlite`** | `StateStore` : schéma §8.2, migrations, journal, `last_refresh` ; implémentation réelle de `InstalledState` | Base temporaire, migrations, reprise après arrêt simulé, purge du journal (D-018) | Aucun (Q-8 tranchée) |
 | **C. Catalogue v0.3** | Empreintes des sources dans `meta` ; `Browse`, `ListCategories` ; `state.sqlite` attachée en lecture (`installed`, `has-update`, `installedOnly`) | Catalogues réduits existants, mesures `store-catalog-bench` sans régression | B |
 | **D. `Backend` étendu** | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
 | **E. Service v0.1, lecture seule** | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |

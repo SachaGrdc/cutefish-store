@@ -338,7 +338,7 @@ stateDiagram-v2
     [*] --> queued
     queued --> planning
     planning --> awaiting_confirmation: le plan exige un accord, ou il a changé
-    planning --> running: plan sans effet notable, ou compatible avec le plan confirmé
+    planning --> running: plan d'exécution vérifié (compatible avec le plan accepté)
     awaiting_confirmation --> planning: Confirm(), seconde résolution
     awaiting_confirmation --> cancelled: Cancel() ou délai expiré
     running --> succeeded
@@ -347,7 +347,6 @@ stateDiagram-v2
     planning --> failed
     queued --> cancelled: Cancel()
     running --> interrupted: le service s'est arrêté
-    running --> awaiting_confirmation: plan d'exécution différent, rien n'est exécuté
     planning --> cancelled: Cancel()
     queued --> interrupted: le service s'est arrêté
     planning --> interrupted: le service s'est arrêté
@@ -362,20 +361,20 @@ Flatpak (P-008, §7.3) ou nouvelle simulation PackageKit si le catalogue ou
 l'état ont changé (§5.5). Si le nouveau plan diffère de façon pertinente du
 plan confirmé, elle revient en `awaiting-confirmation`.
 
-Transitions ajoutées par le Core v0.3a ([CORE.md](CORE.md), « Plans,
-confirmation et transactions ») [À VALIDER] :
+**Vérification du plan d'exécution (D-017)** : la transaction reste en
+`planning` jusqu'à ce que le plan que le backend va réellement exécuter
+(seconde passe Flatpak, nouvelle simulation PackageKit) soit comparé au plan
+accepté, y compris quand le premier plan n'exigeait aucune confirmation.
+Compatible : `running`, et seulement alors le backend peut modifier le
+système. Sinon : `awaiting-confirmation` avec la raison `plan-changed`, sans
+rien exécuter (par exemple un runtime système apparu à la seconde passe,
+D-014). Il n'existe pas de retour de `running` vers `awaiting-confirmation`.
+Pour PackageKit, cette vérification porte sur une simulation distincte de
+l'exécution : elle réduit la fenêtre sans la fermer (§7.2, D-017).
 
-- `running → awaiting-confirmation` : juste avant d'exécuter, le backend
-  soumet le plan qu'il va réellement exécuter (seconde passe Flatpak,
-  nouvelle simulation PackageKit). S'il diffère du plan accepté, rien n'est
-  exécuté et l'utilisateur est consulté avec la raison `plan-changed`. C'est
-  le seul moyen de ne rien exécuter en silence quand le premier plan
-  n'exigeait aucune confirmation (D-014 : runtime système apparu à la
-  seconde passe). Une transaction ne peut pas réussir sans cette
-  vérification ;
-- `planning → cancelled` : annulation pendant le calcul du plan ;
-- `queued → interrupted` et `planning → interrupted` : reprise après un arrêt
-  du service (SERVICE.md §5.6).
+Transitions validées en plus (D-017) : `planning → cancelled` (annulation
+pendant le calcul du plan), `queued → interrupted` et `planning →
+interrupted` (reprise après un arrêt du service, SERVICE.md §5.6).
 
 Pendant `running`, une **phase** plus fine est publiée : `waiting-for-auth`,
 `waiting-for-lock`, `downloading`, `installing`, `removing`, `finishing`. Elle
@@ -746,7 +745,7 @@ pour un affichage cohérent.
 - `Cancel` est accepté depuis n'importe quel client de la session : tous les
   clients appartiennent au même utilisateur.
 - Une transaction en `awaiting-confirmation` attend au plus un délai
-  maximal (10 minutes proposées [À VALIDER]), puis passe en `cancelled`. Le
+  maximal de **10 minutes** (D-019), puis passe en `cancelled`. Le
   même délai s'applique quel que soit le backend : aucun thread n'est retenu
   pendant l'attente, mais un plan trop ancien n'est pas exécuté.
 - PackageKit : une transaction en attente de confirmation n'occupe pas la
@@ -823,6 +822,10 @@ Cas particuliers observés avec libflatpak (prototype 1, §7.3) :
 - Chaque transaction est écrite dans le journal (`state.sqlite`) à chaque
   changement d'état. L'écriture se fait sur le thread de la boucle principale,
   en mode WAL ; les écritures sont rares et courtes.
+- Conservation (D-018) : au plus 200 transactions terminées et au plus
+  90 jours, la limite la plus stricte l'emporte ; les transactions non
+  terminées ne sont jamais supprimées ; les plans JSON sont gardés pendant
+  toute la rétention.
 - Au démarrage, toute transaction du journal qui n'est pas dans un état
   terminal est traitée selon son backend :
   - **PackageKit** : la transaction vit dans `packagekitd`, pas dans le
