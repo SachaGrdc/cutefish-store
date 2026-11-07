@@ -1,11 +1,13 @@
 # Unit tests of store-core: no network, no privileges, no Cutefish session.
 
 add_executable(store-core-tests
+    fakes.h
     fixtures.h
     testapplication.cpp
     testerror.cpp
     testidentifiers.cpp
     testinstalled.cpp
+    testinterfaces.cpp
     testoffer.cpp
     testsearch.cpp
     testsource.cpp

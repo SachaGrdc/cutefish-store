@@ -4,9 +4,12 @@
 
 set(STORE_CORE_PUBLIC_HEADERS
     include/cutefish/store/application.h
+    include/cutefish/store/backend.h
+    include/cutefish/store/catalog.h
     include/cutefish/store/error.h
     include/cutefish/store/identifiers.h
     include/cutefish/store/installed.h
+    include/cutefish/store/installedstate.h
     include/cutefish/store/offer.h
     include/cutefish/store/result.h
     include/cutefish/store/search.h

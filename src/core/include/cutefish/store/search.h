@@ -69,14 +69,14 @@ private:
 struct AppSummary
 {
     AppId id;
-    std::string name;
-    std::string summary;
-    IconRef icon;
-    BackendSet backends;
+    std::string name = {};
+    std::string summary = {};
+    IconRef icon = {};
+    BackendSet backends = {};
     bool installed = false;
     bool hasUpdate = false;
     bool verified = false;
-    std::string developer;
+    std::string developer = {};
 };
 
 /// One page of results, tied to the catalogue generation that produced it.
@@ -84,7 +84,7 @@ struct SearchPage
 {
     std::uint64_t generation = 0;
     std::uint32_t total = 0; ///< Matches in the whole catalogue, not only this page.
-    std::vector<AppSummary> items;
+    std::vector<AppSummary> items = {};
 };
 
 } // namespace cutefish::store
