@@ -59,8 +59,15 @@ Result<std::string_view> checkFlatpakRef(std::string_view ref)
         return Error::invalidArgument("Flatpak ref must be kind/ID/arch/branch");
     if (parts[0] != "app" && parts[0] != "runtime")
         return Error::invalidArgument("Flatpak ref kind must be app or runtime");
-    if (!AppId::parse(parts[1]))
+    // A Flatpak ID may end in ".desktop" (app/chat.delta.desktop/...), so
+    // the AppId rules do not apply: only the character set and segments.
+    const std::string_view name = parts[1];
+    if (name.empty() || name.size() > detail::kMaxIdentifierBytes || name.front() == '.' || name.back() == '.' ||
+        name.find("..") != std::string_view::npos)
         return Error::invalidArgument("Flatpak ref has an invalid ID");
+    for (const char c : name)
+        if (!isFlatpakNameCharacter(c))
+            return Error::invalidArgument("Flatpak ref has an invalid ID");
     if (parts[2].empty())
         return Error::invalidArgument("Flatpak ref has an empty architecture");
     for (const char c : parts[2])

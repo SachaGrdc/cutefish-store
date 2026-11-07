@@ -43,6 +43,16 @@ TEST(Offer, BranchesAreDistinctOffers)
     EXPECT_NE(lts.id(), stable.id());
 }
 
+TEST(Offer, FlatpakIdMayEndInDesktop)
+{
+    // Real Flathub ref (catalogue of 7 November 2026). The application id is
+    // normalised separately; the ref is kept as published.
+    auto o = Offer::create({PackageFormat::Flatpak, "app/chat.delta.desktop/x86_64/stable", std::nullopt, {}},
+                           fixtures::flathubSource());
+    ASSERT_TRUE(o) << o.error().message();
+    EXPECT_EQ(o->package(), "app/chat.delta.desktop/x86_64/stable");
+}
+
 TEST(Offer, AcceptsRuntimes)
 {
     EXPECT_TRUE(Offer::create({PackageFormat::Flatpak, "runtime/org.gnome.Platform/x86_64/47", std::nullopt, {}},
