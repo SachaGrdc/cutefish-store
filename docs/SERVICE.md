@@ -279,15 +279,19 @@ absent ou valeur 0 : **traitée comme non limitée** [PROPOSITION, Q-12]. Une
 actualisation automatique en cours est annulée si la connexion devient
 limitée ; une actualisation manuelle continue [PROPOSITION].
 
-**Déroulement.** `Backend::refresh` pour chaque backend disponible
-(PackageKit `RefreshCache`, appstream des remotes Flatpak), puis l'indexeur
-écrit un candidat (`--locale fr`, D-013), validé et mis en service par
-`replaceCatalog` ; `CatalogGeneration` augmente, `LastRefresh` est écrite.
+**Déroulement** (D-028). Deux opérations : l'actualisation des dépôts,
+`Backend::refresh` pour chaque backend disponible (PackageKit
+`RefreshCache`, appstream des remotes Flatpak), demandée par un `Refresh`
+complet seulement ; puis, toujours, l'actualisation locale : l'indexeur
+écrit un candidat (`--locale fr`, D-013) à partir des métadonnées sur le
+disque, validé et mis en service par `replaceCatalog` ; `CatalogGeneration`
+augmente, `LastRefresh` est écrite si tout ce qui était demandé a réussi.
 
-**Échec.** Erreur d'un backend, indexeur en code 1 ou 3, candidat refusé :
-le catalogue précédent reste en service (CATALOG §7), `LastRefresh` est
-inchangée, la transaction `refresh` se termine en `failed` avec son code
-(§10). Aucune nouvelle tentative automatique avant une heure [PROPOSITION],
+**Échec.** Erreur d'un backend : l'actualisation locale a lieu quand même,
+mais la transaction se termine en `failed` et `LastRefresh` est inchangée
+(D-028). Indexeur en code 1 ou 3, candidat refusé : le catalogue précédent
+reste en service (CATALOG §7), `LastRefresh` est inchangée, la transaction
+`refresh` se termine en `failed` avec son code (§10). Aucune nouvelle tentative automatique avant une heure [PROPOSITION],
 pour ne pas boucler à chaque nouveau client.
 
 **Une seule à la fois.** `Refreshing` vaut vrai pendant l'actualisation. Un
@@ -354,7 +358,7 @@ la mesure l'exige].
 | `Remove` | `s offer_id, a{sv} options` → `o` | Idem, plus `NotAllowed` (paquet protégé, A §7.2) | PackageKit : `package-remove` ; Flatpak système : `app-uninstall` (et `runtime-uninstall` si un runtime part) | Idem |
 | `Update` | `as offer_ids, a{sv} options` → `o` | Idem ; `InvalidArgs` si les offres relèvent de plusieurs backends ou périmètres | PackageKit : `system-update` [MESURÉ] ; Flatpak système : `app-update`, et **`app-install`** si un nouveau runtime est nécessaire [CODE, prototype 2] ; ce runtime est montré dans le plan et confirmé (D-014, §7.3) | Idem |
 | `UpdateAll` | `a{sv} options` → `o` | `NotReady` | Celles des mises à jour concernées | Idem |
-| `Refresh` | `a{sv} options` (`force` `b`) → `o` | — | PackageKit : `system-sources-refresh` (`yes` pour l'utilisateur actif [MESURÉ]) ; Flatpak système : `appstream-update` (`yes`) | Idem |
+| `Refresh` | `a{sv} options` (`force` `b`, `repositories` `b`, D-028) → `o` | — | PackageKit : `system-sources-refresh` (`yes` pour l'utilisateur actif [MESURÉ]) ; Flatpak système : `appstream-update` (`yes`) | Idem |
 | `EnableSource`, `DisableSource` | `s source_id` → `o` | `NotFound`, `NotAllowed` (sources en lecture seule) | Aucune (remote Flathub utilisateur, P-011) | Idem |
 
 Écart avec A §5.2 : `UpdateAll` crée **une transaction par backend et par
@@ -605,8 +609,13 @@ DECISIONS P-008, P-009, D-007, D-010).
 
 ### 6.2 Requêtes
 
-- Un seul `Resolve(installed;arch)` pour tous les noms de paquets du
-  catalogue (2 165 noms en 0,54 s [MESURÉ, une machine]), puis `GetUpdates`.
+- Inventaire : `GetPackages(installed;arch)`, tout l'inventaire en une
+  transaction (1 406 paquets en moins d'une seconde [MESURÉ, une machine,
+  étape F]), relié ensuite au catalogue par l'hôte (D-023) ; puis
+  `GetUpdates(arch)`. La conception initiale prévoyait un
+  `Resolve(installed;arch)` des 2 165 noms du catalogue (0,54 s [MESURÉ]) ;
+  `GetPackages` a été retenu parce que le backend ne connaît pas le
+  catalogue (§17.2).
 - Déclencheurs regroupés sur 2 s : `UpdatesChanged`, `InstalledChanged`, fin
   d'une transaction, nouveau catalogue, `FileWatch` sur
   `/var/lib/dpkg/status` [PROPOSITION : `InstalledChanged` n'est pas garanti
@@ -1092,18 +1101,21 @@ choix d'une offre : la séparation demandée existe dans le code, il reste à
 ## 15. Plan d'implémentation
 
 Chaque étape compile, a ses tests, ne dépend que des précédentes et peut être
-validée seule. Aucune n'exige de commande root sur la machine de
+validée seule. **État** (clôture de l'étape F) : A à F faites et validées ;
+la suivante est G, ou le gestionnaire de transactions (F2) si le
+propriétaire le place avant. Aucune n'exige de commande root sur la machine de
 développement ; les étapes marquées « VM » se testent dans une machine
 virtuelle.
 
 | Étape | Contenu | Tests | Prérequis |
 |---|---|---|---|
-| **A. Core v0.3a : plans et règles** | `Plan`, `PlanItem`, `Transaction` et sa machine d'états (§5.1), comparaison de plans (§7.2), politique de confirmation (P-008, D-014), fonction d'offre par défaut (D-009) ; correction du commentaire de `sqlitecatalog.h` | Fonctions pures, GoogleTest, cas D-009 (installée, Flathub utilisateur/système, deb, remote tierce, deb tiers) et D-014 | Aucun |
-| **B. Core v0.3b : `state.sqlite`** | `StateStore` : schéma §8.2, migrations, journal, `last_refresh` ; implémentation réelle de `InstalledState` | Base temporaire, migrations, reprise après arrêt simulé, purge du journal (D-018) | Aucun (Q-8 tranchée) |
-| **C. Catalogue v0.3** | Empreintes des sources dans `meta` ; `Browse`, `ListCategories` ; `state.sqlite` attachée en lecture (`installed`, `has-update`, `installedOnly`) | Catalogues réduits existants, mesures `store-catalog-bench` sans régression | B |
-| **D. `Backend` étendu** | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
-| **E. Service v0.1, lecture seule** | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |
-| **F. Backend PackageKit** | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) | Faux PackageKit sur bus privé, puis VM | E ; Q-9 à Q-11 |
+| **A. Core v0.3a : plans et règles** (fait) | `Plan`, `PlanItem`, `Transaction` et sa machine d'états (§5.1), comparaison de plans (§7.2), politique de confirmation (P-008, D-014), fonction d'offre par défaut (D-009) ; correction du commentaire de `sqlitecatalog.h` | Fonctions pures, GoogleTest, cas D-009 (installée, Flathub utilisateur/système, deb, remote tierce, deb tiers) et D-014 | Aucun |
+| **B. Core v0.3b : `state.sqlite`** (fait) | `StateStore` : schéma §8.2, migrations, journal, `last_refresh` ; implémentation réelle de `InstalledState` | Base temporaire, migrations, reprise après arrêt simulé, purge du journal (D-018) | Aucun (Q-8 tranchée) |
+| **C. Catalogue v0.3** (fait) | Empreintes des sources dans `meta` ; `Browse`, `ListCategories` ; `state.sqlite` attachée en lecture (`installed`, `has-update`, `installedOnly`) | Catalogues réduits existants, mesures `store-catalog-bench` sans régression | B |
+| **D. `Backend` étendu** (fait) | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
+| **E. Service v0.1, lecture seule** (fait, §16) | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |
+| **F. Backend PackageKit** (fait, §17) | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) ; intégration au service en lecture (D-025) | Faux PackageKit sur bus privé ; requêtes et simulations contre le vrai démon (D-026) ; VM pour les transactions réelles (non fait) | E ; Q-9 à Q-11 |
+| **F2. Gestionnaire de transactions** (à faire, D-025) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | Faux PackageKit ; VM pour les transactions réelles | F |
 | **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
 | **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
 | **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
@@ -1233,7 +1245,7 @@ reçoit un `Backend` et l'utilise par son contrat (P-001).
 | `plan` | `Resolve(~installed;arch)` ou `Resolve(installed;arch)` ou `GetUpdates`, puis l'action avec `ONLY_TRUSTED | SIMULATE` | `interactive=false`, aucune autorisation ; suppression `allow_deps=true, autoremove=false` ; paquet protégé dans le plan : refus ; taille totale (D-029) |
 | `execute` | Nouvelle simulation, `mayExecute`, puis l'action réelle `ONLY_TRUSTED`, `interactive=true` | Faux : `PlanChanged`, rien d'exécuté ; `started`, `handle` (chemin de la transaction), progression ; `verifiesExecutedPlan` = faux |
 | `reattach` | `GetTransactionList`, signaux, puis `GetAll` de la transaction | Transaction finie entre-temps : `Interrupted` (issue inconnue, l'hôte réconcilie) |
-| `refresh` | `RefreshCache(false)`, `interactive=true` | Jamais l'indice `background` (§6.6) |
+| `refresh` | `RefreshCache(false)`, `interactive=true` | Jamais l'indice `background` (§6.6) ; appelé seulement par un `Refresh` complet (D-028) |
 | `cancel` | `Cancel` | `NotSupported` tant qu'`AllowCancel` n'a pas été vu vrai pendant une exécution ; une demande seulement |
 | `setChangeListener` | `InstalledChanged`, `UpdatesChanged`, `RepoListChanged` | Regroupés sur 2 s |
 
@@ -1265,9 +1277,13 @@ s'intercaler. Au plus une opération modificatrice à la fois (`Conflict`).
 - Déclencheurs : démarrage, signaux du démon, nouveau catalogue, fin de
   chaque `Refresh` (qui redemande aussi la disponibilité : un démon revenu
   est repris). Deux demandes pendant un calcul en donnent un seul de plus.
-- `Refresh` (D-028) : `RefreshCache`, puis `catalogSources` fusionnées avec
-  `sources.conf`, puis réindexation. L'import initial ne lance pas
-  `RefreshCache`.
+- `Refresh` (D-028) : option `repositories` (`b`, vrai par défaut). Vrai :
+  `RefreshCache`, puis l'actualisation locale même si `RefreshCache` échoue
+  (transaction `failed`, `LastRefresh` inchangée, catalogue local à jour).
+  Faux, et pour l'import initial : actualisation locale seulement, sans
+  réseau. L'actualisation locale réunit `catalogSources` et `sources.conf`
+  (le fichier l'emporte sur un même identifiant ou un même fichier ; une
+  référence en double est ignorée avec un avertissement).
 
 ### 17.4 Threads
 
@@ -1284,7 +1300,7 @@ s'intercaler. Au plus une opération modificatrice à la fois (`Conflict`).
 |---|---|---|---|
 | Unitaires | `store-backend-packagekit-tests`, `store-core-tests` (`ApplicationLinks`, plans) | Traduction, profil, liens, filtrage D-010, taille totale | Données réelles du prototype 4, sans D-Bus |
 | Backend | `store-pkbackend-tests` | Contrat complet : disponibilité, requêtes, plans, exécution vérifiée, plan changé, erreurs, délais, annulation, perte du démon, rattachement, concurrence, regroupement | PackageKit simulé (`fakepackagekit.h`) sur un bus privé |
-| Service | `store-service-pk-tests` | `Backends`, inventaire lié, `GetUpdates`, changements extérieurs, backend inutilisable puis revenu, `Refresh` avec `RefreshCache` (succès, échec, annulation), sources du backend | Service réel (processus), PackageKit simulé sur le bus de session privé |
+| Service | `store-service-pk-tests` | `Backends`, inventaire lié, `GetUpdates`, changements extérieurs, backend inutilisable puis revenu, `Refresh` complet (succès, échec de `RefreshCache` avec réindexation locale, annulation) et local (sans `RefreshCache`), sources du backend, fichier référencé deux fois | Service réel (processus), PackageKit simulé sur le bus de session privé |
 | Réels (D-026) | `store-pkbackend-real-tests`, hors `ctest` | Requêtes et simulations seulement | packagekitd du système |
 
 ```bash
@@ -1314,7 +1330,8 @@ Limites connues :
   (`debian-trixie-main`) ; PackageKit nomme autrement l'origine des paquets
   (`debian-stable-main`) ; le dossier d'icônes est cherché sous le premier
   nom ;
-- la taille à télécharger d'un plan est un total ; les éléments restent à 0 ;
+- la taille à télécharger d'un plan est un total ; les éléments restent à 0
+  (le total est gardé dans le journal, D-029) ;
 - un élément de mise à jour n'a pas de version de départ dans le plan
   (`from-version`) : la simulation ne donne que la version cible ;
 - `GetPackages(installed)` rend tout l'inventaire à chaque réconciliation

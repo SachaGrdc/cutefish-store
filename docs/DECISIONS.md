@@ -395,7 +395,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   `/var/lib/flatpak/appstream`), qui dupliquerait la logique des backends ;
   l'absence de rafraîchissement.
 - **Complétée** (étape F, D-028) : le fichier reste, et s'ajoute aux sources
-  que le backend PackageKit fournit par `catalogSources()`.
+  que le backend PackageKit fournit par `catalogSources()` ; il l'emporte sur
+  un même identifiant ou un même fichier.
 
 ### D-021 — `Refresh` du service v0.1 : objet de transaction non journalisé
 
@@ -405,7 +406,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   (états `running`, puis `succeeded`, `failed` ou `cancelled`), publié
   5 minutes après sa fin. Il n'est **pas** écrit dans le journal, dont les
   transactions sont `install`, `remove`, `update` (D-018). Sans backend, le
-  rafraîchissement relit les fichiers de métadonnées déjà sur le disque.
+  rafraîchissement relit les fichiers de métadonnées déjà sur le disque ;
+  avec un backend, voir D-028.
 
 ### D-022 — Service v0.1 : aucune méthode qui ne peut pas fonctionner
 
@@ -451,9 +453,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   (`plan`, `execute`, `reattach`, `refresh`, `cancel` compris) et est testé
   seul contre un PackageKit simulé. Le service ne l'utilise qu'en lecture :
   propriété `Backends`, inventaire installé dans `state.sqlite`,
-  `GetUpdates`, et `RefreshCache` dans un `Refresh` demandé. `Install`,
-  `Remove`, `Update`, `UpdateAll` et le gestionnaire de transactions forment
-  une étape ultérieure, validée séparément.
+  `GetUpdates`. `Install`, `Remove`, `Update`, `UpdateAll` et le
+  gestionnaire de transactions forment une étape ultérieure, validée
+  séparément. (Le rafraîchissement des dépôts dans `Refresh` ne faisait pas
+  partie de cette réponse : il relève de D-028.)
 - **Conséquence** : un service prêt dont le backend configuré est
   inutilisable est `degraded` (ARCHITECTURE §5.2) ; le catalogue reste
   lisible.
@@ -468,6 +471,39 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   `interactive=true`. Tous les autres tests utilisent un PackageKit simulé
   sur un bus privé ; les tests D-Bus existants du service passent
   `--packagekit off`.
+
+### D-028 — Actualisation locale et actualisation des dépôts séparées
+
+- **Statut** : Validée (propriétaire, clôture de l'étape F ; option B de
+  l'audit, qui remplace la proposition initiale).
+- **Décision** : deux opérations distinctes.
+  - **Actualisation locale** : relit les métadonnées déjà sur le disque
+    (`Backend::catalogSources()` et `sources.conf`) et réindexe ; sans réseau,
+    sans `RefreshCache`. C'est l'import initial, et `Refresh` avec l'option
+    `repositories` à faux.
+  - **Actualisation complète** (`Refresh`, `repositories` vrai par défaut) :
+    tente `Backend::refresh()` (PackageKit : `RefreshCache(false)`,
+    `interactive`, sans indice `background`), **puis réindexe les métadonnées
+    locales même si `RefreshCache` échoue**. Dans ce cas, le catalogue peut
+    être remplacé (`CatalogChanged`), mais la transaction se termine en
+    `failed` avec l'erreur de PackageKit (détails : « repositories not
+    refreshed (…) ; the local metadata was reindexed ») et `LastRefresh`
+    n'est pas écrite. Une annulation arrête tout (`cancelled`, rien n'est
+    réindexé) ; elle passe à PackageKit tant que `AllowCancel` est vrai.
+  - **Sources** : celles du backend et celles de `sources.conf` sont
+    réunies ; sur un même identifiant, le fichier l'emporte. Une seconde
+    référence à un **même fichier de métadonnées** sous un autre identifiant
+    (un `sources.conf` écrit avant que le backend ne liste le fichier,
+    D-020) est ignorée, avec un avertissement dans le journal ; celle du
+    fichier est gardée.
+- **Raison** : le catalogue local ne dépend jamais du réseau ; un
+  `apt update` fait ailleurs est pris en compte même hors ligne ; l'échec des
+  dépôts reste visible.
+- **Limite** : si la réindexation locale échoue aussi, la transaction porte
+  l'erreur locale ; celle des dépôts n'est que dans le journal.
+- **Écartés** : l'association stricte (un échec de `RefreshCache` empêchait
+  toute réindexation, régression par rapport à la v0.1) ; indexer deux fois
+  un même fichier (la seconde source n'avait que des offres refusées).
 
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
@@ -811,21 +847,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   (`has-update` dans les résultats de recherche viendra avec elle) ; le
   calcul coûte deux requêtes PackageKit.
 - **Conséquence** : juste après un démarrage, `GetUpdates` est vide le
-  temps de ces requêtes, puis `UpdatesChanged` est émis.
-
-### D-028 — Rafraîchissement avec un backend
-
-- **Statut** : Proposée (étape F), à valider.
-- **Décision** : un `Refresh` demandé appelle d'abord
-  `Backend::refresh()` (PackageKit : `RefreshCache(false)`, `interactive`,
-  sans indice `background`), puis réindexe les sources de
-  `Backend::catalogSources()` **et** celles de `sources.conf` ; sur un même
-  identifiant, le fichier l'emporte. L'import initial ne lance pas
-  `RefreshCache`. Un échec de `RefreshCache` fait échouer le rafraîchissement
-  sans réindexer (le catalogue en service reste, `LastRefresh` ne bouge
-  pas). L'annulation passe à PackageKit tant que `AllowCancel` est vrai.
-- **Écarté** : réindexer malgré l'échec, qui ferait croire à un
-  rafraîchissement réussi.
+  temps de ces requêtes ; `UpdatesChanged` n'est émis que si la liste
+  change (donc pas quand il n'y a aucune mise à jour). La liste est vidée
+  quand le backend devient inutilisable. Pour PackageKit, `download-size`
+  vaut toujours 0 : `GetUpdates` ne donne pas de taille.
 
 ### D-029 — Taille de téléchargement totale d'un plan
 
@@ -834,7 +859,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   backend qui ne le répartit pas par paquet (PackageKit :
   `DownloadSizeRemaining` après la simulation) ; `Plan::downloadSize()` le
   rend, sinon la somme des éléments. Une différence de total entre deux
-  plans est un `SizeChanged` informatif, sans nouvelle confirmation.
+  plans est un `SizeChanged` informatif, sans nouvelle confirmation. Le
+  total est gardé dans le journal (`state.sqlite`, clé facultative
+  `downloadSize` du plan, format inchangé en version 1 : un ancien
+  enregistrement se lit comme la somme des éléments).
 - **Raison** : trouvé par les tests réels (D-026) : sans cela, tout plan
   PackageKit annonçait 0 octet.
 

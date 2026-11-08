@@ -287,7 +287,7 @@ sequenceDiagram
     participant I as Indexeur
     T->>S: Refresh()
     par sources de la distribution
-        S->>P: RefreshCache(force=false), hint background=true
+        S->>P: RefreshCache(force=false), sans indice background (Q-10, D-028)
         P-->>S: Finished
     and Remotes Flatpak
         S->>F: mise à jour de l'appstream des remotes (utilisateur et système)
@@ -599,7 +599,7 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `Remove` | `s offer_id, a{sv} options` | `o transaction` |
 | `Update` | `as offer_ids, a{sv} options` | `o transaction` |
 | `UpdateAll` | `a{sv} options` | `o transaction` (toutes les mises à jour d'applications, jamais une mise à jour complète du système) |
-| `Refresh` | `a{sv} options` | `o transaction` (option `force`, `b`) |
+| `Refresh` | `a{sv} options` | `o transaction` (options `force` et `repositories`, `b` ; D-028 : `repositories` faux relit les métadonnées locales sans réseau) |
 | `EnableSource` | `s source_id` | `o transaction` |
 | `DisableSource` | `s source_id` | `o transaction` |
 
