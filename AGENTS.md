@@ -16,19 +16,69 @@ valide chaque étape et chaque décision ; un agent propose, il ne décide pas.
 4. [docs/CORE.md](docs/CORE.md) : le cœur `store-core` et ses contrats.
 5. [docs/CATALOG.md](docs/CATALOG.md) : catalogue SQLite et indexeur.
 6. [docs/SERVICE.md](docs/SERVICE.md) : le service D-Bus ; §15 plan des
-   étapes et leur état, §16 service v0.1, §17 backend PackageKit.
+   étapes et leur état, §16 service v0.1, §17 backend PackageKit, §18
+   gestionnaire de transactions (F2).
 
-## État (clôture de l'étape F)
+## Le projet en bref
 
-- Étapes A à F faites et validées (SERVICE.md §15).
-- Prochaine étape : G (backend Flatpak utilisateur) ou F2 (gestionnaire de
-  transactions : `Install`, `Remove`, `Update`), au choix du propriétaire.
-  **Ne commencer aucune étape sans son accord explicite.**
-- Décisions encore proposées, à faire valider : D-027, D-029, P-001, P-009,
-  P-011, P-013. Questions ouvertes notables : O-001 (licence), O-014
-  (formatage automatique).
-- Limites connues et points jamais vérifiés : SERVICE.md §16.4 et §17.6,
-  ARCHITECTURE.md §7.2 (« Reste à tester »).
+Cutefish Store : une boutique d'applications pour le bureau Cutefish (Debian
+13), qui présente un catalogue unique (AppStream DEP-11 de la distribution
+et Flathub) et installe par les gestionnaires natifs (PackageKit pour les
+paquets deb, libflatpak pour Flatpak), sans composant privilégié propre.
+C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
+(`ToolkitBase`, couche hôte seulement), D-Bus (sd-bus via le Toolkit).
+
+| Dossier | Contenu |
+|---|---|
+| `src/core` | `store-core` : modèles, catalogue SQLite, plans, confirmation, `Transaction`, `state.sqlite`, contrat `Backend` (CORE.md) |
+| `src/indexer` | `cutefish-store-indexer` : AppStream → catalogue candidat (CATALOG.md) |
+| `src/backend-packagekit` | Logique PackageKit et profil Debian, sans D-Bus |
+| `src/service` | `cutefish-store-service` : D-Bus `org.cutefish.Store`, transport PackageKit, inventaire, gestionnaire de transactions (SERVICE.md) |
+| `tests/` | GoogleTest par composant ; `tests/service` lance des bus privés et un PackageKit simulé |
+| `data/` | Fichiers d'activation D-Bus et unité systemd utilisateur |
+
+## État (fin de la session de passation)
+
+| Étape | Contenu | Commits principaux |
+|---|---|---|
+| Phases 0.x | Conception, décisions, prototypes | `574d58a` … `5e3201c` |
+| Core v0.1–v0.2, indexeur | Modèles, catalogue SQLite/FTS5, indexeur | `ada8e9b` … `d130382` |
+| A, B | Plans, confirmation, `Transaction`, `state.sqlite` | `36cb575` … `def4947` |
+| C | Catalogue v0.3 (empreintes, navigation, état installé) | `783c8a7` … `b52fdd5` |
+| D | Contrat `Backend` complet | `4346051`, `4e714aa` |
+| E | Service D-Bus v0.1 en lecture | `ed56113`, `d017c02` |
+| F | Backend PackageKit, intégration en lecture, D-028, D-029 | `59084c2` … `40d3c7b` |
+| F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f` et le commit de documentation qui suit |
+
+- **F2** : implémentée et testée contre le PackageKit simulé ; détail de ce
+  qui est testé, non testé et jamais vérifié dans SERVICE.md §18. **Le
+  propriétaire doit encore valider F2.** Points à reprendre en priorité :
+  tests du rattachement au démarrage (`TransactionManager::recover`), de
+  l'annulation d'une transaction `running` par D-Bus, et de plusieurs
+  transactions en file.
+- **Prochaine étape après F2** : G (backend Flatpak utilisateur, SERVICE.md
+  §7 et §15). **Ne commencer aucune étape sans l'accord explicite du
+  propriétaire.**
+- **Décisions encore proposées**, à faire valider (ne pas les valider
+  soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
+  validée ; le propriétaire applique aussi la règle « une opération
+  modificatrice à la fois par backend »), P-011, P-013. Le propriétaire a
+  cité P-001 comme règle de travail à l'étape F, sans changer son statut.
+  Questions ouvertes notables : O-001 (licence), O-014 (formatage).
+- Limites connues et points jamais vérifiés : SERVICE.md §16.4, §17.6 et
+  §18, ARCHITECTURE.md §7.2 (« Reste à tester »).
+
+## Reprendre le projet (nouvel agent)
+
+1. `git status`, `git log --oneline -15` : l'arbre doit être propre ; la
+   branche `main` a des commits locaux non poussés (ne pas pousser).
+2. Lire ce fichier, puis les documents de la section suivante.
+3. Construire et lancer toute la suite (section « Construire et tester ») ;
+   noter le nombre de tests réellement passés avant tout changement.
+4. Demander au propriétaire la validation de F2 et des décisions proposées,
+   puis l'étape à commencer.
+5. Ne rien supposer de l'historique des conversations : tout ce qui compte
+   est dans le dépôt. En cas de doute sur une règle, demander.
 
 ## Règles du propriétaire
 

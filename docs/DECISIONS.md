@@ -418,7 +418,9 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   les backends n'existent pas. L'introspection ne montre que ce qui
   fonctionne ; un appel reçoit `UnknownMethod`.
 - **Modifiée** (étape F, D-025) : avec un backend configuré, `GetUpdates`,
-  `UpdateCount` et `UpdatesChanged` sont exportés. Les méthodes d'action et
+  `UpdateCount` et `UpdatesChanged` sont exportés.
+- **Modifiée** (étape F2) : avec un backend configuré, `Install`, `Remove`,
+  `Update` et `UpdateAll` sont exportés. `EnableSource`, `DisableSource` et
   `GetPermissions` restent absentes.
 
 ### D-023 — Filtrage des mises à jour par l'hôte (D-010)
@@ -471,6 +473,35 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   `interactive=true`. Tous les autres tests utilisent un PackageKit simulé
   sur un bus privé ; les tests D-Bus existants du service passent
   `--packagekit off`.
+
+### D-030 — File par backend : libérée pendant l'attente de confirmation
+
+- **Statut** : Validée (propriétaire, étape F2).
+- **Décision** : une transaction planifie et s'exécute seule sur son
+  backend (P-009), dans l'ordre d'arrivée ; en `awaiting-confirmation`, elle
+  libère la file ; après `Confirm`, elle attend son tour en restant en
+  `planning`. `execute()` refait la simulation (D-017) : un plan devenu
+  ancien entre-temps est repéré. Un rafraîchissement des dépôts (D-028)
+  passe dans la même file.
+
+### D-031 — `UpdateAll` : transaction parente et enfants
+
+- **Statut** : Validée (propriétaire, étape F2 ; proposition de SERVICE
+  §4.4).
+- **Décision** : `UpdateAll` crée une transaction parente `update-all`
+  (`Backend` = `multiple`, non journalisée) et une transaction enfant
+  `update` par backend et installation, chacune avec la propriété `Parent`.
+  `Confirm` et `Cancel` de la parente s'appliquent aux enfants qui le
+  permettent ; son état résume les leurs. Sans mise à jour : `NotFound`.
+
+### D-032 — Paquet protégé : refus pendant la planification
+
+- **Statut** : Validée (propriétaire, étape F2).
+- **Décision** : le contrat `Backend` ne change pas ; `Remove` rend une
+  transaction, qui échoue en `planning` avec le code `not-allowed`
+  (`ErrorCode::NotAllowed`, nouveau dans le cœur) quand le plan supprimerait
+  un paquet protégé, demandé ou en cascade. Écart assumé avec SERVICE §4.4
+  (`NotAllowed` immédiat).
 
 ### D-028 — Actualisation locale et actualisation des dépôts séparées
 

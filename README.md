@@ -8,8 +8,10 @@ the SQLite catalogue with source fingerprints, browsing and installed
 state, transaction plans, the confirmation policy, the state database and
 the full backend contract) and the AppStream indexer exist, with a
 read-only D-Bus service (`cutefish-store-service`) and a PackageKit backend.
-The service uses the backend for reading only (installed packages, updates,
-repository refresh); installing, removing and updating are not exposed yet.
+The service reads through it (installed packages, updates, repository
+refresh) and, with the transaction manager (step F2, to be validated),
+installs, removes and updates through PackageKit and polkit, after a plan
+and any confirmation it needs.
 There is no user interface or Flatpak backend yet.
 
 - Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and

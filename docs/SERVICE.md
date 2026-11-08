@@ -1101,9 +1101,9 @@ choix d'une offre : la séparation demandée existe dans le code, il reste à
 ## 15. Plan d'implémentation
 
 Chaque étape compile, a ses tests, ne dépend que des précédentes et peut être
-validée seule. **État** (clôture de l'étape F) : A à F faites et validées ;
-la suivante est G, ou le gestionnaire de transactions (F2) si le
-propriétaire le place avant. Aucune n'exige de commande root sur la machine de
+validée seule. **État** : A à F faites et validées ; F2 implémentée et
+testée contre le PackageKit simulé (§18), à valider par le propriétaire ;
+la suivante est G. Aucune n'exige de commande root sur la machine de
 développement ; les étapes marquées « VM » se testent dans une machine
 virtuelle.
 
@@ -1115,7 +1115,7 @@ virtuelle.
 | **D. `Backend` étendu** (fait) | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
 | **E. Service v0.1, lecture seule** (fait, §16) | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |
 | **F. Backend PackageKit** (fait, §17) | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) ; intégration au service en lecture (D-025) | Faux PackageKit sur bus privé ; requêtes et simulations contre le vrai démon (D-026) ; VM pour les transactions réelles (non fait) | E ; Q-9 à Q-11 |
-| **F2. Gestionnaire de transactions** (à faire, D-025) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | Faux PackageKit ; VM pour les transactions réelles | F |
+| **F2. Gestionnaire de transactions** (fait, §18, à valider) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | Faux PackageKit ; VM pour les transactions réelles | F |
 | **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
 | **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
 | **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
@@ -1339,3 +1339,45 @@ Limites connues :
   incrémentale ;
 - un miroir Debian sous un autre nom d'hôte est `third-party` (D-024) ;
 - `GetDetails` ne dit pas encore si une application a une mise à jour.
+
+## 18. Gestionnaire de transactions (étape F2)
+
+Décisions : D-030 (file par backend), D-031 (`UpdateAll`), D-032 (paquet
+protégé), et D-017, D-018, D-019, P-008, P-009.
+
+| Composant | Rôle |
+|---|---|
+| `src/service/transactionmanager.{h,cpp}` | Générique (contrat `Backend`, `Transaction` du cœur, journal) : file par backend, planification, confirmation et délai, exécution vérifiée, annulation, journal à chaque changement, parente `update-all`, travail exclusif (rafraîchissement), rattachement au démarrage |
+| `src/service/actiontransaction.{h,cpp}` | Objet `org.cutefish.Store1.Transaction` (§4.5, avec `Parent` et `ConfirmationDeadline`) ; progression regroupée à 10 `PropertiesChanged` par seconde |
+| `StoreService` | `Install`, `Remove`, `Update`, `UpdateAll` (avec un backend), validation des entrées, `ListTransactions` |
+
+Validation des entrées (§4.1) : `Install`, une offre du catalogue pas encore
+installée ; `Remove`, une offre installée ; `Update`, des offres listées par
+`GetUpdates` ; aucune option acceptée pour l'instant ; backend utilisable ;
+offre déjà engagée : `Busy`. Le `Plan` publié suit §4.6 (`operations` avec
+versions et origine, `reasons`, `requires-confirmation`).
+
+**Testé** (PackageKit simulé, `tests/service/testservicepk.cpp`,
+`ServiceTransactions.*`) : installation sans confirmation (deux simulations,
+une transaction réelle `ONLY_TRUSTED`, `interactive=true`, journal) ;
+suppression en cascade qui attend `Confirm`, puis s'exécute ; `Busy` ;
+paquet protégé (`not-allowed`, rien d'exécuté) ; plan changé à la
+vérification (`plan-changed`, rien d'exécuté) ; délai de confirmation
+expiré (`cancelled`) ; file libérée pendant l'attente (un `Refresh` passe) ;
+refus d'autorisation (`auth-denied`) ; validation des entrées ;
+`UpdateAll` parente et enfant.
+
+**Implémenté mais non testé** : rattachement au démarrage d'une transaction
+`running` du journal (`TransactionManager::recover`, §5.6) ; annulation
+d'une transaction `running` par D-Bus (le backend seul est testé, étape F) ;
+annulation pendant la seconde simulation ; plusieurs transactions en file
+sur le même backend.
+
+**Jamais vérifié** : toute transaction réelle (VM nécessaire), dialogue
+polkit, verrou dpkg, debconf.
+
+**Limites** : la transaction parente n'est pas journalisée ; après un
+redémarrage, une transaction en `awaiting-confirmation` est annulée par le
+cœur (§5.6) ; si une réindexation et un rafraîchissement échouent ensemble,
+seule l'erreur locale est publiée (D-028).
+
