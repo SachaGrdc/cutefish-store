@@ -51,3 +51,12 @@ if(TARGET store-backend-packagekit)
     target_link_libraries(store-service-pk-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
     gtest_discover_tests(store-service-pk-tests PROPERTIES TIMEOUT 60)
 endif()
+
+# Opt-in, NOT registered with ctest: the backend against the system's real
+# packagekitd, queries and simulations only (testpkreal.cpp says how to run
+# it). Skips everything unless CUTEFISH_STORE_REAL_PACKAGEKIT=1.
+if(TARGET store-backend-packagekit)
+    add_executable(store-pkbackend-real-tests testpkreal.cpp)
+    target_compile_options(store-pkbackend-real-tests PRIVATE -Wall -Wextra)
+    target_link_libraries(store-pkbackend-real-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+endif()
