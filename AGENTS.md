@@ -62,7 +62,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   transactions réelles, le dialogue polkit, le verrou dpkg et debconf
   restent à vérifier en VM.
 - **G** : le backend Flatpak est implémenté comme bibliothèque autonome
-  (SERVICE.md §19), testé sur un faux magasin (16 tests). Il n'est **pas
+  (SERVICE.md §19), testé sur un faux magasin (18 tests). Il n'est **pas
   encore raccordé au service** : l'intégration multi-backends (choix du
   backend, `Inventory` et `TransactionManager` sur deux backends) est la
   prochaine étape, ainsi que la gestion des sources (`EnableSource`,

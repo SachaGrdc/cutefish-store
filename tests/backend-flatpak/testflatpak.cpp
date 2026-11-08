@@ -231,6 +231,29 @@ TEST_F(BackendFixture, PlansAnInstallWithItsRuntime)
     EXPECT_EQ(plan->items()[1].kind(), PlanItemKind::Runtime);
 }
 
+TEST_F(BackendFixture, PlansARemove)
+{
+    auto plan = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Remove, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_TRUE(plan) << plan.error().message();
+    ASSERT_EQ(plan->items().size(), 1u);
+    EXPECT_EQ(plan->items()[0].operation(), PlanOperation::Remove);
+    EXPECT_TRUE(plan->items()[0].requested());
+}
+
+TEST_F(BackendFixture, PlansAnUpdateWithItsRuntime)
+{
+    auto plan = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Update, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_TRUE(plan) << plan.error().message();
+    ASSERT_EQ(plan->items().size(), 2u);
+    EXPECT_EQ(plan->items()[0].operation(), PlanOperation::Update);
+    EXPECT_TRUE(plan->items()[0].requested());
+    EXPECT_EQ(plan->items()[1].kind(), PlanItemKind::Runtime);
+}
+
 TEST_F(BackendFixture, ExecutesACompatiblePlan)
 {
     auto accepted = await<Plan>([this](Completion<Plan> done) {

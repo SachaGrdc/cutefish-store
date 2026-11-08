@@ -1481,7 +1481,7 @@ deux threads pourra être rétablie à l'intégration sans changer le contrat.
 
 ### Tests
 
-`tests/backend-flatpak/` (16 tests) : logique pure (analyse des refs,
+`tests/backend-flatpak/` (18 tests) : logique pure (analyse des refs,
 classement des remotes, correspondance des erreurs, permissions, plan) et le
 backend piloté par un faux magasin (`fakestore.h`) — disponibilité, état
 installé, mises à jour, permissions, sources, plan, exécution compatible,
