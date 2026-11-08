@@ -55,9 +55,11 @@ public:
     /// Starts a refresh. `force` imports even when nothing changed (a manual
     /// refresh, or the initial import). `generation` is the one in service
     /// (0 if none). `provided`: the sources the backends report
-    /// (Backend::catalogSources), indexed with those of the sources file;
-    /// the file's entry wins on a shared id, so that it can override a
-    /// backend's. Precondition: not running.
+    /// (Backend::catalogSources), indexed with those of the sources file.
+    /// The file's entry wins on a shared id, so that it can override a
+    /// backend's; a second reference to a metadata file already listed
+    /// (under another id) is ignored, with a warning. Precondition: not
+    /// running.
     void start(bool force, std::uint64_t generation, std::vector<ConfiguredSource> provided,
                std::function<void(Result<RefreshOutcome>)> done);
     /// Asks to stop: the indexer is terminated; done() then reports

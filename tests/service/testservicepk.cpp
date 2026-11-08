@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <fstream>
 
 using namespace busfixture;
 using namespace std::chrono_literals;
@@ -296,9 +297,13 @@ TEST(ServicePackageKit, RefreshAsksPackageKitToRefreshFirst)
     EXPECT_TRUE(p.noAction());
 }
 
-TEST(ServicePackageKit, AFailedPackageKitRefreshFailsTheRefresh)
+TEST(ServicePackageKit, AFailedRepositoryRefreshStillReindexesTheLocalMetadata)
 {
-    PkBus p;
+    // D-028: RefreshCache fails (offline), the metadata on disk is still
+    // reindexed, and the refresh as a whole reports the failure.
+    ServiceSetup setup = withPackageKit();
+    setup.debianInFile = false; // Flathub only, until a DEP-11 file appears
+    PkBus p(setup);
     Answer failed;
     failed.exit = pk::Exit::Failed;
     failed.error = fakepk::errorCode("no-network");
@@ -306,18 +311,50 @@ TEST(ServicePackageKit, AFailedPackageKitRefreshFailsTheRefresh)
     p.fake->answer("RefreshCache", failed);
     ASSERT_TRUE(p.b.waitReady());
     ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
-    const auto generation = p.b.property<std::uint64_t>("CatalogGeneration");
+    const auto generation = p.b.property<std::uint64_t>("CatalogGeneration").value_or(0);
     const auto last = p.b.property<std::uint64_t>("LastRefresh");
+    // New metadata on disk (an `apt update` made earlier, say).
+    std::filesystem::copy_file(
+            p.b.dir / "debian.yml",
+            p.b.dir / "swcatalog" / "yaml" / "deb.debian.org_debian_dists_trixie_main_dep11_Components-amd64.yml");
     const std::string t = refresh(p.b);
     ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(p.calls("RefreshCache"), 1);
     EXPECT_EQ(transactionState(p.b, t), "failed");
     const auto error = p.b.transaction(t).property<dbus::VariantMap>("Error");
     ASSERT_TRUE(error);
-    EXPECT_NE(error->at("details").value<std::string>().find("no-network"), std::string::npos);
-    // The catalogue in service stays, and the refresh is not recorded.
-    EXPECT_EQ(p.b.property<std::uint64_t>("CatalogGeneration"), generation);
+    const std::string details = error->at("details").value<std::string>();
+    EXPECT_NE(details.find("no-network"), std::string::npos) << details;
+    EXPECT_NE(details.find("local metadata was reindexed"), std::string::npos) << details;
+    // The local catalogue was refreshed all the same...
+    EXPECT_GT(p.b.property<std::uint64_t>("CatalogGeneration").value_or(0), generation);
+    std::vector<dbus::VariantMap> sources;
+    ASSERT_TRUE(p.b.store().call("ListSources").read(sources));
+    EXPECT_TRUE(std::any_of(sources.begin(), sources.end(), [](const dbus::VariantMap& s) {
+        return s.at("id").value<std::string>() == "packagekit:debian-trixie-main";
+    }));
+    // ...but the refresh asked for is not recorded as done.
     EXPECT_EQ(p.b.property<std::uint64_t>("LastRefresh"), last);
     EXPECT_EQ(p.b.property<std::string>("State"), std::optional<std::string>("ready"));
+}
+
+TEST(ServicePackageKit, ALocalRefreshNeverAsksPackageKit)
+{
+    PkBus p;
+    Answer failed; // would fail if it were called
+    failed.exit = pk::Exit::Failed;
+    failed.error = fakepk::errorCode("no-network");
+    p.fake->answer("RefreshCache", failed);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+    dbus::ObjectPath path;
+    ASSERT_TRUE(p.b.store().call("Refresh", dbus::VariantMap{{"repositories", false}}).read(path));
+    ASSERT_TRUE(waitFinished(p.b, path.path));
+    EXPECT_EQ(transactionState(p.b, path.path), "succeeded");
+    EXPECT_EQ(p.calls("RefreshCache"), 0);
+    EXPECT_TRUE(p.noAction());
+    const dbus::Reply wrong = p.b.store().call("Refresh", dbus::VariantMap{{"repositories", std::string("no")}});
+    EXPECT_EQ(errorName(wrong), "org.freedesktop.DBus.Error.InvalidArgs");
 }
 
 TEST(ServicePackageKit, ARefreshIsCancelledWhilePackageKitAllowsIt)
@@ -365,4 +402,31 @@ TEST(ServicePackageKit, CatalogueSourcesComeFromTheBackend)
     const auto page = busfixture::page(p.b.store().call("Search", std::string("gimp"), dbus::VariantMap{}));
     ASSERT_TRUE(page);
     EXPECT_GT(page->total, 0u);
+}
+
+TEST(ServicePackageKit, AMetadataFileListedTwiceIsIndexedOnce)
+{
+    // A sources.conf written before the backend listed the distribution's
+    // DEP-11 file (D-020) names the same file under an id of its own.
+    PkBus p;
+    const auto dep11 =
+            p.b.dir / "swcatalog" / "yaml" / "deb.debian.org_debian_dists_trixie_main_dep11_Components-amd64.yml";
+    std::filesystem::copy_file(p.b.dir / "debian.yml", dep11);
+    {
+        std::ofstream out(p.b.dir / "sources.conf", std::ios::trunc);
+        out << "id=packagekit:my-debian,backend=packagekit,scope=system,kind=distribution,origin=my-debian,"
+               "priority=10,file="
+            << dep11.string() << "\n";
+    }
+    ASSERT_TRUE(p.b.waitReady());
+    std::vector<dbus::VariantMap> sources;
+    ASSERT_TRUE(p.b.store().call("ListSources").read(sources));
+    std::vector<std::string> ids;
+    for (const auto& s : sources)
+        ids.push_back(s.at("id").value<std::string>());
+    // The file's entry wins; the backend's reference to the same file is
+    // ignored (with a warning in the service's log).
+    EXPECT_EQ(ids, std::vector<std::string>{"packagekit:my-debian"});
+    ASSERT_EQ(sources.size(), 1u);
+    EXPECT_GT(sources[0].at("offers").value<std::uint32_t>(), 0u);
 }

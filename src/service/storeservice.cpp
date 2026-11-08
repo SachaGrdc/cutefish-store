@@ -128,7 +128,7 @@ void StoreService::loadGeneration()
                 // No catalogue: initial import (D-015), no transaction object.
                 setState("indexing");
                 m_initialImport = true;
-                startRefresh(true, nullptr);
+                startRefresh(true, false, nullptr);
             });
 }
 
@@ -145,15 +145,17 @@ std::string StoreService::newTransaction()
     return std::string(kPath) + "/Transactions/" + std::to_string(m_nextTransaction++);
 }
 
-void StoreService::startRefresh(bool force, RefreshTransaction* transaction)
+void StoreService::startRefresh(bool force, bool repositories, RefreshTransaction* transaction)
 {
     m_refreshing = true;
     m_refreshCancelled = false;
+    m_repositoryError.reset();
     m_lifecycle.beginActivity();
     m_object->emitPropertiesChanged({"Refreshing"});
-    // A Refresh asked for (not the initial import) first lets the backend
-    // reread its repositories (PackageKit: RefreshCache), when it can.
-    if (transaction && m_inventory && m_inventory->available() == std::optional<bool>(true)
+    // Two operations (D-028): the repositories (PackageKit: RefreshCache,
+    // network), asked for by a full Refresh only, then the local metadata
+    // already on disk, always. The initial import is local.
+    if (transaction && repositories && m_inventory && m_inventory->available() == std::optional<bool>(true)
         && m_backend->capabilities().refresh) {
         m_refreshPhase = RefreshPhase::Backend;
         m_refreshOperation = base::Uuid::generate().toString();
@@ -168,10 +170,16 @@ void StoreService::startRefresh(bool force, RefreshTransaction* transaction)
         m_backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction](Result<void> r) {
             m_refreshOperation.clear();
             m_refreshBackendCancellable = false;
-            if (!r)
-                return refreshDone(std::move(r).error(), transaction);
-            if (m_refreshCancelled)
+            // Cancelled by the user: nothing more is done.
+            if (m_refreshCancelled || (!r && r.error().code() == ErrorCode::Cancelled))
                 return refreshDone(Error::cancelled("refresh cancelled"), transaction);
+            // Offline, refused, PackageKit failing: the local metadata is
+            // still reindexed; the refresh will report the failure.
+            if (!r) {
+                CF_WARNING(cfStore) << "repositories not refreshed, reindexing the local metadata: "
+                                    << r.error().message();
+                m_repositoryError = std::move(r).error();
+            }
             indexSources(force, transaction);
         });
         transaction->updateCancellable();
@@ -245,13 +253,17 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
     m_refreshing = false;
     m_refreshPhase = RefreshPhase::None;
     std::vector<std::string> changed{"Refreshing"};
-    if (result) {
+    // LastRefresh means everything asked for was refreshed: not after a
+    // repository failure, even when the local catalogue was replaced.
+    if (result && !m_repositoryError) {
         if (auto ok = m_state->recordRefresh(result->refreshedSources, now()); ok) {
             m_lastRefresh = now();
             changed.push_back("LastRefresh");
         } else {
             CF_WARNING(cfStore) << "cannot record the refresh: " << ok.error().message();
         }
+    }
+    if (result) {
         if (result->replaced) {
             setGeneration(result->generation);
             changed.push_back("CatalogGeneration");
@@ -270,7 +282,15 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
     if (result && result->sourcesChanged)
         m_object->emitSignal("SourcesChanged");
     if (transaction) {
-        if (result)
+        if (result && m_repositoryError) {
+            // The catalogue is current with the disk; the repositories are not.
+            const Error& e = *m_repositoryError;
+            const std::string message = "repositories not refreshed (" + e.message()
+                    + "); the local metadata was reindexed";
+            const Error failure = e.code() == ErrorCode::Backend ? Error::backend(e.backendFailure(), message)
+                                                                 : Error(e.code(), message);
+            transaction->finish(TransactionState::Failed, failure, now());
+        } else if (result)
             transaction->finish(TransactionState::Succeeded, std::nullopt, now());
         else if (result.error().code() == ErrorCode::Cancelled)
             transaction->finish(TransactionState::Cancelled, std::nullopt, now());
@@ -279,6 +299,7 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
         retire(transaction->path());
     }
     m_currentRefresh.clear();
+    m_repositoryError.reset();
     // The backend is asked again: a daemon may have come back, and a
     // refreshed cache gives other updates.
     if (m_inventory)
@@ -645,14 +666,19 @@ void StoreService::exportObject()
                 admit(call, false);
                 VariantMap options;
                 call.read(options);
+                // `force` (b): reimport even when nothing changed.
+                // `repositories` (b, default true): refresh the backend's
+                // repositories first; false rereads the local metadata only,
+                // without network (D-028).
                 bool force = false;
+                bool repositories = true;
                 for (const auto& [key, value] : options) {
-                    if (key != "force")
+                    if (key != "force" && key != "repositories")
                         return call.replyError(errors::kInvalidArgs, "unknown option " + key);
                     const auto f = value.get<bool>();
                     if (!f)
-                        return call.replyError(errors::kInvalidArgs, "option force must be of type b");
-                    force = *f;
+                        return call.replyError(errors::kInvalidArgs, "option " + key + " must be of type b");
+                    (key == "force" ? force : repositories) = *f;
                 }
                 // One refresh at a time: a request during one joins it (D-015).
                 if (!m_currentRefresh.empty())
@@ -668,7 +694,7 @@ void StoreService::exportObject()
                 m_currentRefresh = path;
                 call.reply(ObjectPath{path});
                 m_object->emitSignal("TransactionAdded", ObjectPath{path});
-                startRefresh(force, raw);
+                startRefresh(force, repositories, raw);
             },
             {{"options"}, {"transaction"}});
 

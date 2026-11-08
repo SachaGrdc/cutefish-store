@@ -55,7 +55,9 @@ private:
     void exportObject();
     void setState(std::string state);
     void loadGeneration();
-    void startRefresh(bool force, RefreshTransaction* transaction);
+    /// `repositories`: ask the backend to refresh its repositories first
+    /// (D-028); the local metadata is reindexed in any case.
+    void startRefresh(bool force, bool repositories, RefreshTransaction* transaction);
     /// The refresh's second half: the backend's catalogue sources, then
     /// the reindexing.
     void indexSources(bool force, RefreshTransaction* transaction);
@@ -99,6 +101,9 @@ private:
     std::string m_refreshOperation; // the backend's operation id
     bool m_refreshBackendCancellable = false;
     bool m_refreshCancelled = false;
+    /// The backend could not refresh its repositories; the local reindex
+    /// went on, and the refresh as a whole ends in failure (D-028).
+    std::optional<Error> m_repositoryError;
 };
 
 } // namespace cutefish::store::service

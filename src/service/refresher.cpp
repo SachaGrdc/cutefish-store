@@ -3,8 +3,12 @@
 #include <cutefish/store/catalogfile.h>
 #include <cutefish/store/sqlitecatalog.h>
 
+#include <base/logging.h>
+
 #include <algorithm>
 #include <map>
+#include <set>
+#include <system_error>
 
 namespace cutefish::store::service {
 
@@ -18,6 +22,16 @@ struct Refresher::Assessment
 };
 
 namespace {
+
+base::LogCategory cfRefresh("cutefish.store.refresh");
+
+/// The same metadata file however it is written (symbolic links, `..`).
+std::string sameFile(const std::filesystem::path& p)
+{
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(p, ec);
+    return (ec ? p : canonical).lexically_normal().string();
+}
 
 bool changesSources(const SourceAssessment& a)
 {
@@ -59,14 +73,28 @@ void Refresher::start(bool force, std::uint64_t generation, std::vector<Configur
                         a->status = std::move(configured).error();
                         return;
                     }
-                    a->configured = std::move(configured).value();
-                    for (ConfiguredSource& p : provided) {
-                        const bool inFile = std::any_of(a->configured.begin(), a->configured.end(),
-                                                        [&](const ConfiguredSource& c) {
-                                                            return c.source.id() == p.source.id();
-                                                        });
-                        if (!inFile)
-                            a->configured.push_back(std::move(p));
+                    // The file's entries first: on a shared id, or on the same
+                    // metadata file under another id (a sources.conf written
+                    // before the backends listed it, D-020), the file wins and
+                    // the other reference is ignored. A file indexed twice would
+                    // give a second source whose offers are all refused.
+                    std::vector<ConfiguredSource> all = std::move(configured).value();
+                    for (ConfiguredSource& p : provided)
+                        all.push_back(std::move(p));
+                    std::set<std::string> ids;
+                    std::map<std::string, std::string> files; // metadata file -> source id
+                    for (ConfiguredSource& c : all) {
+                        const std::string id = c.source.id().str();
+                        if (!ids.insert(id).second)
+                            continue; // a backend source the file overrides
+                        const auto [it, added] = files.emplace(sameFile(c.files.metadata), id);
+                        if (!added) {
+                            CF_WARNING(cfRefresh) << "source " << id << " ignored: its metadata file "
+                                                  << c.files.metadata.string() << " is already the one of "
+                                                  << it->second;
+                            continue;
+                        }
+                        a->configured.push_back(std::move(c));
                     }
                     std::vector<RecordedSource> recorded;
                     if (generation > 0) {
