@@ -12,14 +12,17 @@ The service reads through it (installed packages, updates, repository
 refresh) and, with the transaction manager (step F2, to be validated),
 installs, removes and updates through PackageKit and polkit, after a plan
 and any confirmation it needs.
-There is no user interface or Flatpak backend yet.
+There is no user interface yet. A standalone Flatpak backend exists
+(`store-backend-flatpak`, step G): it links libflatpak when available, is
+driven by a test double in the tests, and is not yet wired into the service
+(the multi-backend integration is the next step). See docs/SERVICE.md §19.
 
 - Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
   [docs/DECISIONS.md](docs/DECISIONS.md)
 - Core: [docs/CORE.md](docs/CORE.md)
 - Catalogue and indexer: [docs/CATALOG.md](docs/CATALOG.md)
 - D-Bus service: [docs/SERVICE.md](docs/SERVICE.md), §16 for what v0.1
-  does, §17 for the PackageKit backend
+  does, §17 for the PackageKit backend, §19 for the Flatpak backend
 - Working on the project (state, owner's rules, commands):
   [AGENTS.md](AGENTS.md)
 
@@ -31,6 +34,11 @@ On Debian 13:
 sudo apt install build-essential cmake ninja-build pkg-config \
     libsqlite3-dev libappstream-dev libxml2-dev libgtest-dev
 ```
+
+The Flatpak backend also uses `libflatpak-dev` when it is present; without
+it the backend's real store is disabled but the logic, the backend and its
+tests still build (`-DCUTEFISH_STORE_BUILD_FLATPAK=OFF` drops the library
+entirely).
 
 Details, and how the list was checked: [docs/CATALOG.md](docs/CATALOG.md),
 "Dépendances". The service also needs Cutefish Toolkit (package

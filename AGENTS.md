@@ -33,8 +33,9 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | `src/core` | `store-core` : modèles, catalogue SQLite, plans, confirmation, `Transaction`, `state.sqlite`, contrat `Backend` (CORE.md) |
 | `src/indexer` | `cutefish-store-indexer` : AppStream → catalogue candidat (CATALOG.md) |
 | `src/backend-packagekit` | Logique PackageKit et profil Debian, sans D-Bus |
+| `src/backend-flatpak` | `store-backend-flatpak` : logique pure, magasin libflatpak, backend Flatpak (SERVICE.md §19) |
 | `src/service` | `cutefish-store-service` : D-Bus `org.cutefish.Store`, transport PackageKit, inventaire, gestionnaire de transactions (SERVICE.md) |
-| `tests/` | GoogleTest par composant ; `tests/service` lance des bus privés et un PackageKit simulé |
+| `tests/` | GoogleTest par composant ; `tests/service` lance des bus privés et un PackageKit simulé ; `tests/backend-flatpak` un faux magasin Flatpak |
 | `data/` | Fichiers d'activation D-Bus et unité systemd utilisateur |
 
 ## État (fin de la session de passation)
@@ -49,6 +50,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | E | Service D-Bus v0.1 en lecture | `ed56113`, `d017c02` |
 | F | Backend PackageKit, intégration en lecture, D-028, D-029 | `59084c2` … `40d3c7b` |
 | F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
+| G | Backend Flatpak autonome (`store-backend-flatpak`) | `feat(backend-flatpak): …` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -59,9 +61,13 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   `UpdateAll` (dont l'échec partiel) ont désormais des tests. Les
   transactions réelles, le dialogue polkit, le verrou dpkg et debconf
   restent à vérifier en VM.
-- **Prochaine étape après F2** : G (backend Flatpak utilisateur, SERVICE.md
-  §7 et §15). **Ne commencer aucune étape sans l'accord explicite du
-  propriétaire.**
+- **G** : le backend Flatpak est implémenté comme bibliothèque autonome
+  (SERVICE.md §19), testé sur un faux magasin (16 tests). Il n'est **pas
+  encore raccordé au service** : l'intégration multi-backends (choix du
+  backend, `Inventory` et `TransactionManager` sur deux backends) est la
+  prochaine étape, ainsi que la gestion des sources (`EnableSource`,
+  P-011) et le raccord de `GetPermissions`. **Ne commencer aucune étape sans
+  l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
   validée ; le propriétaire applique aussi la règle « une opération

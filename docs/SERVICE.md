@@ -62,12 +62,15 @@ Renvois : « A §x.y » désigne une section d'[ARCHITECTURE.md](ARCHITECTURE.md
 | `cutefish-toolkit` 1.0 (`Cutefish::ToolkitBase`) | Couche hôte : boucle, D-Bus, threads, processus, fichiers, réglages, langue | Installé, avec ses en-têtes et sa configuration CMake (`CutefishToolkit`) [MESURÉ] |
 | libsystemd 257 (sd-bus) | Indirecte, par `base::dbus` | Installé avec en-têtes [MESURÉ] |
 | SQLite 3.46.1, libappstream 1.0.5, libxml2 | Catalogue, indexeur | Installés avec en-têtes [MESURÉ] |
-| libflatpak 1.16.6 | Backend Flatpak | Bibliothèque installée, **`libflatpak-dev` absent** [MESURÉ] ; retenu (D-016), installé par le propriétaire |
+| libflatpak 1.16.6 | Backend Flatpak | Bibliothèque et **en-têtes `libflatpak-dev` installés** (étape G) [MESURÉ] |
 | libcurl | Cache d'images (P-005) | Bibliothèque installée, **aucun paquet de développement** [MESURÉ] ; `libcurl4-openssl-dev` retenu (D-016), installé par le propriétaire |
 | PackageKit 1.3.1, polkit 126, flatpak 1.16.6 | Exécution | Installés [MESURÉ] |
 
-Le backend Flatpak et le cache d'images ne pourront pas être compilés tant
-que ces deux paquets de développement ne sont pas installés (D-016).
+Le cache d'images ne pourra pas être compilé tant que `libcurl4-openssl-dev`
+n'est pas installé (D-016). Le backend Flatpak, lui, se compile **avec ou
+sans** libflatpak : sans elle, seule l'implémentation réelle
+(`libflatpakstore.cpp`) est désactivée, la logique et le backend restent
+construits et testables sur un faux magasin.
 
 ### 1.3 Ce que fournit `Cutefish::ToolkitBase` [CODE, en-têtes installés `/usr/include/cutefish-toolkit/base/`]
 
@@ -1117,6 +1120,7 @@ virtuelle.
 | **F. Backend PackageKit** (fait, §17) | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) ; intégration au service en lecture (D-025) | Faux PackageKit sur bus privé ; requêtes et simulations contre le vrai démon (D-026) ; VM pour les transactions réelles (non fait) | E ; Q-9 à Q-11 |
 | **F2. Gestionnaire de transactions** (fait, §18, à valider) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | PackageKit simulé, y compris reprise, annulations, files et parente `UpdateAll` ; gestionnaire générique avec deux faux backends pour l'échec partiel ; VM pour les transactions réelles | F |
 | **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
+| **G2. Backend Flatpak (implémenté, non intégré)** | `store-backend-flatpak` : logique pure, magasin `FlatpakStore` (libflatpak), `FlatpakBackend` sur un thread de travail ; voir §19 | Tests de la logique pure et du backend sur un faux magasin ; la vraie installation se teste en VM | G (backend seul ; l'intégration multi-backends est l'étape suivante) |
 | **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
 | **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
 
@@ -1405,4 +1409,82 @@ polkit, verrou dpkg, debconf.
 redémarrage, une transaction en `awaiting-confirmation` est annulée par le
 cœur (§5.6) ; si une réindexation et un rafraîchissement échouent ensemble,
 seule l'erreur locale est publiée (D-028).
+
+## 19. Backend Flatpak (étape G, backend autonome)
+
+Le backend Flatpak est implémenté dans `src/backend-flatpak/`
+(`store-backend-flatpak`). Il respecte P-006 : la bibliothèque ne dépend ni
+de Cutefish ni de D-Bus, et le cœur (`store-core`) ne dépend pas de
+libflatpak. Il n'est **pas encore raccordé au service** : l'intégration
+multi-backends (choix du backend, `Inventory` et `TransactionManager` sur
+deux backends) est l'étape suivante. Il n'existe donc pas encore de méthode
+D-Bus nouvelle : `Install`, `Remove`, `Update`, `UpdateAll`, `GetUpdates`,
+`GetPermissions` et `ListSources` couvrent déjà Flatpak une fois le backend
+raccordé.
+
+### Composants
+
+| Fichier | Rôle |
+|---|---|
+| `flatpaktypes.h` | Données simples : ref, remote, refs installées, mises à jour, opérations, progression. |
+| `flatpakstore.h` | Le joint étroit entre le backend et libflatpak : installations, remotes, état installé, mises à jour, métadonnées, et les deux passes de transaction. |
+| `translate.h/.cpp` | Logique pure (testée sans GLib) : analyse des refs, classement des remotes (P-011 par l'hôte de l'URL), correspondance des erreurs, plan construit depuis les opérations d'une `FlatpakTransaction`, normalisation des permissions. |
+| `flatpakbackend.h/.cpp` | Le contrat `Backend` du cœur, sur un **thread de travail unique** (`worker.h`) : tous les objets libflatpak y vivent ; complétions et événements postés vers la boucle de l'hôte par la fonction `post`, dans l'ordre, jamais depuis l'appel. |
+| `libflatpakstore.h/.cpp` | L'implémentation réelle du magasin avec libflatpak ; compilée seulement si libflatpak est trouvée (`CUTEFISH_STORE_HAVE_FLATPAK`). |
+
+### Modèle d'exécution
+
+Le design prévoit deux threads GLib (requêtes et transactions, §7.1). En
+attendant l'intégration, le backend utilise **un seul thread de travail** qui
+sérialise requêtes et transactions : c'est sûr (P-009 n'autorise de toute
+façon qu'une transaction à la fois) et le thread principal n'est jamais
+bloqué. Les requêtes Flatpak de l'inventaire sont rapides ; la séparation en
+deux threads pourra être rétablie à l'intégration sans changer le contrat.
+
+### Double passe et vérification (P-008, D-017)
+
+- `plan()` appelle `resolve()` : une `FlatpakTransaction` court jusqu'au
+  signal `ready`, qui recopie les opérations puis retourne `FALSE` — rien
+  n'est téléchargé ni déployé (première passe).
+- `execute()` appelle `execute()` du magasin : une nouvelle transaction
+  résout ses opérations dans `ready`, le backend construit le plan, le
+  compare au plan accepté par `mayExecute()`, émet `started` et retourne
+  `TRUE` pour exécuter, ou `FALSE` (plan changé) sans rien exécuter. C'est
+  la transaction exécutée elle-même qui est vérifiée : `verifiesExecutedPlan`
+  est vrai, à la différence de PackageKit (D-017).
+- `reattach` est `NotSupported` (Flatpak tourne dans le service : après un
+  arrêt, la transaction est `interrupted` par la reprise du cœur, §5.6) ;
+  `capabilities().reattach` est faux.
+- `capabilities().cancelAnytime` est vrai : l'annulation passe par le
+  `GCancellable`, à l'étape interruptible suivante (§7.6).
+
+### Portée et limites de cette étape
+
+- Implémenté : installations utilisateur et système, énumération des remotes
+  (avec leur URL, leur état et leur type), ajout/suppression/activation d'un
+  remote au niveau du magasin, état installé (applications et runtimes
+  distincts), mises à jour, métadonnées d'un ref (permissions, tailles, fin
+  de vie), et les transactions install/remove/update.
+- Le catalogue Flatpak passe par l'indexeur existant : `catalogSources()`
+  fournit `appstream.xml.gz` et le dossier d'icônes de chaque remote ; aucune
+  base parallèle. Les versions et licences viennent de l'AppStream, jamais
+  fabriquées.
+- **Non raccordé** : le service n'utilise pas encore ce backend ; `sources()`
+  et `EnableSource`/`DisableSource` restent absents de l'API (D-022), et
+  l'ajout de la remote Flathub (P-011, encore proposée) ne se fait jamais
+  silencieusement : `addRemote` n'est appelé que sur consentement explicite.
+- **Non surveillé** : `setChangeListener` ne pose pas de moniteur
+  d'installation (il faudrait un `GMainContext`) ; l'état n'est relu qu'au
+  rafraîchissement et après une transaction.
+- **À vérifier en VM** : toute transaction réelle, le dialogue polkit de
+  `flatpak-system-helper` pour l'installation système, et les remotes GPG/HTTP.
+
+### Tests
+
+`tests/backend-flatpak/` (16 tests) : logique pure (analyse des refs,
+classement des remotes, correspondance des erreurs, permissions, plan) et le
+backend piloté par un faux magasin (`fakestore.h`) — disponibilité, état
+installé, mises à jour, permissions, sources, plan, exécution compatible,
+plan changé jamais exécuté, correspondance des erreurs et annulation. Aucun
+test ne touche une installation Flatpak réelle.
 
