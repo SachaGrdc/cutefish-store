@@ -7,6 +7,8 @@
 #include "translate.h"
 #include "fakestore.h"
 
+#include <cutefish/store/confirmation.h>
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -339,6 +341,143 @@ TEST_F(BackendFixture, CancelsARunningExecution)
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code(), ErrorCode::Cancelled);
     EXPECT_EQ(fake->cancels, 1);
+}
+
+TEST_F(BackendFixture, RefusesATransactionThatWouldAddARemote)
+{
+    fake->remoteAddAttempted = true;
+    auto result = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code(), ErrorCode::NotAllowed);
+    EXPECT_NE(result.error().message().find("explicit consent"), std::string::npos);
+}
+
+TEST_F(BackendFixture, RefusesARemoteAddDuringExecution)
+{
+    auto accepted = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_TRUE(accepted);
+
+    fake->remoteAddAttempted = true;
+    bool started = false;
+    OperationEvents events;
+    events.started = [&](const Plan&) { started = true; };
+    auto result = await<ExecutionResult>([&](Completion<ExecutionResult> done) {
+        backend.execute("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), *accepted,
+                        std::move(events), std::move(done));
+    });
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code(), ErrorCode::NotAllowed);
+    EXPECT_FALSE(started); // nothing deployed
+}
+
+TEST(FlatpakStore, AddsAndRemovesARemoteOnlyExplicitly)
+{
+    FakeStore store;
+    EXPECT_TRUE(store.addRemote(Scope::User, "flathub", "https://dl.flathub.org/repo/"));
+    auto remotes = store.remotes(Scope::User);
+    ASSERT_TRUE(remotes);
+    ASSERT_EQ(remotes->size(), 1u);
+    EXPECT_EQ(remotes->at(0).name, "flathub");
+
+    EXPECT_TRUE(store.setRemoteDisabled(Scope::User, "flathub", true));
+    EXPECT_TRUE(store.remotes(Scope::User)->at(0).disabled);
+
+    EXPECT_TRUE(store.removeRemote(Scope::User, "flathub"));
+    EXPECT_TRUE(store.remotes(Scope::User)->empty());
+}
+
+TEST(FlatpakTranslate, ANewPermissionChangesThePlan)
+{
+    // An install whose second pass adds a permission must not run without a
+    // new confirmation (P-008): mayExecute() is the backend's check.
+    std::vector<FlatpakOp> acceptedOps;
+    FlatpakOp op{.type = OperationType::Install,
+                 .ref = FlatpakRef{RefKind::App, "org.gimp.GIMP", "x86_64", "stable"},
+                 .remote = "flathub",
+                 .commit = "commit-1",
+                 .downloadSize = 1000,
+                 .installedSize = 0,
+                 .permissions = {"shared=network"},
+                 .oldPermissions = {},
+                 .requested = true,
+                 .addsSource = false,
+                 .rebaseFrom = {}};
+    acceptedOps.push_back(op);
+
+    std::vector<FlatpakOp> freshOps = acceptedOps;
+    freshOps[0].permissions = {"shared=network", "socket=x11"}; // a permission appears
+
+    const std::vector<std::string> requested{"app/org.gimp.GIMP/x86_64/stable"};
+    auto accepted = buildPlan(TransactionKind::Install, Scope::User, acceptedOps, requested);
+    auto fresh = buildPlan(TransactionKind::Install, Scope::User, freshOps, requested);
+    ASSERT_TRUE(accepted);
+    ASSERT_TRUE(fresh);
+    EXPECT_FALSE(mayExecute(*accepted, *fresh));
+}
+
+TEST(FlatpakTranslate, ASizeOnlyChangeStillRuns)
+{
+    std::vector<FlatpakOp> acceptedOps;
+    FlatpakOp op{.type = OperationType::Install,
+                 .ref = FlatpakRef{RefKind::App, "org.gimp.GIMP", "x86_64", "stable"},
+                 .remote = "flathub",
+                 .commit = "commit-1",
+                 .downloadSize = 1000,
+                 .installedSize = 0,
+                 .permissions = {"shared=network"},
+                 .oldPermissions = {},
+                 .requested = true,
+                 .addsSource = false,
+                 .rebaseFrom = {}};
+    acceptedOps.push_back(op);
+
+    std::vector<FlatpakOp> freshOps = acceptedOps;
+    freshOps[0].downloadSize = 2000; // a size estimate only: compatible
+
+    const std::vector<std::string> requested{"app/org.gimp.GIMP/x86_64/stable"};
+    auto accepted = buildPlan(TransactionKind::Install, Scope::User, acceptedOps, requested);
+    auto fresh = buildPlan(TransactionKind::Install, Scope::User, freshOps, requested);
+    ASSERT_TRUE(accepted);
+    ASSERT_TRUE(fresh);
+    EXPECT_TRUE(mayExecute(*accepted, *fresh));
+}
+
+TEST_F(BackendFixture, AnErrorDuringTheSecondPassIsReported)
+{
+    auto accepted = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_TRUE(accepted);
+
+    fake->executeError = Error::backend(BackendFailure::Dependency, "the runtime is not available");
+    bool started = false;
+    OperationEvents events;
+    events.started = [&](const Plan&) { started = true; };
+    auto result = await<ExecutionResult>([&](Completion<ExecutionResult> done) {
+        backend.execute("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), *accepted,
+                        std::move(events), std::move(done));
+    });
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().backendFailure(), BackendFailure::Dependency);
+    EXPECT_FALSE(started);
+}
+
+TEST_F(BackendFixture, DisabledRemotesAreNotIndexed)
+{
+    fake->remotes_[Scope::User] = {
+            {.name = "flathub", .url = "https://dl.flathub.org/repo/", .disabled = false, .gpgVerify = true,
+             .metadataPath = "/cache/flathub/appstream.xml.gz", .iconsPath = "/cache/flathub/icons"},
+            {.name = "old", .url = "https://example.org/repo/", .disabled = true, .gpgVerify = true,
+             .metadataPath = "/cache/old/appstream.xml.gz", .iconsPath = "/cache/old/icons"}};
+    auto catalog = await<std::vector<SourceMetadata>>(
+            [this](Completion<std::vector<SourceMetadata>> done) { backend.catalogSources(std::move(done)); });
+    ASSERT_TRUE(catalog);
+    ASSERT_EQ(catalog->size(), 1u); // the disabled remote is left out
+    EXPECT_EQ(catalog->at(0).source.origin(), "flathub");
 }
 
 } // namespace

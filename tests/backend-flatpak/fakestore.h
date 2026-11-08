@@ -31,6 +31,14 @@ public:
     bool planChanged = false;
     /// When set, the execution fails with this error after `onReady`.
     std::optional<Error> runError;
+    /// When set, the second pass fails with this error before `onReady`
+    /// (for example a runtime that is no longer available).
+    std::optional<Error> executeError;
+    /// When set, a transaction would add a remote: it is refused (P-011).
+    bool remoteAddAttempted = false;
+    /// When set, these are the operations the second pass resolves to
+    /// (overrides the default), to script a specific plan change.
+    std::optional<std::vector<FlatpakOp>> executeOps;
 
     int resolves = 0;
     int executes = 0;
@@ -86,13 +94,21 @@ public:
     Result<std::vector<FlatpakOp>> resolve(const TransactionSpec& spec) override
     {
         ++resolves;
+        if (remoteAddAttempted)
+            return Error::notAllowed("the transaction would add the remote 'flathub', which the store only adds "
+                                     "with explicit consent");
         return opsFor(spec);
     }
 
     Result<ExecutionOutcome> execute(const TransactionSpec& spec, ExecuteControl control) override
     {
         ++executes;
-        std::vector<FlatpakOp> ops = opsFor(spec);
+        if (remoteAddAttempted)
+            return Error::notAllowed("the transaction would add the remote 'flathub', which the store only adds "
+                                     "with explicit consent");
+        if (executeError)
+            return *executeError;
+        std::vector<FlatpakOp> ops = executeOps ? *executeOps : opsFor(spec);
         if (planChanged) {
             FlatpakOp extra;
             extra.type = OperationType::Uninstall;
