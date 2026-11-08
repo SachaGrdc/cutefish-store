@@ -34,6 +34,11 @@ target_compile_definitions(store-service PRIVATE
     CUTEFISH_STORE_VERSION="${PROJECT_VERSION}"
     CUTEFISH_STORE_INDEXER_PATH="${CUTEFISH_STORE_INDEXER_PATH}")
 target_link_libraries(store-service PUBLIC store-core Cutefish::ToolkitBase)
+if(TARGET store-backend-packagekit)
+    target_sources(store-service PRIVATE pkbackend.cpp pkbackend.h pktransport.cpp pktransport.h)
+    target_link_libraries(store-service PUBLIC store-backend-packagekit)
+    target_compile_definitions(store-service PUBLIC CUTEFISH_STORE_HAVE_PACKAGEKIT=1)
+endif()
 
 add_executable(cutefish-store-service main.cpp)
 target_compile_options(cutefish-store-service PRIVATE -Wall -Wextra)
