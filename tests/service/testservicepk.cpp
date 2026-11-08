@@ -23,6 +23,9 @@ namespace {
 
 const char* kGimpInstalled = "gimp;3.0.4-3;amd64;installed:debian-trixie-main";
 const char* kLibInstalled = "libfoo1;1.0-1;amd64;installed:debian-trixie-main";
+const char* kEditorAvailableId = "example-editor;1.0-1;amd64;debian-trixie-main";
+const char* kToolInstalled = "example-tool;2.0-1;amd64;installed:debian-trixie-main";
+const char* kToolLibInstalled = "libbar2;2.0-1;amd64;installed:debian-trixie-main";
 const char* kForeignInstalled = "libbar1;2.0-1;i386;installed:debian-trixie-main";
 const char* kGimpApp = "org.gimp.GIMP";
 
@@ -486,6 +489,29 @@ int simulatedCalls(const PkBus& p, const std::string& method)
     }));
 }
 
+std::string transactionError(Bus& b, const std::string& path)
+{
+    const auto error = b.transaction(path).property<dbus::VariantMap>("Error");
+    if (!error)
+        return "<none>";
+    const auto code = error->find("code");
+    const auto details = error->find("details");
+    return (code == error->end() ? std::string("<empty>") : code->second.value<std::string>()) + ": "
+           + (details == error->end() ? std::string() : details->second.value<std::string>());
+}
+
+std::string fakeCallLog(const PkBus& p)
+{
+    std::string out;
+    for (const fakepk::Call& c : p.fake->calls()) {
+        out += c.method + (c.simulate() ? "(sim)" : "") + " flags=" + std::to_string(c.flags) + " values=";
+        for (const std::string& v : c.values)
+            out += v + ",";
+        out += "\n";
+    }
+    return out;
+}
+
 } // namespace
 
 TEST(ServiceTransactions, AnInstallWithoutConfirmationRuns)
@@ -819,6 +845,115 @@ TEST(ServiceTransactions, ACancellationDuringTheSecondSimulationExecutesNothing)
     const auto journal = journalEntry(p.b, p.b.transaction(t).property<std::string>("Id").value());
     ASSERT_TRUE(journal);
     EXPECT_EQ(journal->at("state").value<std::string>(), "cancelled");
+}
+
+TEST(ServiceTransactions, TwoModifyingTransactionsRunOneAfterTheOther)
+{
+    // P-009, D-030: one modifier per backend, in arrival order; the second
+    // waits in queued while the first runs.
+    PkBus p;
+    p.fake->answer("GetPackages", installed({}));
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));    // first plan
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));    // first, before execution
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kEditorAvailableId));  // second plan
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kEditorAvailableId));  // second, before execution
+    Answer gimp;
+    gimp.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    Answer editor;
+    editor.packages = {pkg(pk::Info::Installing, kEditorAvailableId)};
+    p.fake->answer("InstallPackages", gimp, true);   // first plan
+    p.fake->answer("InstallPackages", gimp, true);   // before execution
+    p.fake->answer("InstallPackages", editor, true); // second plan
+    p.fake->answer("InstallPackages", editor, true); // before execution
+    Answer gimpReal = gimp;
+    for (int i = 0; i < 200; ++i)
+        gimpReal.steps.push_back(Step{.status = pk::Status::Install, .percentage = static_cast<std::uint32_t>(i), .allowCancel = false});
+    p.fake->answer("InstallPackages", gimpReal, false);
+    p.fake->answer("InstallPackages", editor, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string first = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, first, "running"))
+            << transactionState(p.b, first) << " error=" << transactionError(p.b, first) << "\ncalls:\n"
+            << fakeCallLog(p);
+    // The validation of an action runs on a read thread: start the second
+    // only once the first holds the lane, so that the scripted answers keep
+    // their order.
+    const std::string second =
+            action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:example-editor"), dbus::VariantMap{}));
+    EXPECT_EQ(transactionState(p.b, second), "queued");
+    EXPECT_EQ(p.calls("InstallPackages"), 1); // only the first has a real transaction
+
+    ASSERT_TRUE(waitFinished(p.b, first));
+    EXPECT_EQ(transactionState(p.b, first), "succeeded");
+    ASSERT_TRUE(waitFinished(p.b, second));
+    EXPECT_EQ(transactionState(p.b, second), "succeeded");
+
+    std::vector<std::string> order;
+    for (const fakepk::Call& c : p.fake->calls())
+        if (c.method == "InstallPackages" && !c.simulate() && !c.values.empty())
+            order.push_back(c.values.front());
+    ASSERT_EQ(order.size(), 2u);
+    EXPECT_NE(order[0].find("gimp"), std::string::npos) << order[0];
+    EXPECT_NE(order[1].find("example-editor"), std::string::npos) << order[1];
+    EXPECT_EQ(p.fake->maxConcurrent(), 1);
+}
+
+TEST(ServiceTransactions, TwoAwaitingConfirmationsReleaseTheLaneInTurn)
+{
+    // D-030: both plan, both wait, and the lane is free. The one confirmed
+    // first executes first while the other keeps waiting.
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled, kToolInstalled, kLibInstalled, kToolLibInstalled}));
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled)); // first plan
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kToolInstalled)); // second plan
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kToolInstalled)); // second, before execution
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled)); // first, before execution
+    Answer gimp;
+    gimp.packages = {pkg(pk::Info::Removing, kGimpInstalled), pkg(pk::Info::Removing, kLibInstalled)};
+    Answer tool;
+    tool.packages = {pkg(pk::Info::Removing, kToolInstalled), pkg(pk::Info::Removing, kToolLibInstalled)};
+    p.fake->answer("RemovePackages", gimp, true); // first plan
+    p.fake->answer("RemovePackages", tool, true); // second plan
+    p.fake->answer("RemovePackages", tool, true); // second check, when confirmed
+    p.fake->answer("RemovePackages", gimp, true); // first check, when confirmed
+    p.fake->answer("RemovePackages", tool, false);
+    p.fake->answer("RemovePackages", gimp, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        return p.installedOffer("packagekit:gimp").has_value() && p.installedOffer("packagekit:example-tool").has_value();
+    }));
+
+    const std::string first = action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, first, "awaiting-confirmation"))
+            << transactionState(p.b, first) << " error=" << transactionError(p.b, first);
+    // Start the second only after the first has planned: the validation of an
+    // action runs on a read thread, and the scripted answers are in order.
+    const std::string second =
+            action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:example-tool"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, second, "awaiting-confirmation"));
+    EXPECT_EQ(p.calls("RemovePackages"), 0); // neither has executed
+
+    // Confirm the second transaction first: it takes the free lane.
+    ASSERT_FALSE(p.b.transaction(second).call("Confirm").isError());
+    ASSERT_TRUE(waitFinished(p.b, second));
+    EXPECT_EQ(transactionState(p.b, second), "succeeded");
+    EXPECT_EQ(transactionState(p.b, first), "awaiting-confirmation");
+
+    ASSERT_FALSE(p.b.transaction(first).call("Confirm").isError());
+    ASSERT_TRUE(waitFinished(p.b, first));
+    EXPECT_EQ(transactionState(p.b, first), "succeeded")
+            << transactionState(p.b, first) << " error=" << transactionError(p.b, first);
+
+    std::vector<std::string> order;
+    for (const fakepk::Call& c : p.fake->calls())
+        if (c.method == "RemovePackages" && !c.simulate() && !c.values.empty())
+            order.push_back(c.values.front());
+    ASSERT_EQ(order.size(), 2u);
+    EXPECT_NE(order[0].find("example-tool"), std::string::npos) << order[0];
+    EXPECT_NE(order[1].find("gimp"), std::string::npos) << order[1];
+    EXPECT_EQ(p.fake->maxConcurrent(), 1);
 }
 
 TEST(ServiceTransactions, AWaitingConfirmationDoesNotBlockTheBackend)
