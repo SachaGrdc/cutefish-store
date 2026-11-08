@@ -7,6 +7,12 @@ target_compile_options(store-service-tests PRIVATE -Wall -Wextra)
 target_link_libraries(store-service-tests PRIVATE store-service GTest::gtest_main)
 gtest_discover_tests(store-service-tests)
 
+# The backends registry (H.1): no bus, no daemon.
+add_executable(store-backends-tests testbackends.cpp fakebackend.h)
+target_compile_options(store-backends-tests PRIVATE -Wall -Wextra)
+target_link_libraries(store-backends-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+gtest_discover_tests(store-backends-tests)
+
 find_program(DBUS_DAEMON_EXECUTABLE dbus-daemon)
 if(NOT DBUS_DAEMON_EXECUTABLE OR NOT CUTEFISH_STORE_BUILD_INDEXER)
     message(STATUS "D-Bus tests of the service skipped: they need dbus-daemon and the indexer")
@@ -25,6 +31,14 @@ target_compile_options(store-service-bus-tests PRIVATE -Wall -Wextra)
 target_link_libraries(store-service-bus-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
 # Each test starts its own bus and service: a few seconds each.
 gtest_discover_tests(store-service-bus-tests PROPERTIES TIMEOUT 60)
+
+# The service with two scripted backends, in-process (H.1).
+add_executable(store-service-multi-tests testservice.cpp fakebackend.h privatebus.h)
+target_include_directories(store-service-multi-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
+target_compile_definitions(store-service-multi-tests PRIVATE DBUS_DAEMON="${DBUS_DAEMON_EXECUTABLE}")
+target_compile_options(store-service-multi-tests PRIVATE -Wall -Wextra)
+target_link_libraries(store-service-multi-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+gtest_discover_tests(store-service-multi-tests PROPERTIES TIMEOUT 60)
 
 # The generic manager with two scripted backends: the partial failure of an
 # UpdateAll parent needs two children, which the service cannot have yet.

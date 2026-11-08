@@ -226,7 +226,8 @@ private:
             << (dir / "indexer.sh").string() << " --idle-timeout-ms " << s.idleTimeout.count()
             << " --retention-ms " << s.retention.count()
             << " --confirmation-timeout-ms " << s.confirmationTimeout.count() << " --locale C --packagekit " << s.packagekit
-            << " --swcatalog " << (dir / "swcatalog").string() << "\n";
+            << " --swcatalog " << (dir / "swcatalog").string() << " --flatpak off"
+            << "\n";
     }
 
     void writeConfig()

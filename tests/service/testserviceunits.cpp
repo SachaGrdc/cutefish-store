@@ -50,6 +50,20 @@ TEST(ServiceOptions, PackageKitBus)
     EXPECT_EQ(c->confirmationTimeout, std::chrono::milliseconds(500));
 }
 
+TEST(ServiceOptions, FlatpakMode)
+{
+    auto d = parseArguments({});
+    ASSERT_TRUE(d);
+    EXPECT_EQ(d->flatpak, FlatpakMode::Auto); // production
+    auto off = parseArguments({"--flatpak", "off"});
+    ASSERT_TRUE(off);
+    EXPECT_EQ(off->flatpak, FlatpakMode::Off);
+    auto auto_ = parseArguments({"--flatpak", "auto"});
+    ASSERT_TRUE(auto_);
+    EXPECT_EQ(auto_->flatpak, FlatpakMode::Auto);
+    EXPECT_FALSE(parseArguments({"--flatpak", "maybe"}));
+}
+
 TEST(SourcesFile, ParsesSourcesAndComments)
 {
     auto s = parseSources("# comment\n\n"
