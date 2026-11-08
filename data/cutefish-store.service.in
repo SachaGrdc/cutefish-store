@@ -1,0 +1,7 @@
+[Unit]
+Description=Cutefish Store service
+
+[Service]
+Type=dbus
+BusName=org.cutefish.Store
+ExecStart=@CUTEFISH_STORE_SERVICE_PATH@

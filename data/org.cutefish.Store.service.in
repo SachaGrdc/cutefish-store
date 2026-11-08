@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.cutefish.Store
+Exec=@CUTEFISH_STORE_SERVICE_PATH@
+SystemdService=cutefish-store.service

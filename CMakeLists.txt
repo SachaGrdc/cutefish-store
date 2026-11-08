@@ -25,11 +25,15 @@ if(CUTEFISH_STORE_SANITIZERS)
 endif()
 
 option(CUTEFISH_STORE_BUILD_INDEXER "Build cutefish-store-indexer (needs libappstream and libxml2)" ON)
+option(CUTEFISH_STORE_BUILD_SERVICE "Build cutefish-store-service (needs Cutefish Toolkit)" ON)
 
 # store-core depends on SQLite only; libcurl will come with the image cache.
 add_subdirectory(src/core)
 if(CUTEFISH_STORE_BUILD_INDEXER)
     add_subdirectory(src/indexer)
+endif()
+if(CUTEFISH_STORE_BUILD_SERVICE)
+    add_subdirectory(src/service)
 endif()
 
 if(BUILD_TESTING)
