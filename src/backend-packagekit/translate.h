@@ -70,7 +70,8 @@ Result<std::vector<std::string>> idsFor(const PlanRequest& request, const PkResu
 /// - a removal of a protected package, requested or not, is refused;
 /// - no item at all (nothing to do) is a Conflict.
 /// The plan's download size is not split per package by PackageKit: items
-/// carry 0 and the total is returned in `downloadSize`.
+/// carry 0, and the total is the plan's (PlanSpec::downloadSize) and is
+/// also returned in `downloadSize`, for the progress of the execution.
 struct SimulatedPlan
 {
     Plan plan;

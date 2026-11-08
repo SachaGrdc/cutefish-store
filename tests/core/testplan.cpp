@@ -34,6 +34,13 @@ TEST(Plan, KeepsItemsInBackendOrder)
     EXPECT_EQ(plan.items()[1].kind(), PlanItemKind::Runtime);
     EXPECT_FALSE(plan.items()[1].requested());
     EXPECT_EQ(plan.downloadSize(), 201000u);
+    // A backend's total, when it has only that, replaces the sum.
+    auto total = unwrap(Plan::create({.kind = TransactionKind::Install,
+                                      .backend = BackendKind::Flatpak,
+                                      .scope = Scope::User,
+                                      .items = {flatpakApp(PlanOperation::Install), flatpakRuntime()},
+                                      .downloadSize = 7}));
+    EXPECT_EQ(total.downloadSize(), 7u);
     ASSERT_NE(plan.find(kRuntime), nullptr);
     EXPECT_EQ(plan.find(kRuntime)->revision(), "beef0001");
     EXPECT_EQ(plan.find("runtime/org.example.Missing/x86_64/1"), nullptr);

@@ -286,6 +286,8 @@ Result<SimulatedPlan> planFromSimulation(const PlanRequest& request, const PkRes
     }
     if (spec.items.empty())
         return Error::conflict("nothing to do: PackageKit planned no change");
+    // The total only: PackageKit does not split it per package.
+    spec.downloadSize = result.downloadSizeRemaining;
     auto plan = Plan::create(std::move(spec));
     if (!plan)
         return Error::backend(BackendFailure::Unspecified, "PackageKit plan refused: " + plan.error().message());

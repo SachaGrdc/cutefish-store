@@ -200,6 +200,7 @@ TEST(PackageKitPlans, InstallWithDependencies)
                     52458144),
             debianProfile()));
     EXPECT_EQ(plan.downloadSize, 52458144u);
+    EXPECT_EQ(plan.plan.downloadSize(), 52458144u); // what the user is shown
     ASSERT_EQ(plan.plan.items().size(), 3u);
     const PlanItem* gimp = item(plan.plan, "gimp");
     ASSERT_TRUE(gimp);

@@ -124,6 +124,10 @@ struct PlanSpec
     std::vector<PlanItemSpec> items;
     /// Change of disk usage announced by the backend, when known.
     std::int64_t installedSizeChange = 0;
+    /// The total to download, for a backend that knows only the total
+    /// (PackageKit's DownloadSizeRemaining after a simulation, not split
+    /// per package). Absent: the sum of the items' sizes.
+    std::optional<std::uint64_t> downloadSize = {};
 };
 
 /// What a transaction will do, as computed by its backend before anything
@@ -151,20 +155,24 @@ public:
     std::span<const PlanItem> items() const noexcept { return m_items; }
     /// The item for this package or ref, or nullptr.
     const PlanItem* find(std::string_view package) const noexcept;
-    /// Sum of the items' download sizes.
+    /// The backend's total when it gave one (PlanSpec::downloadSize),
+    /// otherwise the sum of the items' download sizes.
     std::uint64_t downloadSize() const noexcept;
+    /// The download size is the backend's total, not split per item.
+    bool hasTotalDownloadSize() const noexcept { return m_downloadSize.has_value(); }
     std::int64_t installedSizeChange() const noexcept { return m_installedSizeChange; }
 
 private:
     Plan(TransactionKind kind, BackendKind backend, Scope scope, std::vector<PlanItem> items,
-         std::int64_t installedSizeChange)
-        : m_items(std::move(items)), m_installedSizeChange(installedSizeChange), m_kind(kind), m_backend(backend),
-          m_scope(scope)
+         std::int64_t installedSizeChange, std::optional<std::uint64_t> downloadSize)
+        : m_items(std::move(items)), m_installedSizeChange(installedSizeChange), m_downloadSize(downloadSize),
+          m_kind(kind), m_backend(backend), m_scope(scope)
     {
     }
 
     std::vector<PlanItem> m_items;
     std::int64_t m_installedSizeChange;
+    std::optional<std::uint64_t> m_downloadSize;
     TransactionKind m_kind;
     BackendKind m_backend;
     Scope m_scope;

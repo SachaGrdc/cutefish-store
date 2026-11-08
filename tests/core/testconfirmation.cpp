@@ -270,6 +270,23 @@ TEST(PlanComparison, HarmlessItemChanges)
     EXPECT_EQ(changes(c), std::vector<PlanChange>{PlanChange::SizeChanged});
 }
 
+TEST(PlanComparison, ATotalOnlyDownloadSizeIsCompared)
+{
+    // PackageKit gives the total only (PlanSpec::downloadSize).
+    auto total = [](std::uint64_t bytes) {
+        return unwrap(Plan::create({.kind = TransactionKind::Install,
+                                    .backend = BackendKind::PackageKit,
+                                    .scope = Scope::System,
+                                    .items = {debPackage(PlanOperation::Install, "gimp", true)},
+                                    .downloadSize = bytes}));
+    };
+    EXPECT_EQ(comparePlans(total(52458144), total(52458144)).verdict, PlanVerdict::Identical);
+    const auto c = comparePlans(total(52458144), total(6500000)); // dependencies cached meanwhile
+    EXPECT_EQ(c.verdict, PlanVerdict::Compatible);
+    EXPECT_EQ(changes(c), std::vector<PlanChange>{PlanChange::SizeChanged});
+    EXPECT_TRUE(mayExecute(total(52458144), total(6500000)));
+}
+
 TEST(PlanComparison, DifferentContextIsNeverCompared)
 {
     auto user = flatpakPlan(TransactionKind::Update, Scope::User, {flatpakApp(PlanOperation::Update)});

@@ -154,6 +154,13 @@ PlanComparison comparePlans(const Plan& accepted, const Plan& fresh)
             diffs.push_back({PlanChange::ItemAdded, b.package(), true});
     if (accepted.installedSizeChange() != fresh.installedSizeChange())
         diffs.push_back({PlanChange::SizeChanged, {}, false});
+    // A total given by the backend only (PlanSpec::downloadSize): no item
+    // tells the difference. Informative, as for an item.
+    if ((accepted.hasTotalDownloadSize() || fresh.hasTotalDownloadSize())
+        && accepted.downloadSize() != fresh.downloadSize()
+        && std::none_of(diffs.begin(), diffs.end(),
+                        [](const PlanDifference& d) { return d.change == PlanChange::SizeChanged && d.package.empty(); }))
+        diffs.push_back({PlanChange::SizeChanged, {}, false});
 
     std::sort(diffs.begin(), diffs.end(), [](const PlanDifference& x, const PlanDifference& y) {
         return std::tie(x.package, x.change) < std::tie(y.package, y.change);

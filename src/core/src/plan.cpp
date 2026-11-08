@@ -168,7 +168,7 @@ Result<Plan> Plan::create(PlanSpec spec)
     items.reserve(spec.items.size());
     for (PlanItemSpec& item : spec.items)
         items.push_back(PlanItem(std::move(item)));
-    return Plan(spec.kind, spec.backend, spec.scope, std::move(items), spec.installedSizeChange);
+    return Plan(spec.kind, spec.backend, spec.scope, std::move(items), spec.installedSizeChange, spec.downloadSize);
 }
 
 const PlanItem* Plan::find(std::string_view package) const noexcept
@@ -181,6 +181,8 @@ const PlanItem* Plan::find(std::string_view package) const noexcept
 
 std::uint64_t Plan::downloadSize() const noexcept
 {
+    if (m_downloadSize)
+        return *m_downloadSize;
     std::uint64_t total = 0;
     for (const PlanItem& item : m_items)
         total += item.downloadSize();
