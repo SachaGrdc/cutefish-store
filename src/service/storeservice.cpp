@@ -31,31 +31,39 @@ void replyError(base::dbus::MethodCall& call, const Result<T>& r)
 } // namespace
 
 StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connection, ServiceOptions options,
-                           std::unique_ptr<Backend> backend)
+                           std::vector<std::unique_ptr<Backend>> backends)
     : m_loop(loop), m_connection(connection), m_options(std::move(options)),
       m_reads(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite", m_options.readLocales),
       m_refresher(loop, m_options), m_lifecycle(loop, connection, m_options.idleTimeout, [this] {
           if (onIdle)
               onIdle();
-      }),
-      m_backend(std::move(backend))
+      })
 {
-    if (!m_backend)
-        return;
-    m_inventory = std::make_unique<Inventory>(*m_backend, m_options.dataDir / "catalog.sqlite",
-                                              m_options.dataDir / "state.sqlite");
-    m_inventory->onAvailabilityChanged = [this] {
-        m_object->emitPropertiesChanged({"Backends"});
-        if (m_generation > 0)
-            setState("ready"); // or degraded, see setState()
-    };
-    m_inventory->onInstalledChanged = [this](const std::vector<std::string>& apps) {
-        m_object->emitSignal("InstalledChanged", apps);
-    };
-    m_inventory->onUpdatesChanged = [this] {
-        m_object->emitPropertiesChanged({"UpdateCount"});
-        m_object->emitSignal("UpdatesChanged", static_cast<std::uint32_t>(m_inventory->updates().size()));
-    };
+    for (std::unique_ptr<Backend>& backend : backends) {
+        const BackendKind kind = backend->kind();
+        m_backends.add(std::move(backend), m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite");
+        Inventory& inventory = *m_backends.inventory(kind);
+        inventory.onAvailabilityChanged = [this] {
+            m_object->emitPropertiesChanged({"Backends"});
+            if (m_generation > 0)
+                setState("ready"); // or degraded, see setState()
+        };
+        inventory.onInstalledChanged = [this](const std::vector<std::string>& apps) {
+            m_object->emitSignal("InstalledChanged", apps);
+        };
+        inventory.onUpdatesChanged = [this] {
+            m_object->emitPropertiesChanged({"UpdateCount"});
+            m_object->emitSignal("UpdatesChanged", static_cast<std::uint32_t>(updateCount()));
+        };
+    }
+}
+
+std::uint32_t StoreService::updateCount() const
+{
+    std::uint32_t count = 0;
+    for (const BackendKind kind : m_backends.kinds())
+        count += static_cast<std::uint32_t>(m_backends.inventory(kind)->updates().size());
+    return count;
 }
 
 StoreService::~StoreService() = default;
@@ -83,12 +91,13 @@ Result<void> StoreService::start()
         // Running transactions kept with a backend handle (SERVICE.md §5.6).
         m_toReattach = std::move(report->toReattach);
     }
-    if (m_backend) {
+    if (!m_backends.empty()) {
         m_manager = std::make_unique<TransactionManager>(
                 m_loop, m_connection, *m_state,
                 TransactionManager::Options{.confirmationTimeout = m_options.confirmationTimeout,
                                             .retention = m_options.transactionRetention});
-        m_manager->addBackend(*m_backend);
+        for (const BackendKind kind : m_backends.kinds())
+            m_manager->addBackend(*m_backends.backend(kind));
         m_manager->newPath = [this] { return newTransaction(); };
         m_manager->onAdded = [this](const std::string& path) {
             m_object->emitSignal("TransactionAdded", base::dbus::ObjectPath{path});
@@ -97,7 +106,10 @@ Result<void> StoreService::start()
             m_object->emitSignal("TransactionRemoved", base::dbus::ObjectPath{path});
         };
         // Never an optimistic update: the backend is asked (§8.3).
-        m_manager->onSystemMayHaveChanged = [this](BackendKind) { m_inventory->check(); };
+        m_manager->onSystemMayHaveChanged = [this](BackendKind kind) {
+            if (Inventory* inventory = m_backends.inventory(kind))
+                inventory->check();
+        };
         m_manager->onActivityBegin = [this] { m_lifecycle.beginActivity(); };
         m_manager->onActivityEnd = [this] { m_lifecycle.endActivity(); };
     }
@@ -108,10 +120,10 @@ Result<void> StoreService::start()
     if (!m_connection.requestName(m_options.busName))
         return Error::conflict("the name " + m_options.busName + " is owned by another instance");
     loadGeneration();
-    // The backend is asked once the name is ours: its answers become
+    // Each backend is asked once the name is ours: its answers become
     // signals and properties.
-    if (m_inventory)
-        m_inventory->check();
+    for (const BackendKind kind : m_backends.kinds())
+        m_backends.inventory(kind)->check();
     if (m_manager)
         m_manager->recover(std::move(m_toReattach));
     m_lifecycle.evaluate();
@@ -120,9 +132,10 @@ Result<void> StoreService::start()
 
 void StoreService::setState(std::string state)
 {
-    // A configured backend that cannot be used degrades a ready service
-    // (ARCHITECTURE §5.2): the catalogue reads, nothing can be installed.
-    if (state == "ready" && m_inventory && m_inventory->available() == std::optional<bool>(false))
+    // A service whose every configured backend is unusable degrades, but the
+    // catalogue still reads and one backend falling does not degrade the
+    // others (D-E).
+    if (state == "ready" && m_backends.allUnavailable())
         state = "degraded";
     if (state == m_stateName)
         return;
@@ -160,8 +173,8 @@ void StoreService::setGeneration(std::uint64_t generation)
 {
     m_generation = generation;
     m_reads.setGeneration(generation);
-    if (m_inventory)
-        m_inventory->setGeneration(generation);
+    for (const BackendKind kind : m_backends.kinds())
+        m_backends.inventory(kind)->setGeneration(generation);
 }
 
 std::string StoreService::newTransaction()
@@ -178,14 +191,16 @@ void StoreService::startRefresh(bool force, bool repositories, RefreshTransactio
     m_object->emitPropertiesChanged({"Refreshing"});
     // Two operations (D-028): the repositories (PackageKit: RefreshCache,
     // network), asked for by a full Refresh only, then the local metadata
-    // already on disk, always. The initial import is local.
-    if (transaction && repositories && m_inventory && m_inventory->available() == std::optional<bool>(true)
-        && m_backend->capabilities().refresh) {
+    // already on disk, always. The initial import is local. H.1 refreshes
+    // the one backend that reports refresh support and is usable (Flatpak
+    // reports none yet); refreshing every backend comes with H.7.
+    Backend* backend = refreshBackend();
+    if (transaction && repositories && backend) {
         // A modifying operation of the backend: it takes its turn in the
         // backend's lane, behind a transaction in progress (P-009).
         m_refreshPhase = RefreshPhase::Lane;
         m_refreshBackendCancellable = false;
-        auto run = [this, force, transaction](std::function<void()> laneDone) {
+        auto run = [this, force, transaction, backend](std::function<void()> laneDone) {
             if (m_refreshCancelled) {
                 laneDone();
                 return refreshDone(Error::cancelled("refresh cancelled"), transaction);
@@ -200,7 +215,7 @@ void StoreService::startRefresh(bool force, bool repositories, RefreshTransactio
                 m_refreshBackendCancellable = p.cancellable;
                 transaction->updateCancellable();
         };
-        m_backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction, laneDone](Result<void> r) {
+        backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction, laneDone](Result<void> r) {
             laneDone();
             m_refreshOperation.clear();
             m_refreshBackendCancellable = false;
@@ -219,7 +234,7 @@ void StoreService::startRefresh(bool force, bool repositories, RefreshTransactio
         };
         transaction->updateCancellable();
         if (m_manager)
-            m_manager->exclusive(m_backend->kind(), std::move(run));
+            m_manager->exclusive(backend->kind(), std::move(run));
         else
             run([] {});
         return;
@@ -236,24 +251,32 @@ void StoreService::indexSources(bool force, RefreshTransaction* transaction)
         if (transaction)
             transaction->updateCancellable();
     };
-    if (!m_backend)
+    const std::vector<BackendKind> kinds = m_backends.kinds();
+    if (kinds.empty())
         return index({});
     m_refreshPhase = RefreshPhase::Sources;
     if (transaction)
         transaction->updateCancellable();
-    m_backend->catalogSources([this, transaction, index](Result<std::vector<SourceMetadata>> list) {
-        if (m_refreshCancelled)
-            return refreshDone(Error::cancelled("refresh cancelled"), transaction);
-        std::vector<ConfiguredSource> provided;
-        if (list) {
-            for (SourceMetadata& m : *list)
-                provided.push_back({std::move(m.source), std::move(m.files)});
-        } else {
-            CF_WARNING(cfStore) << "no catalogue sources from " << toString(m_backend->kind()) << ": "
-                                << list.error().message();
-        }
-        index(std::move(provided));
-    });
+    // Each backend's catalogue sources feed the same indexer (H.1 gathers
+    // them; the fingerprint/dedup logic of CATALOG §11 is unchanged).
+    auto remaining = std::make_shared<std::size_t>(kinds.size());
+    auto provided = std::make_shared<std::vector<ConfiguredSource>>();
+    for (const BackendKind kind : kinds) {
+        m_backends.backend(kind)->catalogSources([this, transaction, index, kind, remaining,
+                                                  provided](Result<std::vector<SourceMetadata>> list) {
+            if (m_refreshCancelled)
+                return refreshDone(Error::cancelled("refresh cancelled"), transaction);
+            if (list) {
+                for (SourceMetadata& m : *list)
+                    provided->push_back({std::move(m.source), std::move(m.files)});
+            } else {
+                CF_WARNING(cfStore) << "no catalogue sources from " << toString(kind) << ": "
+                                    << list.error().message();
+            }
+            if (--*remaining == 0)
+                index(std::move(*provided));
+        });
+    }
 }
 
 bool StoreService::cancelRefresh()
@@ -264,7 +287,7 @@ bool StoreService::cancelRefresh()
         return true;
     case RefreshPhase::Backend:
         // Only while the backend allows it; its completion then tells.
-        if (!m_refreshBackendCancellable || !m_backend->cancel(m_refreshOperation))
+        if (!m_refreshBackendCancellable || !refreshBackend() || !refreshBackend()->cancel(m_refreshOperation))
             return false;
         m_refreshCancelled = true;
         return true;
@@ -343,10 +366,10 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
     }
     m_currentRefresh.clear();
     m_repositoryError.reset();
-    // The backend is asked again: a daemon may have come back, and a
+    // Each backend is asked again: a daemon may have come back, and a
     // refreshed cache gives other updates.
-    if (m_inventory)
-        m_inventory->check();
+    for (const BackendKind kind : m_backends.kinds())
+        m_backends.inventory(kind)->check();
     m_lifecycle.endActivity();
 }
 
@@ -388,15 +411,17 @@ void StoreService::exportObject()
     o.addProperty("CatalogGeneration", [this] { return m_generation; });
     o.addProperty("Backends", [this] {
         std::vector<VariantMap> out;
-        if (m_inventory)
-            out.push_back(backendMap(m_backend->kind(), m_backend->capabilities(), m_inventory->available(),
-                                     m_inventory->reason()));
+        for (const BackendKind kind : m_backends.kinds()) {
+            const Backend* backend = m_backends.backend(kind);
+            const Inventory* inventory = m_backends.inventory(kind);
+            out.push_back(backendMap(kind, backend->capabilities(), inventory->available(), inventory->reason()));
+        }
         return out;
     });
     o.addProperty("Refreshing", [this] { return m_refreshing; });
     o.addProperty("LastRefresh", [this] { return static_cast<std::uint64_t>(m_lastRefresh.value_or(0)); });
-    if (m_inventory)
-        o.addProperty("UpdateCount", [this] { return static_cast<std::uint32_t>(m_inventory->updates().size()); });
+    if (!m_backends.empty())
+        o.addProperty("UpdateCount", [this] { return updateCount(); });
 
     // --- Signals (§4.7) ------------------------------------------------------
     o.addSignal("CatalogChanged", "t", {"generation"});
@@ -404,7 +429,7 @@ void StoreService::exportObject()
     o.addSignal("TransactionAdded", "o", {"transaction"});
     o.addSignal("TransactionRemoved", "o", {"transaction"});
     o.addSignal("SourcesChanged", "", {});
-    if (m_inventory)
+    if (!m_backends.empty())
         o.addSignal("UpdatesChanged", "u", {"count"});
 
     // --- Reading (§4.3) ------------------------------------------------------
@@ -617,16 +642,17 @@ void StoreService::exportObject()
             },
             {{"options"}, {"items"}});
 
-    if (m_inventory) {
-        // What the backend reports, filtered by the catalogue (D-010); kept
+    if (!m_backends.empty()) {
+        // What the backends report, filtered by the catalogue (D-010); kept
         // in memory, refreshed on the backend's signals and each refresh.
         o.addMethod(
                 "GetUpdates", "", "aa{sv}",
                 [this](MethodCall& call) {
                     admit(call, false);
                     std::vector<VariantMap> out;
-                    for (const AvailableUpdate& u : m_inventory->updates())
-                        out.push_back(toMap(u, m_backend->kind()));
+                    for (const BackendKind kind : m_backends.kinds())
+                        for (const AvailableUpdate& u : m_backends.inventory(kind)->updates())
+                            out.push_back(toMap(u, kind));
                     call.reply(out);
                 },
                 {{}, {"updates"}});
@@ -750,18 +776,30 @@ void StoreService::exportObject()
     o.publish();
 }
 
-Result<void> StoreService::actionBackend(const OfferId& offer) const
+Result<Inventory*> StoreService::actionInventory(const OfferId& offer) const
 {
     auto address = decodeOfferId(offer);
     if (!address)
         return std::move(address).error();
-    if (!m_backend || m_backend->kind() != address->backend)
+    Inventory* inventory = m_backends.inventory(address->backend);
+    if (!inventory)
         return Error::backend(BackendFailure::Unavailable,
                               "no " + std::string(toString(address->backend)) + " backend in this service");
-    if (m_inventory->available() != std::optional<bool>(true))
-        return Error::backend(BackendFailure::Unavailable, toString(m_backend->kind()).data()
-                                      + std::string(" is not usable: ") + m_inventory->reason());
-    return {};
+    if (inventory->available() != std::optional<bool>(true))
+        return Error::backend(BackendFailure::Unavailable, std::string(toString(address->backend))
+                                      + " is not usable: " + inventory->reason());
+    return inventory;
+}
+
+Backend* StoreService::refreshBackend() const
+{
+    for (const BackendKind kind : m_backends.kinds()) {
+        Backend* backend = m_backends.backend(kind);
+        if (backend->capabilities().refresh
+            && m_backends.inventory(kind)->available() == std::optional<bool>(true))
+            return backend;
+    }
+    return nullptr;
 }
 
 void StoreService::exportActions()
@@ -796,8 +834,8 @@ void StoreService::exportActions()
                 auto offer = OfferId::parse(raw);
                 if (!offer)
                     return replyError(call, offer);
-                if (auto ok = actionBackend(*offer); !ok)
-                    return replyError(call, ok);
+                if (auto inventory = actionInventory(*offer); !inventory)
+                    return replyError(call, inventory);
                 using Answer = Result<std::pair<std::optional<AppId>, bool>>;
                 m_reads.read<Answer>(
                         [offer = *offer](Readers& r) -> Answer {
@@ -843,8 +881,8 @@ void StoreService::exportActions()
                 auto offer = OfferId::parse(raw);
                 if (!offer)
                     return replyError(call, offer);
-                if (auto ok = actionBackend(*offer); !ok)
-                    return replyError(call, ok);
+                if (auto inventory = actionInventory(*offer); !inventory)
+                    return replyError(call, inventory);
                 using Answer = Result<std::optional<AppId>>;
                 m_reads.read<Answer>(
                         [offer = *offer](Readers& r) -> Answer {
@@ -884,9 +922,10 @@ void StoreService::exportActions()
                     auto offer = OfferId::parse(r);
                     if (!offer)
                         return replyError(call, offer);
-                    if (auto ok = actionBackend(*offer); !ok)
-                        return replyError(call, ok);
-                    const auto& updates = m_inventory->updates();
+                    auto inventory = actionInventory(*offer);
+                    if (!inventory)
+                        return replyError(call, inventory);
+                    const auto& updates = (*inventory)->updates();
                     const auto it = std::find_if(updates.begin(), updates.end(),
                                                  [&](const AvailableUpdate& u) { return u.offer == *offer; });
                     if (it == updates.end())
@@ -908,11 +947,17 @@ void StoreService::exportActions()
                 call.read(options);
                 if (!noOptions(call, options))
                     return;
-                if (m_inventory->available() != std::optional<bool>(true))
-                    return call.replyError(errors::kBackendUnavailable, "no usable backend");
+                bool anyAvailable = false;
                 std::vector<TransactionManager::Target> targets;
-                for (const AvailableUpdate& u : m_inventory->updates())
-                    targets.push_back({u.offer, u.app});
+                for (const BackendKind kind : m_backends.kinds()) {
+                    Inventory* inventory = m_backends.inventory(kind);
+                    if (inventory->available() == std::optional<bool>(true))
+                        anyAvailable = true;
+                    for (const AvailableUpdate& u : inventory->updates())
+                        targets.push_back({u.offer, u.app});
+                }
+                if (!anyAvailable)
+                    return call.replyError(errors::kBackendUnavailable, "no usable backend");
                 answer(call, m_manager->startUpdateAll(std::move(targets)));
             },
             {{"options"}, {"transaction"}});

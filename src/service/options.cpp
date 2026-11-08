@@ -84,6 +84,13 @@ Result<ServiceOptions> parseArguments(const std::vector<std::string>& arguments)
                 return Error::invalidArgument("--packagekit expects system, session or off, got " + value);
         } else if (arg == "--swcatalog") {
             o.swcatalog = value;
+        } else if (arg == "--flatpak") {
+            if (value == "auto")
+                o.flatpak = FlatpakMode::Auto;
+            else if (value == "off")
+                o.flatpak = FlatpakMode::Off;
+            else
+                return Error::invalidArgument("--flatpak expects auto or off, got " + value);
         } else if (arg == "--locale") {
             o.readLocales.push_back(value);
             localesGiven = true;

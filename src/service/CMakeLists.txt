@@ -13,6 +13,8 @@ set(CUTEFISH_STORE_SERVICE_PATH "${CMAKE_INSTALL_FULL_LIBEXECDIR}/cutefish-store
 add_library(store-service STATIC
     actiontransaction.cpp
     actiontransaction.h
+    backends.cpp
+    backends.h
     inventory.cpp
     inventory.h
     lifecycle.cpp
@@ -44,6 +46,11 @@ if(TARGET store-backend-packagekit)
     target_sources(store-service PRIVATE pkbackend.cpp pkbackend.h pktransport.cpp pktransport.h)
     target_link_libraries(store-service PUBLIC store-backend-packagekit)
     target_compile_definitions(store-service PUBLIC CUTEFISH_STORE_HAVE_PACKAGEKIT=1)
+endif()
+# The Flatpak backend lives in its own library; linking it brings
+# CUTEFISH_STORE_HAVE_FLATPAK when libflatpak is present.
+if(TARGET store-backend-flatpak)
+    target_link_libraries(store-service PUBLIC store-backend-flatpak)
 endif()
 
 add_executable(cutefish-store-service main.cpp)

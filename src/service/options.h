@@ -17,6 +17,10 @@ namespace cutefish::store::service {
 /// session bus for the tests (a simulated daemon), or not at all.
 enum class PackageKitBus { Off, System, Session };
 
+/// Whether the Flatpak backend is enabled (it is built only when libflatpak
+/// is present).
+enum class FlatpakMode { Off, Auto };
+
 struct ServiceOptions
 {
     /// Holds catalog.sqlite and state.sqlite.
@@ -40,6 +44,8 @@ struct ServiceOptions
     PackageKitBus packagekit = PackageKitBus::System;
     /// The distribution's DEP-11 catalogues (Debian profile of PackageKit).
     std::filesystem::path swcatalog = "/var/lib/swcatalog";
+    /// The Flatpak backend, when libflatpak is available.
+    FlatpakMode flatpak = FlatpakMode::Auto;
 };
 
 /// Options:
@@ -53,6 +59,7 @@ struct ServiceOptions
 ///                         environment (LANGUAGE, LC_ALL, LC_MESSAGES, LANG)
 ///   --packagekit B        system (default), session or off
 ///   --swcatalog DIR       default /var/lib/swcatalog
+///   --flatpak M           auto (default) or off
 /// InvalidArgument for anything else.
 Result<ServiceOptions> parseArguments(const std::vector<std::string>& arguments);
 

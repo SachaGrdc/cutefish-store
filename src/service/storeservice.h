@@ -12,6 +12,7 @@
 // The service holds a Backend (backend.h) without knowing which one: main
 // creates it. Its installed state and updates are kept by an Inventory.
 
+#include "backends.h"
 #include "inventory.h"
 #include "transactionmanager.h"
 #include "lifecycle.h"
@@ -33,15 +34,16 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace cutefish::store::service {
 
 class StoreService
 {
 public:
-    /// `backend` may be null: the service then only reads the catalogue.
+    /// `backends` may be empty: the service then only reads the catalogue.
     StoreService(base::EventLoop& loop, base::dbus::Connection& connection, ServiceOptions options,
-                 std::unique_ptr<Backend> backend = nullptr);
+                 std::vector<std::unique_ptr<Backend>> backends = {});
     ~StoreService();
 
     /// Opens state.sqlite (recovery of the journal), publishes the object,
@@ -65,8 +67,13 @@ private:
     bool cancelRefresh();
     bool refreshCancellable() const;
     void setGeneration(std::uint64_t generation);
-    /// The backend that handles this offer and is usable, or the D-Bus error.
-    Result<void> actionBackend(const OfferId& offer) const;
+    /// The inventory whose backend handles this offer and is usable, or the
+    /// D-Bus error. Never falls back to another backend (H.1).
+    Result<Inventory*> actionInventory(const OfferId& offer) const;
+    /// The backend that refreshes the repositories, if any usable one does.
+    Backend* refreshBackend() const;
+    /// The sum of every backend's application updates (H.2 refines this).
+    std::uint32_t updateCount() const;
     void exportActions();
     void refreshDone(Result<RefreshOutcome> result, RefreshTransaction* transaction);
     std::string newTransaction();
@@ -84,11 +91,9 @@ private:
     Refresher m_refresher;
     Lifecycle m_lifecycle;
     std::unique_ptr<base::dbus::Object> m_object;
-    std::unique_ptr<Backend> m_backend;
-    // Declared after the object and the backend: destroyed before them,
-    // since they use both. The manager is created by start(), once
-    // state.sqlite is open.
-    std::unique_ptr<Inventory> m_inventory;
+    /// One backend and one inventory per BackendKind (H.1). Destroyed after
+    /// the manager and the object, which use them.
+    Backends m_backends;
     std::unique_ptr<TransactionManager> m_manager;
     std::vector<TransactionRecord> m_toReattach;
 
