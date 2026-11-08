@@ -750,6 +750,40 @@ TEST(ServiceTransactions, ARunningTransactionLostByTheBackendIsInterrupted)
     EXPECT_EQ(p.calls("InstallPackages"), 1); // nothing new was executed
 }
 
+TEST(ServiceTransactions, APlanningTransactionIsInterruptedAfterARestart)
+{
+    // A plan that was still being computed cannot be resumed: the service
+    // must not publish it again, and the journal must say interrupted.
+    PkBus p;
+    p.fake->answer("GetPackages", installed({}));
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer stuck;
+    stuck.hang = true; // the simulation never answers
+    p.fake->answer("InstallPackages", stuck, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "planning"));
+    const std::string id = p.b.transaction(t).property<std::string>("Id").value();
+
+    ASSERT_TRUE(p.b.stopService());
+    p.fake->stop();
+    p.fake->start();
+    ASSERT_TRUE(p.b.restartService());
+
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        const auto entry = journalEntry(p.b, id);
+        return entry && entry->at("state").value<std::string>() == "interrupted";
+    }));
+    const auto journal = journalEntry(p.b, id);
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "interrupted");
+    EXPECT_TRUE(journal->at("finished").value<std::uint64_t>() > 0);
+    EXPECT_FALSE(transactionPathById(p.b, id).has_value()); // nothing to follow
+    EXPECT_EQ(p.calls("InstallPackages"), 0);
+}
+
 TEST(ServiceTransactions, ARunningTransactionCanBeCancelledThroughDBus)
 {
     PkBus p;
@@ -771,11 +805,20 @@ TEST(ServiceTransactions, ARunningTransactionCanBeCancelledThroughDBus)
         return p.b.transaction(t).property<bool>("Cancellable") == std::optional<bool>(true);
     }));
     const std::string id = p.b.transaction(t).property<std::string>("Id").value();
+    std::optional<std::string> finishedState;
+    auto match = p.b.client->subscribe(rule(t, kTransaction, "Finished"), [&](const dbus::Message& m) {
+        std::string state;
+        std::string code;
+        std::string message;
+        if (m.read(state, code, message))
+            finishedState = state;
+    });
 
     const dbus::Reply cancelled = p.b.transaction(t).call("Cancel");
     EXPECT_FALSE(cancelled.isError()) << errorName(cancelled);
     ASSERT_TRUE(waitFinished(p.b, t));
     EXPECT_EQ(transactionState(p.b, t), "cancelled");
+    EXPECT_EQ(finishedState, std::optional<std::string>("cancelled"));
     EXPECT_EQ(p.fake->cancels(), 1);
     EXPECT_EQ(p.calls("InstallPackages"), 1); // only the real transaction that was cancelled
     const auto journal = journalEntry(p.b, id);
@@ -898,6 +941,11 @@ TEST(ServiceTransactions, TwoModifyingTransactionsRunOneAfterTheOther)
     EXPECT_NE(order[0].find("gimp"), std::string::npos) << order[0];
     EXPECT_NE(order[1].find("example-editor"), std::string::npos) << order[1];
     EXPECT_EQ(p.fake->maxConcurrent(), 1);
+    for (const std::string& path : {first, second}) {
+        const auto journal = journalEntry(p.b, p.b.transaction(path).property<std::string>("Id").value());
+        ASSERT_TRUE(journal);
+        EXPECT_EQ(journal->at("state").value<std::string>(), "succeeded");
+    }
 }
 
 TEST(ServiceTransactions, TwoAwaitingConfirmationsReleaseTheLaneInTurn)
@@ -954,6 +1002,11 @@ TEST(ServiceTransactions, TwoAwaitingConfirmationsReleaseTheLaneInTurn)
     EXPECT_NE(order[0].find("example-tool"), std::string::npos) << order[0];
     EXPECT_NE(order[1].find("gimp"), std::string::npos) << order[1];
     EXPECT_EQ(p.fake->maxConcurrent(), 1);
+    for (const std::string& path : {first, second}) {
+        const auto journal = journalEntry(p.b, p.b.transaction(path).property<std::string>("Id").value());
+        ASSERT_TRUE(journal);
+        EXPECT_EQ(journal->at("state").value<std::string>(), "succeeded");
+    }
 }
 
 TEST(ServiceTransactions, AWaitingConfirmationDoesNotBlockTheBackend)
@@ -1053,7 +1106,9 @@ TEST(ServiceTransactions, UpdateAllParentConfirmationReachesItsChild)
     ASSERT_TRUE(waitFinished(p.b, parent));
     EXPECT_EQ(transactionState(p.b, parent), "succeeded");
     EXPECT_EQ(p.calls("UpdatePackages"), 1);
-    EXPECT_TRUE(journalEntry(p.b, p.b.transaction(child).property<std::string>("Id").value()).has_value());
+    const auto childJournal = journalEntry(p.b, p.b.transaction(child).property<std::string>("Id").value());
+    ASSERT_TRUE(childJournal);
+    EXPECT_EQ(childJournal->at("state").value<std::string>(), "succeeded");
     EXPECT_FALSE(journalEntry(p.b, p.b.transaction(parent).property<std::string>("Id").value()).has_value());
 }
 
@@ -1127,6 +1182,10 @@ TEST(ServiceTransactions, UpdateAllParentFailsWhenItsChildFails)
     EXPECT_EQ(transactionState(p.b, parent), "failed"); // never a global success
     EXPECT_NE(transactionError(p.b, parent).find("auth-denied"), std::string::npos) << transactionError(p.b, parent);
     EXPECT_EQ(p.calls("UpdatePackages"), 1);
+    const auto childJournal = journalEntry(p.b, p.b.transaction(child).property<std::string>("Id").value());
+    ASSERT_TRUE(childJournal);
+    EXPECT_EQ(childJournal->at("state").value<std::string>(), "failed");
+    EXPECT_FALSE(journalEntry(p.b, p.b.transaction(parent).property<std::string>("Id").value()).has_value());
 }
 
 TEST(ServiceTransactions, UpdateAllIsAParentOfOneChildPerBackend)
