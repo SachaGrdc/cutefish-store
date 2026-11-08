@@ -478,6 +478,14 @@ std::optional<dbus::VariantMap> journalEntry(Bus& b, const std::string& id)
     return std::nullopt;
 }
 
+int simulatedCalls(const PkBus& p, const std::string& method)
+{
+    const auto calls = p.fake->calls();
+    return static_cast<int>(std::count_if(calls.begin(), calls.end(), [&](const fakepk::Call& c) {
+        return c.method == method && c.simulate();
+    }));
+}
+
 } // namespace
 
 TEST(ServiceTransactions, AnInstallWithoutConfirmationRuns)
@@ -714,6 +722,103 @@ TEST(ServiceTransactions, ARunningTransactionLostByTheBackendIsInterrupted)
     EXPECT_EQ(journal->at("state").value<std::string>(), "interrupted");
     EXPECT_TRUE(journal->at("finished").value<std::uint64_t>() > 0);
     EXPECT_EQ(p.calls("InstallPackages"), 1); // nothing new was executed
+}
+
+TEST(ServiceTransactions, ARunningTransactionCanBeCancelledThroughDBus)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer plan;
+    plan.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", plan, true);
+    p.fake->answer("InstallPackages", plan, true);
+    Answer real = plan;
+    for (int i = 0; i < 200; ++i)
+        real.steps.push_back(Step{.status = pk::Status::Install, .percentage = static_cast<std::uint32_t>(i), .allowCancel = true});
+    p.fake->answer("InstallPackages", real, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "running"));
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        return p.b.transaction(t).property<bool>("Cancellable") == std::optional<bool>(true);
+    }));
+    const std::string id = p.b.transaction(t).property<std::string>("Id").value();
+
+    const dbus::Reply cancelled = p.b.transaction(t).call("Cancel");
+    EXPECT_FALSE(cancelled.isError()) << errorName(cancelled);
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "cancelled");
+    EXPECT_EQ(p.fake->cancels(), 1);
+    EXPECT_EQ(p.calls("InstallPackages"), 1); // only the real transaction that was cancelled
+    const auto journal = journalEntry(p.b, id);
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "cancelled");
+    EXPECT_TRUE(journal->at("finished").value<std::uint64_t>() > 0);
+}
+
+TEST(ServiceTransactions, ARunningTransactionThatCannotBeCancelledIsNotReportedAsCancelled)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer plan;
+    plan.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", plan, true);
+    p.fake->answer("InstallPackages", plan, true);
+    Answer real = plan;
+    for (int i = 0; i < 100; ++i)
+        real.steps.push_back(Step{.status = pk::Status::Commit, .percentage = static_cast<std::uint32_t>(i), .allowCancel = false});
+    p.fake->answer("InstallPackages", real, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "running"));
+    EXPECT_EQ(p.b.transaction(t).property<bool>("Cancellable"), std::optional<bool>(false));
+
+    // PackageKit said AllowCancel=false: the request must be refused, not
+    // acknowledged and lost.
+    EXPECT_EQ(errorName(p.b.transaction(t).call("Cancel")), "org.cutefish.Store1.Error.NotAllowed");
+    EXPECT_EQ(p.fake->cancels(), 0);
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "succeeded"); // it ran to completion
+    const auto journal = journalEntry(p.b, p.b.transaction(t).property<std::string>("Id").value());
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "succeeded");
+    EXPECT_EQ(p.calls("InstallPackages"), 1);
+}
+
+TEST(ServiceTransactions, ACancellationDuringTheSecondSimulationExecutesNothing)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer plan;
+    plan.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", plan, true); // first simulation
+    Answer slow = plan;
+    for (int i = 0; i < 200; ++i)
+        slow.steps.push_back(Step{.status = pk::Status::Install, .percentage = static_cast<std::uint32_t>(i), .allowCancel = true});
+    p.fake->answer("InstallPackages", slow, true); // second simulation, before execution
+    p.fake->answer("InstallPackages", plan, false); // must never be reached
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    // No confirmation here: after the accepted first plan, execute() starts
+    // its own simulation. Cancel while that second simulation runs.
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        return transactionState(p.b, t) == "planning" && simulatedCalls(p, "InstallPackages") >= 2;
+    }));
+    const dbus::Reply cancelled = p.b.transaction(t).call("Cancel");
+    EXPECT_FALSE(cancelled.isError()) << errorName(cancelled);
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "cancelled");
+    EXPECT_EQ(p.calls("InstallPackages"), 0); // no real transaction
+    EXPECT_EQ(simulatedCalls(p, "InstallPackages"), 2);
+    const auto journal = journalEntry(p.b, p.b.transaction(t).property<std::string>("Id").value());
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "cancelled");
 }
 
 TEST(ServiceTransactions, AWaitingConfirmationDoesNotBlockTheBackend)
