@@ -381,6 +381,39 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   conservé pendant l'attente. Le cœur n'a pas d'horloge : le service appelle
   `Transaction::cancel()` à l'échéance.
 
+### D-020 — Sources du service v0.1 : fichier de configuration
+
+- **Statut** : Validée (propriétaire, étape E).
+- **Décision** : tant que les backends ne fournissent pas
+  `Backend::catalogSources()` (étapes F et G), le service lit les sources à
+  indexer dans un fichier déclaratif,
+  `$XDG_CONFIG_HOME/cutefish-store/sources.conf` : une source par ligne, dans
+  la syntaxe de l'option `--source` de l'indexeur. Aucune logique propre à
+  une distribution ou à Flatpak dans le service. Sans fichier, aucune
+  source : le service est `degraded` tant qu'aucun catalogue n'existe.
+- **Écartés** : la découverte intégrée (`/var/lib/swcatalog`,
+  `/var/lib/flatpak/appstream`), qui dupliquerait la logique des backends ;
+  l'absence de rafraîchissement.
+
+### D-021 — `Refresh` du service v0.1 : objet de transaction non journalisé
+
+- **Statut** : Validée (propriétaire, étape E).
+- **Décision** : `Refresh` garde la signature d'ARCHITECTURE §5.2 et rend le
+  chemin d'un objet `org.cutefish.Store1.Transaction` de type `refresh`
+  (états `running`, puis `succeeded`, `failed` ou `cancelled`), publié
+  5 minutes après sa fin. Il n'est **pas** écrit dans le journal, dont les
+  transactions sont `install`, `remove`, `update` (D-018). Sans backend, le
+  rafraîchissement relit les fichiers de métadonnées déjà sur le disque.
+
+### D-022 — Service v0.1 : aucune méthode qui ne peut pas fonctionner
+
+- **Statut** : Validée (propriétaire, étape E).
+- **Décision** : `Install`, `Remove`, `Update`, `UpdateAll`, `EnableSource`,
+  `DisableSource`, `GetUpdates`, `GetPermissions`, ainsi que la propriété
+  `UpdateCount` et le signal `UpdatesChanged`, ne sont pas exportés tant que
+  les backends n'existent pas. L'introspection ne montre que ce qui
+  fonctionne ; un appel reçoit `UnknownMethod`.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de

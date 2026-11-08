@@ -40,6 +40,7 @@ Renvois : « A §x.y » désigne une section d'[ARCHITECTURE.md](ARCHITECTURE.md
 13. [Décisions](#13-décisions)
 14. [Écarts avec le cœur actuel](#14-écarts-avec-le-cœur-actuel)
 15. [Plan d'implémentation](#15-plan-dimplémentation)
+16. [Service v0.1 (étape E)](#16-service-v01-étape-e)
 
 ---
 
@@ -1109,3 +1110,89 @@ virtuelle.
 Le Refresh manuel (E) précède l'automatique (I) : la mécanique
 d'actualisation (backends, indexeur, remplacement, fusion des demandes) est
 écrite une fois, puis seulement déclenchée autrement.
+
+## 16. Service v0.1 (étape E)
+
+Implémenté dans `src/service/` (`cutefish-store-service`, bibliothèque
+`store-service`), en lecture seule envers les gestionnaires de paquets
+(D-020 à D-022). Le cœur ne dépend pas du service ; seule cette couche
+utilise Cutefish Toolkit (P-006).
+
+### 16.1 API réellement exportée
+
+`/org/cutefish/Store`, `org.cutefish.Store1` :
+
+| Membre | Type | État |
+|---|---|---|
+| `Search`, `Browse`, `ListCategories`, `GetSummaries`, `GetDetails` | Méthodes | Catalogue, avec `state.sqlite` attachée (`installed`, `installed-only`) |
+| `GetInstalled`, `GetTransactionHistory` | Méthodes | `state.sqlite` ; vides tant qu'aucun backend ne les remplit |
+| `ListSources` | Méthode | Sources du catalogue, avec `offers` et `last-refresh` ; `can-toggle` faux |
+| `ListTransactions` | Méthode | Transactions `refresh` encore publiées |
+| `Refresh` (`force` `b`) | Méthode | Relit les fichiers de métadonnées sur le disque (D-021) |
+| `Version`, `State`, `CatalogGeneration`, `Backends`, `Refreshing`, `LastRefresh` | Propriétés | `Backends` vide (aucun backend) |
+| `CatalogChanged`, `InstalledChanged`, `TransactionAdded`, `TransactionRemoved`, `SourcesChanged` | Signaux | `InstalledChanged` déclaré, jamais émis en v0.1 |
+
+Non exportés (D-022) : `Install`, `Remove`, `Update`, `UpdateAll`,
+`EnableSource`, `DisableSource`, `GetUpdates`, `GetPermissions`,
+`UpdateCount`, `UpdatesChanged`, `ImagesReady`, `ImagesFailed`.
+
+Transaction `refresh` (`org.cutefish.Store1.Transaction`) : toutes les
+propriétés d'ARCHITECTURE §5.3 (`Kind` = `refresh`, `Backend` = `multiple`,
+`Phase` vide, `Progress` −1, `Plan` vide), `Cancel` (seulement avant la mise
+en service du candidat), `Confirm` (toujours `NotAllowed`), signal
+`Finished`. Publiée 5 minutes après sa fin, puis `TransactionRemoved`.
+
+### 16.2 Threads
+
+| Thread | Rôle |
+|---|---|
+| Principal (`base::EventLoop`) | D-Bus, cycle de vie, écritures de `state.sqlite` (au démarrage et après un rafraîchissement) |
+| Pool de lecture (2, `base::ThreadPool`) | Chaque thread : `SqliteCatalog` avec `state.sqlite` attachée, `SqliteInstalledState`, et un `StateStore` pour lire le journal ; rouverts à chaque nouvelle génération |
+| Travaux disque (1) | Lecture de `sources.conf`, sondes et empreintes, `replaceCatalog` (fsync, renommage) |
+| Indexeur | Processus séparé (`base::Process`), jamais attendu de façon bloquante |
+
+Les méthodes de lecture répondent plus tard depuis le thread principal
+(`MethodCall` copiée). Seule exception assumée au §2.2 : l'ouverture de
+`state.sqlite` et la reprise du journal se font au démarrage, avant que le
+nom soit pris (§3.1).
+
+### 16.3 Cycle de vie
+
+- Activation par le bus (`org.cutefish.Store.service`, avec
+  `SystemdService=cutefish-store.service`) ; unité systemd utilisateur
+  `Type=dbus`. Fichiers installés, jamais exécutés par la construction ni les
+  tests.
+- Démarrage : `state.sqlite` (migrations, reprise), publication de l'objet,
+  puis `requestName` sans file d'attente : une seconde instance se termine
+  avec le code 1. La génération du catalogue est lue dans le pool ; sans
+  catalogue, `State` = `indexing` et import initial (sans objet de
+  transaction) ; en cas d'échec, `degraded`.
+- Clients connus : tout appelant d'une méthode, suivi par `watchName` sur son
+  nom unique. Arrêt 5 minutes après le départ du dernier client, jamais
+  pendant un rafraîchissement. Le service s'arrête aussi si le bus disparaît
+  (signal local `Disconnected`).
+- Rafraîchissement (D-015, D-021) : une seule à la fois, une demande pendant
+  un rafraîchissement rend le même chemin ; rien de changé et pas de
+  `force` : succès sans réimport ; source importée absente ou illisible :
+  échec `not-found`, catalogue en service conservé. `LastRefresh` est écrite
+  après chaque succès, y compris sans changement (le catalogue en service est
+  alors à jour).
+
+### 16.4 Limites et points non vérifiés
+
+- Un client qui ne fait que lire des propriétés (`Get`, `GetAll`) n'est pas
+  compté comme client : les accesseurs de propriétés de Cutefish Toolkit ne
+  donnent pas l'appelant. L'interface appelle des méthodes dès son
+  démarrage.
+- Langue de lecture : celle de l'environnement au démarrage (`LANGUAGE`,
+  `LC_ALL`, `LC_MESSAGES`, `LANG`) ; le suivi de `SessionLanguage` viendra
+  avec l'interface.
+- `GetDetails` ne contient que ce que le catalogue stocke (pas de captures,
+  versions publiées, URL, licence : Q-7).
+- Pas de regroupement des `PropertiesChanged` (10 par seconde) : aucune
+  propriété ne change souvent en v0.1.
+- Pas de rafraîchissement automatique, de `Metered` ni de minuterie systemd
+  (étape I).
+- Activation testée sur un bus privé, **sans systemd** ; l'activation par
+  `SystemdService` sur une vraie session n'est pas testée.
+- Mesures de latence par D-Bus (P-004, p95 < 50 ms visé) non faites.
