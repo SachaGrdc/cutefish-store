@@ -18,6 +18,8 @@ There is no user interface or Flatpak backend yet.
 - Catalogue and indexer: [docs/CATALOG.md](docs/CATALOG.md)
 - D-Bus service: [docs/SERVICE.md](docs/SERVICE.md), §16 for what v0.1
   does, §17 for the PackageKit backend
+- Working on the project (state, owner's rules, commands):
+  [AGENTS.md](AGENTS.md)
 
 ## Build and test
 
