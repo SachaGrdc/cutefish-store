@@ -91,11 +91,18 @@ TEST(ServiceBus, InitialImportThenReady)
 
 TEST(ServiceBus, NotReadyBeforeTheFirstCatalogue)
 {
-    Bus b({.indexerDelay = 2});
+    // The indexer is held until the test releases it: the state is
+    // observable, not a fixed delay that a loaded machine can outrun.
+    Bus b({.blockIndexer = true});
+    ASSERT_TRUE(b.waitUntil([&] { return b.property<std::string>("State") == std::optional<std::string>("indexing"); }));
     const dbus::Reply r = b.store().call("Search", std::string("gimp"), dbus::VariantMap{});
     EXPECT_EQ(errorName(r), "org.cutefish.Store1.Error.NotReady");
     EXPECT_EQ(b.property<std::string>("State"), std::optional<std::string>("indexing"));
     EXPECT_EQ(b.property<bool>("Refreshing"), std::optional<bool>(true));
+    {
+        std::ofstream release(b.indexerRelease());
+        release << "go\n";
+    }
     ASSERT_TRUE(b.waitReady());
 }
 

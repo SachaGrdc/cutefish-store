@@ -48,6 +48,9 @@ struct ServiceSetup
     std::chrono::milliseconds retention = 60s;
     /// Seconds the indexer waits before working (a slow refresh).
     int indexerDelay = 0;
+    /// The indexer waits for a release file instead of a fixed delay, so that
+    /// a test can synchronise on a state instead of on the clock.
+    bool blockIndexer = false;
     std::chrono::milliseconds confirmationTimeout = 60s;
     /// --packagekit: `off` so that no test reaches the system's packagekitd;
     /// `session` for a simulated one on the test's bus (fakepackagekit.h).
@@ -70,7 +73,7 @@ public:
         std::filesystem::copy_file(std::filesystem::path(SERVICE_TEST_DATA) / "flathub.xml", dir / "flathub.xml");
         writeSources(true, setup.debianInFile);
         std::filesystem::create_directories(dir / "swcatalog" / "yaml");
-        writeIndexer(setup.indexerDelay);
+        writeIndexer(setup);
         writeServiceFile(setup);
         writeConfig();
         startDaemon();
@@ -158,6 +161,32 @@ public:
         return true;
     }
 
+    /// Stops the service as a crash would (SIGTERM, no shutdown bookkeeping),
+    /// keeping the bus and the simulated backends alive for a restart.
+    bool stopService(std::chrono::milliseconds timeout = 10s)
+    {
+        const auto pid = servicePid();
+        if (!pid)
+            return false;
+        ::kill(static_cast<pid_t>(*pid), SIGTERM);
+        if (waitUntil([this] { return !servicePid().has_value(); }, timeout))
+            return true;
+        ::kill(static_cast<pid_t>(*pid), SIGKILL);
+        return waitUntil([this] { return !servicePid().has_value(); }, timeout);
+    }
+
+    /// Activates the service again on the same files (journal included).
+    bool restartService()
+    {
+        // A harmless read: it activates the service but changes nothing.
+        (void)store().call("ListTransactions");
+        return waitUntil([this] { return servicePid().has_value(); });
+    }
+
+    /// The file whose creation releases an indexer started with
+    /// `blockIndexer`.
+    std::filesystem::path indexerRelease() const { return dir / "indexer-release"; }
+
     /// Activates the service if needed and waits for a catalogue.
     bool waitReady()
     {
@@ -169,15 +198,21 @@ public:
     std::unique_ptr<dbus::Connection> client;
 
 private:
-    void writeIndexer(int delay)
+    void writeIndexer(const ServiceSetup& s)
     {
-        // A wrapper, so that a test can make the refresh slow.
+        // A wrapper, so that a test can make the refresh slow or hold it.
         const auto path = dir / "indexer.sh";
         std::ofstream out(path);
         out << "#!/bin/sh\n";
         // `wait` returns at once on SIGTERM, as the real indexer would stop.
-        if (delay > 0)
-            out << "trap 'exit 143' TERM\nsleep " << delay << " &\nwait $!\n";
+        out << "trap 'exit 143' TERM\n";
+        if (s.blockIndexer) {
+            // Observable synchronisation: no fixed delay to race with.
+            out << "while [ ! -e '" << (dir / "indexer-release").string()
+                << "' ] && kill -0 $PPID 2>/dev/null; do sleep 0.02; done\n";
+        } else if (s.indexerDelay > 0) {
+            out << "sleep " << s.indexerDelay << " &\nwait $!\n";
+        }
         out << "exec '" << INDEXER_BINARY << "' \"$@\"\n";
         out.close();
         ::chmod(path.c_str(), 0755);

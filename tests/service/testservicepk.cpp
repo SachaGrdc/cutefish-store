@@ -456,6 +456,28 @@ bool waitState(Bus& b, const std::string& path, const std::string& state)
     return b.waitUntil([&] { return transactionState(b, path) == state; });
 }
 
+std::optional<std::string> transactionPathById(Bus& b, const std::string& id)
+{
+    std::vector<dbus::ObjectPath> paths;
+    if (!b.store().call("ListTransactions").read(paths))
+        return std::nullopt;
+    for (const dbus::ObjectPath& path : paths)
+        if (b.transaction(path.path).property<std::string>("Id") == std::optional<std::string>(id))
+            return path.path;
+    return std::nullopt;
+}
+
+std::optional<dbus::VariantMap> journalEntry(Bus& b, const std::string& id)
+{
+    std::vector<dbus::VariantMap> entries;
+    if (!b.store().call("GetTransactionHistory", std::uint32_t(20)).read(entries))
+        return std::nullopt;
+    for (const dbus::VariantMap& entry : entries)
+        if (entry.at("id").value<std::string>() == id)
+            return entry;
+    return std::nullopt;
+}
+
 } // namespace
 
 TEST(ServiceTransactions, AnInstallWithoutConfirmationRuns)
@@ -589,6 +611,109 @@ TEST(ServiceTransactions, AnUnansweredConfirmationExpires)
     ASSERT_TRUE(waitFinished(p.b, t));
     EXPECT_EQ(transactionState(p.b, t), "cancelled");
     EXPECT_EQ(p.calls("RemovePackages"), 0);
+}
+
+TEST(ServiceTransactions, ARunningTransactionIsReattachedAfterARestart)
+{
+    // StoreService::start() → recoverAfterRestart() → TransactionManager::recover():
+    // the journal of a real previous service instance, read back after SIGTERM.
+    PkBus p;
+    p.fake->answer("GetPackages", installed({}));
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer plan;
+    plan.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", plan, true); // first simulation
+    p.fake->answer("InstallPackages", plan, true); // before execution
+    Answer real = plan;
+    real.hold = true; // packagekitd keeps running it after the service dies
+    real.steps = {Step{.status = pk::Status::Install, .percentage = 20, .allowCancel = true}};
+    p.fake->answer("InstallPackages", real, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "running"));
+    // A progress value proves the backend handle was journaled before it: the
+    // handle event is posted before progress.
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        return p.b.transaction(t).property<bool>("Cancellable") == std::optional<bool>(true);
+    }));
+    const std::string id = p.b.transaction(t).property<std::string>("Id").value();
+    const auto running = p.fake->runningTransactions();
+    ASSERT_EQ(running.size(), 1u);
+    const std::string backendRef = running.front();
+    EXPECT_EQ(p.calls("InstallPackages"), 1); // exactly one real transaction
+
+    ASSERT_TRUE(p.b.stopService());
+    ASSERT_TRUE(p.b.restartService());
+
+    std::string recovered;
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        const auto path = transactionPathById(p.b, id);
+        if (!path)
+            return false;
+        recovered = *path;
+        return transactionState(p.b, recovered) == "running";
+    }));
+    EXPECT_EQ(p.b.transaction(recovered).property<std::string>("Kind"), std::optional<std::string>("install"));
+    EXPECT_EQ(p.b.transaction(recovered).property<std::string>("Backend"), std::optional<std::string>("packagekit"));
+    EXPECT_EQ(p.calls("InstallPackages"), 1); // recovery did not start another one
+
+    ASSERT_TRUE(p.fake->finish(backendRef, pk::Exit::Success));
+    ASSERT_TRUE(waitFinished(p.b, recovered));
+    EXPECT_EQ(transactionState(p.b, recovered), "succeeded");
+    const auto journal = journalEntry(p.b, id);
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "succeeded");
+    EXPECT_TRUE(journal->at("finished").value<std::uint64_t>() > 0);
+}
+
+TEST(ServiceTransactions, ARunningTransactionLostByTheBackendIsInterrupted)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({}));
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer plan;
+    plan.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", plan, true);
+    p.fake->answer("InstallPackages", plan, true);
+    Answer real = plan;
+    real.hold = true;
+    real.steps = {Step{.status = pk::Status::Install, .percentage = 20, .allowCancel = true}};
+    p.fake->answer("InstallPackages", real, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "running"));
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        return p.b.transaction(t).property<bool>("Cancellable") == std::optional<bool>(true);
+    }));
+    const std::string id = p.b.transaction(t).property<std::string>("Id").value();
+    ASSERT_EQ(p.fake->runningTransactions().size(), 1u);
+
+    ASSERT_TRUE(p.b.stopService());
+    // packagekitd restarted too, or was killed: it no longer knows the
+    // transaction. The journal's backend handle now points nowhere.
+    p.fake->stop();
+    p.fake->start();
+    ASSERT_TRUE(p.b.restartService());
+
+    std::string recovered;
+    ASSERT_TRUE(p.b.waitUntil([&] {
+        const auto path = transactionPathById(p.b, id);
+        if (!path)
+            return false;
+        recovered = *path;
+        return transactionState(p.b, recovered) == "interrupted";
+    }));
+    EXPECT_EQ(transactionState(p.b, recovered), "interrupted");
+    EXPECT_TRUE(p.b.transaction(recovered).property<dbus::VariantMap>("Error").value_or(dbus::VariantMap{}).empty());
+    const auto journal = journalEntry(p.b, id);
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "interrupted");
+    EXPECT_TRUE(journal->at("finished").value<std::uint64_t>() > 0);
+    EXPECT_EQ(p.calls("InstallPackages"), 1); // nothing new was executed
 }
 
 TEST(ServiceTransactions, AWaitingConfirmationDoesNotBlockTheBackend)

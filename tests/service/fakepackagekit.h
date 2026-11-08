@@ -59,6 +59,9 @@ struct Answer
     std::string dbusError = {};
     /// Never finishes (for the timeouts).
     bool hang = false;
+    /// Runs its steps, then stays running until finish() is called (a
+    /// transaction that outlives the service, for re-attachment).
+    bool hold = false;
 };
 
 struct Call
@@ -144,6 +147,41 @@ public:
         return future.get();
     }
 
+    /// The transactions the daemon is still running (GetTransactionList).
+    /// Asks its own loop, like any other client.
+    std::vector<std::string> runningTransactions()
+    {
+        std::promise<std::vector<std::string>> result;
+        auto future = result.get_future();
+        run([this, &result] {
+            std::vector<std::string> paths;
+            for (const auto& [path, transaction] : m_transactions)
+                if (transaction->running())
+                    paths.push_back(path);
+            result.set_value(std::move(paths));
+        });
+        return future.get();
+    }
+
+    /// Ends a transaction started with `hold`, as packagekitd would when the
+    /// work finishes. False when the daemon no longer has it.
+    bool finish(const std::string& path, pk::Exit exit = pk::Exit::Success,
+                std::optional<std::uint32_t> error = std::nullopt)
+    {
+        std::promise<bool> result;
+        auto future = result.get_future();
+        run([this, path, exit, error, &result] {
+            const auto it = m_transactions.find(path);
+            if (it == m_transactions.end()) {
+                result.set_value(false);
+                return;
+            }
+            it->second->finishNow(exit, error);
+            result.set_value(true);
+        });
+        return future.get();
+    }
+
     /// The daemon goes away: name released, connection closed.
     void stop()
     {
@@ -219,6 +257,18 @@ private:
 
         bool running() const { return !m_finished; }
 
+        /// Ends a held transaction, as the daemon would when its work ends.
+        void finishNow(pk::Exit exit, std::optional<std::uint32_t> error)
+        {
+            if (m_finished)
+                return;
+            m_answer.exit = exit;
+            m_answer.error = error;
+            m_answer.steps.clear();
+            m_answer.hold = false;
+            end();
+        }
+
         void begin(Call call, Answer a)
         {
             m_answer = std::move(a);
@@ -287,6 +337,8 @@ private:
                     m_object.emitSignal("ItemProgress", s.item, static_cast<std::uint32_t>(s.status), s.percentage);
                 return;
             }
+            if (m_answer.hold)
+                return;
             end();
         }
 
