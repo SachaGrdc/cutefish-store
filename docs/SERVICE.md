@@ -1105,10 +1105,12 @@ choix d'une offre : la séparation demandée existe dans le code, il reste à
 
 Chaque étape compile, a ses tests, ne dépend que des précédentes et peut être
 validée seule. **État** : A à F faites et validées ; F2 implémentée et
-testée contre le PackageKit simulé (§18), à valider par le propriétaire ;
-la suivante est G. Aucune n'exige de commande root sur la machine de
-développement ; les étapes marquées « VM » se testent dans une machine
-virtuelle.
+testée contre le PackageKit simulé (§18), à valider par le propriétaire ; le
+backend Flatpak est implémenté (§19) et **raccordé au service** par un
+registre multi-backends (H.1, §20) ; l'intégration multi-backends des
+lectures, des mises à jour et des sources (H.2–H.8) reste à faire. Aucune
+étape n'exige de commande root sur la machine de développement ; les étapes
+marquées « VM » se testent dans une machine virtuelle.
 
 | Étape | Contenu | Tests | Prérequis |
 |---|---|---|---|
@@ -1120,7 +1122,7 @@ virtuelle.
 | **F. Backend PackageKit** (fait, §17) | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) ; intégration au service en lecture (D-025) | Faux PackageKit sur bus privé ; requêtes et simulations contre le vrai démon (D-026) ; VM pour les transactions réelles (non fait) | E ; Q-9 à Q-11 |
 | **F2. Gestionnaire de transactions** (fait, §18, à valider) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | PackageKit simulé, y compris reprise, annulations, files et parente `UpdateAll` ; gestionnaire générique avec deux faux backends pour l'échec partiel ; VM pour les transactions réelles | F |
 | **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
-| **G2. Backend Flatpak (implémenté, non intégré)** | `store-backend-flatpak` : logique pure, magasin `FlatpakStore` (libflatpak), `FlatpakBackend` sur un thread de travail ; voir §19 | Tests de la logique pure et du backend sur un faux magasin ; la vraie installation se teste en VM | G (backend seul ; l'intégration multi-backends est l'étape suivante) |
+| **G2. Backend Flatpak (implémenté, intégré)** | `store-backend-flatpak` : logique pure, magasin `FlatpakStore` (libflatpak), `FlatpakBackend` sur un thread de travail ; voir §19. Raccordé au service par le registre multi-backends (§20) | Tests de la logique pure et du backend sur un faux magasin ; la vraie installation se teste en VM | G |
 | **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
 | **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
 
@@ -1493,22 +1495,22 @@ déclarent. Le résumé de risque (`risk`) reste du ressort du service
   applications ne sont donc jamais proposées depuis lui). Aucune base
   parallèle ; les versions et licences viennent de l'AppStream, jamais
   fabriquées.
-- **Non raccordé** : le service n'utilise pas encore ce backend ; `sources()`
-  et `EnableSource`/`DisableSource` restent absents de l'API (D-022), et
-  l'ajout de la remote Flathub (P-011, encore proposée) ne se fait jamais
-  silencieusement : `addRemote` n'est appelé que sur consentement explicite.
+- **Raccordé au service** (H.1, §20) : le backend est enregistré dans le
+  registre, son inventaire est maintenu et la propriété `Backends` le montre.
+  Restent hors de l'API : `sources()` et `EnableSource`/`DisableSource`
+  (D-022), et l'ajout de la remote Flathub (P-011, encore proposée) ne se fait
+  jamais silencieusement : `addRemote` n'est appelé que sur consentement
+  explicite.
 - **Surveillance des changements externes** : `setChangeListener` ne pose pas
   de moniteur d'installation (`flatpak_installation_create_monitor` demande
   un `GMainContext`). Sans moniteur, un `flatpak install/remove` fait en
   ligne de commande n'est pas répercuté immédiatement : l'état ne serait
-  relu qu'au rafraîchissement et après une transaction du service. Cette
-  limitation est sans effet tant que le backend n'est pas raccordé au
-  service ; le moniteur est à ajouter à l'intégration (H), quand l'inventaire
-  du service s'appuiera sur ce backend. Coût d'un moniteur par installation :
-  un `GMainContext` et un `GFileMonitor` ; bénéfice : réconciliation sans
-  rafraîchissement manuel. Sans lui, le risque est un `GetInstalled`/`GetUpdates`
-  périmé jusqu'au prochain rafraîchissement, pas une incohérence du
-  catalogue ni une opération erronée.
+  relu qu'au rafraîchissement et après une transaction du service. Le
+  moniteur est prévu à l'intégration (H.6). Coût d'un moniteur par
+  installation : un `GMainContext` et un `GFileMonitor` ; bénéfice :
+  réconciliation sans rafraîchissement manuel. Sans lui, le risque est un
+  `GetInstalled`/`GetUpdates` périmé jusqu'au prochain rafraîchissement, pas
+  une incohérence du catalogue ni une opération erronée.
 - **À vérifier en VM** : toute transaction réelle, le dialogue polkit de
   `flatpak-system-helper` pour l'installation système, et les remotes GPG/HTTP.
 
@@ -1525,4 +1527,62 @@ seconde passe, refus d'un ajout de remote (à la planification et à
 l'exécution, sans déploiement), ajout/suppression/activation d'un remote par
 la seule voie explicite, correspondance des erreurs et annulation. Aucun
 test ne touche une installation Flatpak réelle.
+
+## 20. Intégration multi-backends (H.1 : registre et sélection)
+
+Le service porte désormais **plusieurs backends** au lieu d'un seul.
+
+### Registre (`src/service/backends.{h,cpp}`)
+
+`Backends` détient un `Backend` et un `Inventory` par `BackendKind`, indexés
+et non statiques. Accès fiable par type (`backend(kind)`, `inventory(kind)`),
+liste triée (`kinds()`), et `allUnavailable()` : vrai seulement quand au
+moins un backend est configuré et qu'aucun n'est utilisable.
+
+Chaque `Inventory` écrit ses propres lignes `(backend, scope)` de
+`state.sqlite` sur son propre thread d'E/S ; deux backends réconcilient donc
+en parallèle, le `busy_timeout` de SQLite arbitrant le fichier partagé
+(aucune migration de schéma).
+
+### Sélection (`StoreService::actionInventory`)
+
+Une action porte toujours un `offer_id` qui, décodé par `decodeOfferId`, nomme
+son `backend`, son `scope`, sa `remote` et sa `ref`. `actionInventory` cherche
+le backend correspondant et refuse (`BackendUnavailable`) s'il est absent ou
+indisponible, **sans jamais basculer vers un autre backend**. Deux offres de
+même `app-id` provenant de sources différentes restent distinctes : la
+sélection ne se fait jamais sur le seul identifiant AppStream.
+
+### Propriété D-Bus `Backends`
+
+Une entrée par backend configuré (format `aa{sv}`, `backendMap`) : `id`,
+`available`, `reason`, `scopes`, `formats`. `available` est faux tant que le
+backend n'a pas répondu (`reason` = « not checked yet »), puis reflète son
+état ; la propriété est réémise à chaque changement de disponibilité.
+
+### État du service (D-E)
+
+Le service est `ready` dès qu'un catalogue est en service ; il ne passe en
+`degraded` que lorsque **tous** les backends configurés sont inutilisables.
+Un backend tombé n'empêche pas l'autre de fonctionner, et reste visible par
+`Backends.available = false` et sa `reason`.
+
+### Construction (`main.cpp`)
+
+`buildBackends()` construit PackageKit et Flatpak, chacun optionnel
+(`--packagekit`, `--flatpak`) et indépendant. Flatpak n'est construit que si
+libflatpak est présent (`CUTEFISH_STORE_HAVE_FLATPAK`) ; le service se
+construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
+
+### Fait / à faire
+
+- **Fait (H.1)** : registre, un `Inventory` par backend, enregistrement dans
+  le `TransactionManager`, sélection par `offer_id`, propriété `Backends`,
+  sémantique `degraded`, construction optionnelle des deux backends.
+- **À faire (H.2–H.8)** : agrégation soignée de `GetInstalled`/`GetUpdates`/
+  `UpdateCount` (déduplication, liens), `UpdateAll` multi-backends complet,
+  gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
+  `GetPermissions`), moniteur de changements externes Flatpak, et catalogue
+  unifié (l'indexeur lit déjà les deux sources ; l'agrégation fine est à
+  vérifier).
 

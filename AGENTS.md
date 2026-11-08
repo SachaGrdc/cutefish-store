@@ -51,6 +51,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | F | Backend PackageKit, intégration en lecture, D-028, D-029 | `59084c2` … `40d3c7b` |
 | F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
 | G | Backend Flatpak autonome (`store-backend-flatpak`) | `feat(backend-flatpak): …` |
+| H.1 | Registre multi-backends et sélection (service) | `feat(service): …` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -64,11 +65,15 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 - **G** : le backend Flatpak est implémenté comme bibliothèque autonome
   (SERVICE.md §19), testé sur un faux magasin (25 tests). Il refuse tout
   ajout de remote déclenché par une transaction (P-011), filtre les remotes
-  désactivés du catalogue, et libère ses `GError`. Il n'est **pas
-  encore raccordé au service** : l'intégration multi-backends (choix du
-  backend, `Inventory` et `TransactionManager` sur deux backends) est la
-  prochaine étape, ainsi que la gestion des sources (`EnableSource`,
-  P-011), le moniteur d'installation et le raccord de `GetPermissions`.
+  désactivés du catalogue, et libère ses `GError`.
+- **H.1** : le service porte désormais plusieurs backends (SERVICE.md §20) :
+  registre `Backends` (un `Backend` + un `Inventory` par `BackendKind`),
+  sélection par `offer_id` sans bascule silencieuse, propriété D-Bus
+  `Backends`, sémantique `degraded` seulement quand tous les backends sont
+  inutilisables, et construction optionnelle de PackageKit et Flatpak dans
+  `main.cpp` (`--flatpak`, compatible sans libflatpak). Prochaine étape :
+  H.2 (agrégation de l'inventaire, des mises à jour et d'`UpdateAll`), puis
+  H.5 (sources et API D-Bus), H.6 (moniteur Flatpak), H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
