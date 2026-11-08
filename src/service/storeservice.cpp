@@ -7,6 +7,7 @@
 #include <base/logging.h>
 #include <base/uuid.h>
 
+#include <algorithm>
 #include <ctime>
 #include <system_error>
 
@@ -78,6 +79,27 @@ Result<void> StoreService::start()
     m_state.emplace(std::move(store).value());
     if (auto report = m_state->recoverAfterRestart(now()); !report) {
         CF_WARNING(cfStore) << "journal recovery failed: " << report.error().message();
+    } else {
+        // Running transactions kept with a backend handle (SERVICE.md §5.6).
+        m_toReattach = std::move(report->toReattach);
+    }
+    if (m_backend) {
+        m_manager = std::make_unique<TransactionManager>(
+                m_loop, m_connection, *m_state,
+                TransactionManager::Options{.confirmationTimeout = m_options.confirmationTimeout,
+                                            .retention = m_options.transactionRetention});
+        m_manager->addBackend(*m_backend);
+        m_manager->newPath = [this] { return newTransaction(); };
+        m_manager->onAdded = [this](const std::string& path) {
+            m_object->emitSignal("TransactionAdded", base::dbus::ObjectPath{path});
+        };
+        m_manager->onRemoved = [this](const std::string& path) {
+            m_object->emitSignal("TransactionRemoved", base::dbus::ObjectPath{path});
+        };
+        // Never an optimistic update: the backend is asked (§8.3).
+        m_manager->onSystemMayHaveChanged = [this](BackendKind) { m_inventory->check(); };
+        m_manager->onActivityBegin = [this] { m_lifecycle.beginActivity(); };
+        m_manager->onActivityEnd = [this] { m_lifecycle.endActivity(); };
     }
     if (auto last = m_state->lastRefresh())
         m_lastRefresh = *last;
@@ -90,6 +112,8 @@ Result<void> StoreService::start()
     // signals and properties.
     if (m_inventory)
         m_inventory->check();
+    if (m_manager)
+        m_manager->recover(std::move(m_toReattach));
     m_lifecycle.evaluate();
     return {};
 }
@@ -157,17 +181,27 @@ void StoreService::startRefresh(bool force, bool repositories, RefreshTransactio
     // already on disk, always. The initial import is local.
     if (transaction && repositories && m_inventory && m_inventory->available() == std::optional<bool>(true)
         && m_backend->capabilities().refresh) {
-        m_refreshPhase = RefreshPhase::Backend;
-        m_refreshOperation = base::Uuid::generate().toString();
+        // A modifying operation of the backend: it takes its turn in the
+        // backend's lane, behind a transaction in progress (P-009).
+        m_refreshPhase = RefreshPhase::Lane;
         m_refreshBackendCancellable = false;
-        OperationEvents events;
-        events.progress = [this, transaction](const Progress& p) {
-            if (p.cancellable == m_refreshBackendCancellable)
-                return;
-            m_refreshBackendCancellable = p.cancellable;
+        auto run = [this, force, transaction](std::function<void()> laneDone) {
+            if (m_refreshCancelled) {
+                laneDone();
+                return refreshDone(Error::cancelled("refresh cancelled"), transaction);
+            }
+            m_refreshPhase = RefreshPhase::Backend;
+            m_refreshOperation = base::Uuid::generate().toString();
             transaction->updateCancellable();
+            OperationEvents events;
+            events.progress = [this, transaction](const Progress& p) {
+                if (p.cancellable == m_refreshBackendCancellable)
+                    return;
+                m_refreshBackendCancellable = p.cancellable;
+                transaction->updateCancellable();
         };
-        m_backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction](Result<void> r) {
+        m_backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction, laneDone](Result<void> r) {
+            laneDone();
             m_refreshOperation.clear();
             m_refreshBackendCancellable = false;
             // Cancelled by the user: nothing more is done.
@@ -182,7 +216,12 @@ void StoreService::startRefresh(bool force, bool repositories, RefreshTransactio
             }
             indexSources(force, transaction);
         });
+        };
         transaction->updateCancellable();
+        if (m_manager)
+            m_manager->exclusive(m_backend->kind(), std::move(run));
+        else
+            run([] {});
         return;
     }
     indexSources(force, transaction);
@@ -220,6 +259,9 @@ void StoreService::indexSources(bool force, RefreshTransaction* transaction)
 bool StoreService::cancelRefresh()
 {
     switch (m_refreshPhase) {
+    case RefreshPhase::Lane:
+        m_refreshCancelled = true; // nothing started: the lane is skipped
+        return true;
     case RefreshPhase::Backend:
         // Only while the backend allows it; its completion then tells.
         if (!m_refreshBackendCancellable || !m_backend->cancel(m_refreshOperation))
@@ -240,6 +282,7 @@ bool StoreService::cancelRefresh()
 bool StoreService::refreshCancellable() const
 {
     switch (m_refreshPhase) {
+    case RefreshPhase::Lane: return !m_refreshCancelled;
     case RefreshPhase::Backend: return m_refreshBackendCancellable;
     case RefreshPhase::Sources: return !m_refreshCancelled;
     case RefreshPhase::Index: return m_refresher.cancellable();
@@ -628,6 +671,9 @@ void StoreService::exportObject()
                 std::vector<ObjectPath> paths;
                 for (const auto& [path, t] : m_transactions)
                     paths.push_back({path});
+                if (m_manager)
+                    for (const std::string& path : m_manager->paths())
+                        paths.push_back({path});
                 call.reply(paths);
             },
             {{}, {"paths"}});
@@ -698,7 +744,178 @@ void StoreService::exportObject()
             },
             {{"options"}, {"transaction"}});
 
+    if (m_manager)
+        exportActions();
+
     o.publish();
+}
+
+Result<void> StoreService::actionBackend(const OfferId& offer) const
+{
+    auto address = decodeOfferId(offer);
+    if (!address)
+        return std::move(address).error();
+    if (!m_backend || m_backend->kind() != address->backend)
+        return Error::backend(BackendFailure::Unavailable,
+                              "no " + std::string(toString(address->backend)) + " backend in this service");
+    if (m_inventory->available() != std::optional<bool>(true))
+        return Error::backend(BackendFailure::Unavailable, toString(m_backend->kind()).data()
+                                      + std::string(" is not usable: ") + m_inventory->reason());
+    return {};
+}
+
+void StoreService::exportActions()
+{
+    using namespace base::dbus;
+    Object& o = *m_object;
+    // No option is defined yet (SERVICE.md §4.4): any key is refused, so that
+    // a client never believes one was applied.
+    auto noOptions = [](MethodCall& call, const VariantMap& options) {
+        if (options.empty())
+            return true;
+        call.replyError(errors::kInvalidArgs, "unknown option " + options.begin()->first);
+        return false;
+    };
+    auto answer = [](MethodCall& call, const Result<std::string>& path) {
+        if (!path)
+            return replyError(call, path);
+        call.reply(ObjectPath{*path});
+    };
+
+    // Install: the offer must be in the catalogue (§4.1), not installed yet.
+    o.addMethod(
+            "Install", "sa{sv}", "o",
+            [this, noOptions, answer](MethodCall& call) {
+                if (!admit(call, true))
+                    return;
+                std::string raw;
+                VariantMap options;
+                call.read(raw, options);
+                if (!noOptions(call, options))
+                    return;
+                auto offer = OfferId::parse(raw);
+                if (!offer)
+                    return replyError(call, offer);
+                if (auto ok = actionBackend(*offer); !ok)
+                    return replyError(call, ok);
+                using Answer = Result<std::pair<std::optional<AppId>, bool>>;
+                m_reads.read<Answer>(
+                        [offer = *offer](Readers& r) -> Answer {
+                            auto c = r.catalog();
+                            if (!c)
+                                return std::move(c).error();
+                            const std::vector<OfferId> one{offer};
+                            auto links = (*c)->offerApplications(one);
+                            if (!links)
+                                return std::move(links).error();
+                            if (links->empty())
+                                return Error::notFound("no offer " + offer.str() + " in the catalogue");
+                            auto state = r.installed();
+                            if (!state)
+                                return std::move(state).error();
+                            auto item = (*state)->find(offer);
+                            if (!item)
+                                return std::move(item).error();
+                            return std::pair{std::optional<AppId>(links->front().second), item->has_value()};
+                        },
+                        [this, call, answer, offer = *offer](Answer a) mutable {
+                            if (!a)
+                                return replyError(call, a);
+                            if (a->second)
+                                return call.replyError(errors::kNotAllowed, offer.str() + " is already installed");
+                            answer(call, m_manager->start(TransactionKind::Install, {{offer, a->first}}));
+                        });
+            },
+            {{"offer_id", "options"}, {"transaction"}});
+
+    // Remove: the offer must be installed (state.sqlite). A protected package
+    // is refused while planning, with not-allowed (D-032).
+    o.addMethod(
+            "Remove", "sa{sv}", "o",
+            [this, noOptions, answer](MethodCall& call) {
+                if (!admit(call, false))
+                    return;
+                std::string raw;
+                VariantMap options;
+                call.read(raw, options);
+                if (!noOptions(call, options))
+                    return;
+                auto offer = OfferId::parse(raw);
+                if (!offer)
+                    return replyError(call, offer);
+                if (auto ok = actionBackend(*offer); !ok)
+                    return replyError(call, ok);
+                using Answer = Result<std::optional<AppId>>;
+                m_reads.read<Answer>(
+                        [offer = *offer](Readers& r) -> Answer {
+                            auto state = r.installed();
+                            if (!state)
+                                return std::move(state).error();
+                            auto item = (*state)->find(offer);
+                            if (!item)
+                                return std::move(item).error();
+                            if (!item->has_value())
+                                return Error::notFound(offer.str() + " is not installed");
+                            return (*item)->app();
+                        },
+                        [this, call, answer, offer = *offer](Answer a) mutable {
+                            if (!a)
+                                return replyError(call, a);
+                            answer(call, m_manager->start(TransactionKind::Remove, {{offer, *a}}));
+                        });
+            },
+            {{"offer_id", "options"}, {"transaction"}});
+
+    // Update: every offer must have an update listed by GetUpdates (D-010).
+    o.addMethod(
+            "Update", "asa{sv}", "o",
+            [this, noOptions, answer](MethodCall& call) {
+                if (!admit(call, false))
+                    return;
+                std::vector<std::string> raw;
+                VariantMap options;
+                call.read(raw, options);
+                if (!noOptions(call, options))
+                    return;
+                if (raw.empty() || raw.size() > kMaxIds)
+                    return call.replyError(errors::kInvalidArgs, "between 1 and 200 offers");
+                std::vector<TransactionManager::Target> targets;
+                for (const std::string& r : raw) {
+                    auto offer = OfferId::parse(r);
+                    if (!offer)
+                        return replyError(call, offer);
+                    if (auto ok = actionBackend(*offer); !ok)
+                        return replyError(call, ok);
+                    const auto& updates = m_inventory->updates();
+                    const auto it = std::find_if(updates.begin(), updates.end(),
+                                                 [&](const AvailableUpdate& u) { return u.offer == *offer; });
+                    if (it == updates.end())
+                        return call.replyError(errors::kNotFound, "no update for " + offer->str());
+                    targets.push_back({*offer, it->app});
+                }
+                answer(call, m_manager->start(TransactionKind::Update, std::move(targets)));
+            },
+            {{"offer_ids", "options"}, {"transaction"}});
+
+    // UpdateAll: a parent update-all transaction, one child per backend and
+    // installation (D-031).
+    o.addMethod(
+            "UpdateAll", "a{sv}", "o",
+            [this, noOptions, answer](MethodCall& call) {
+                if (!admit(call, false))
+                    return;
+                VariantMap options;
+                call.read(options);
+                if (!noOptions(call, options))
+                    return;
+                if (m_inventory->available() != std::optional<bool>(true))
+                    return call.replyError(errors::kBackendUnavailable, "no usable backend");
+                std::vector<TransactionManager::Target> targets;
+                for (const AvailableUpdate& u : m_inventory->updates())
+                    targets.push_back({u.offer, u.app});
+                answer(call, m_manager->startUpdateAll(std::move(targets)));
+            },
+            {{"options"}, {"transaction"}});
 }
 
 } // namespace cutefish::store::service

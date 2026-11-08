@@ -25,6 +25,7 @@ std::string_view toString(ErrorCode code) noexcept
     case ErrorCode::Cancelled: return "cancelled";
     case ErrorCode::Backend: return "backend";
     case ErrorCode::Internal: return "internal";
+    case ErrorCode::NotAllowed: return "not-allowed";
     }
     return "internal";
 }
@@ -50,7 +51,8 @@ std::string_view toString(BackendFailure failure) noexcept
 std::optional<ErrorCode> parseErrorCode(std::string_view text) noexcept
 {
     for (const ErrorCode c : {ErrorCode::InvalidArgument, ErrorCode::NotFound, ErrorCode::NotSupported,
-                              ErrorCode::Conflict, ErrorCode::Cancelled, ErrorCode::Backend, ErrorCode::Internal})
+                              ErrorCode::Conflict, ErrorCode::Cancelled, ErrorCode::Backend, ErrorCode::Internal,
+                              ErrorCode::NotAllowed})
         if (toString(c) == text)
             return c;
     return std::nullopt;

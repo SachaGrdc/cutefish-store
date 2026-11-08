@@ -18,6 +18,7 @@ enum class ErrorCode : std::uint8_t {
     Cancelled,       ///< The operation was cancelled.
     Backend,         ///< A package manager reported a failure; see BackendFailure.
     Internal,        ///< Bug or broken invariant in Cutefish Store itself.
+    NotAllowed,      ///< Refused by a rule of the store (a protected package, D-032).
 };
 
 /// Why a package manager failed. Meaningful only with ErrorCode::Backend.
@@ -52,6 +53,7 @@ public:
     static Error cancelled(std::string message = {}) { return Error(ErrorCode::Cancelled, std::move(message)); }
     static Error backend(BackendFailure failure, std::string message) { return Error(failure, std::move(message)); }
     static Error internal(std::string message) { return Error(ErrorCode::Internal, std::move(message)); }
+    static Error notAllowed(std::string message) { return Error(ErrorCode::NotAllowed, std::move(message)); }
 
     ErrorCode code() const noexcept { return m_code; }
     /// BackendFailure::Unspecified unless code() is ErrorCode::Backend.

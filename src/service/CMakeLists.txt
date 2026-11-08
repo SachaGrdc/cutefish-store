@@ -11,6 +11,8 @@ set(CUTEFISH_STORE_INDEXER_PATH "${CMAKE_INSTALL_FULL_LIBEXECDIR}/cutefish-store
 set(CUTEFISH_STORE_SERVICE_PATH "${CMAKE_INSTALL_FULL_LIBEXECDIR}/cutefish-store-service")
 
 add_library(store-service STATIC
+    actiontransaction.cpp
+    actiontransaction.h
     inventory.cpp
     inventory.h
     lifecycle.cpp
@@ -29,6 +31,8 @@ add_library(store-service STATIC
     sourcesfile.h
     storeservice.cpp
     storeservice.h
+    transactionmanager.cpp
+    transactionmanager.h
 )
 target_include_directories(store-service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(store-service PRIVATE -Wall -Wextra)

@@ -52,6 +52,7 @@ DbusError toDbusError(const Error& e)
     case ErrorCode::NotFound: return {errors::kNotFound, e.message()};
     case ErrorCode::NotSupported: return {errors::kNotSupported, e.message()};
     case ErrorCode::Conflict: return {errors::kBusy, e.message()};
+    case ErrorCode::NotAllowed: return {errors::kNotAllowed, e.message()};
     case ErrorCode::Backend:
         if (e.backendFailure() == BackendFailure::Unavailable)
             return {errors::kBackendUnavailable, e.message()};
@@ -162,6 +163,43 @@ dbus::VariantMap toMap(const AvailableUpdate& u, BackendKind backend)
     if (u.toVersion)
         m.emplace("to-version", u.toVersion->str());
     return m;
+}
+
+dbus::VariantMap planMap(const Plan& plan, const ConfirmationReasons& reasons,
+                         std::span<const ConfirmationConcern> concerns)
+{
+    std::vector<std::string> all;
+    for (const ConfirmationReason r : reasons.list())
+        all.emplace_back(toString(r));
+    std::vector<dbus::VariantMap> operations;
+    for (std::size_t i = 0; i < plan.items().size(); ++i) {
+        const PlanItem& item = plan.items()[i];
+        std::vector<std::string> itemReasons;
+        for (const ConfirmationConcern& c : concerns)
+            if (c.item == i)
+                itemReasons.emplace_back(toString(c.reason));
+        dbus::VariantMap m{{"operation", std::string(toString(item.operation()))},
+                           {"kind", std::string(toString(item.kind()))},
+                           {"package", item.package()},
+                           {"requested", item.requested()},
+                           {"download-size", item.downloadSize()},
+                           {"reasons", itemReasons}};
+        if (item.fromVersion())
+            m.emplace("from-version", item.fromVersion()->str());
+        if (item.toVersion())
+            m.emplace("to-version", item.toVersion()->str());
+        if (!item.origin().empty())
+            m.emplace("origin", item.origin());
+        operations.push_back(std::move(m));
+    }
+    return {{"kind", std::string(toString(plan.kind()))},
+            {"backend", std::string(toString(plan.backend()))},
+            {"scope", std::string(toString(plan.scope()))},
+            {"requires-confirmation", !reasons.empty()},
+            {"reasons", all},
+            {"download-size", plan.downloadSize()},
+            {"installed-size-change", plan.installedSizeChange()},
+            {"operations", operations}};
 }
 
 dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,

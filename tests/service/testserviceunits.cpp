@@ -44,6 +44,10 @@ TEST(ServiceOptions, PackageKitBus)
     ASSERT_TRUE(off);
     EXPECT_EQ(off->packagekit, PackageKitBus::Off);
     EXPECT_FALSE(parseArguments({"--packagekit", "maybe"}));
+    EXPECT_EQ(d->confirmationTimeout, std::chrono::minutes(10)); // D-019
+    auto c = parseArguments({"--confirmation-timeout-ms", "500"});
+    ASSERT_TRUE(c);
+    EXPECT_EQ(c->confirmationTimeout, std::chrono::milliseconds(500));
 }
 
 TEST(SourcesFile, ParsesSourcesAndComments)

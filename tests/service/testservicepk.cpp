@@ -121,7 +121,7 @@ bool waitFinished(Bus& b, const std::string& path)
 
 } // namespace
 
-TEST(ServicePackageKit, ABackendIsListedAndItsReadingMethodsExported)
+TEST(ServicePackageKit, ABackendIsListedAndItsMethodsExported)
 {
     PkBus p;
     p.fake->answer("GetPackages", installed({kGimpInstalled}));
@@ -136,11 +136,11 @@ TEST(ServicePackageKit, ABackendIsListedAndItsReadingMethodsExported)
     dbus::Proxy introspectable(p.b.client.get(), kName, kPath, "org.freedesktop.DBus.Introspectable");
     std::string xml;
     ASSERT_TRUE(introspectable.call("Introspect").read(xml));
-    for (const char* member : {"\"GetUpdates\"", "\"UpdateCount\"", "\"UpdatesChanged\"", "\"InstalledChanged\""})
+    for (const char* member : {"\"GetUpdates\"", "\"UpdateCount\"", "\"UpdatesChanged\"", "\"InstalledChanged\"",
+                               "\"Install\"", "\"Remove\"", "\"Update\"", "\"UpdateAll\""})
         EXPECT_NE(xml.find(member), std::string::npos) << member;
-    // Read-only integration: no action yet (D-022).
-    for (const char* member : {"\"Install\"", "\"Remove\"", "\"Update\"", "\"UpdateAll\"", "\"GetPermissions\"",
-                               "\"EnableSource\"", "\"DisableSource\""})
+    // Still nothing that cannot work (D-022): no source toggling, no permissions.
+    for (const char* member : {"\"GetPermissions\"", "\"EnableSource\"", "\"DisableSource\""})
         EXPECT_EQ(xml.find(member), std::string::npos) << member;
     EXPECT_EQ(p.b.property<std::string>("State"), std::optional<std::string>("ready"));
 }
@@ -429,4 +429,257 @@ TEST(ServicePackageKit, AMetadataFileListedTwiceIsIndexedOnce)
     EXPECT_EQ(ids, std::vector<std::string>{"packagekit:my-debian"});
     ASSERT_EQ(sources.size(), 1u);
     EXPECT_GT(sources[0].at("offers").value<std::uint32_t>(), 0u);
+}
+
+// --- Transactions (step F2) ---------------------------------------------------------------
+
+namespace {
+
+const char* kGimpAvailableId = "gimp;3.0.4-3+deb13u11;amd64;debian-stable-security-main";
+
+Answer resolved(pk::Info info, const std::string& id)
+{
+    Answer a;
+    a.packages = {pkg(info, id)};
+    return a;
+}
+
+std::string action(Bus&, const char* method, const dbus::Reply& r)
+{
+    dbus::ObjectPath path;
+    EXPECT_TRUE(r.read(path)) << method << ": " << errorName(r);
+    return path.path;
+}
+
+bool waitState(Bus& b, const std::string& path, const std::string& state)
+{
+    return b.waitUntil([&] { return transactionState(b, path) == state; });
+}
+
+} // namespace
+
+TEST(ServiceTransactions, AnInstallWithoutConfirmationRuns)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main"),
+                    pkg(pk::Info::Installing, "libgimp-3.0-0;3.0.4-3;amd64;+auto:debian-stable-main")};
+    sim.downloadSize = 52458144;
+    // The fake sends DownloadSizeRemaining with a progress step (halved).
+    sim.steps = {Step{.status = pk::Status::Query, .percentage = 50, .allowCancel = true}};
+    p.fake->answer("InstallPackages", sim, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "succeeded");
+    EXPECT_EQ(p.b.transaction(t).property<std::string>("Kind"), std::optional<std::string>("install"));
+    const auto plan = p.b.transaction(t).property<dbus::VariantMap>("Plan");
+    ASSERT_TRUE(plan);
+    EXPECT_EQ(plan->at("download-size").value<std::uint64_t>(), 52458144u / 2);
+    EXPECT_EQ(plan->at("operations").value<std::vector<dbus::VariantMap>>().size(), 2u);
+    // Two simulations (plan, then the check before executing), one real
+    // transaction, interactive, ONLY_TRUSTED (D-017, SERVICE §6.3).
+    int simulations = 0;
+    int real = 0;
+    for (const auto& c : p.fake->calls())
+        if (c.method == "InstallPackages") {
+            (c.simulate() ? simulations : real)++;
+            if (!c.simulate()) {
+                EXPECT_EQ(c.flags, pk::flag::kOnlyTrusted);
+                EXPECT_NE(std::find(c.hints.begin(), c.hints.end(), "interactive=true"), c.hints.end());
+            }
+        }
+    EXPECT_EQ(simulations, 2);
+    EXPECT_EQ(real, 1);
+    EXPECT_EQ(p.fake->maxConcurrent(), 1);
+    std::vector<dbus::VariantMap> history;
+    ASSERT_TRUE(p.b.store().call("GetTransactionHistory", std::uint32_t(10)).read(history));
+    ASSERT_EQ(history.size(), 1u);
+}
+
+TEST(ServiceTransactions, ACascadedRemovalWaitsForConfirmation)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled, kLibInstalled}));
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled));
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Removing, kGimpInstalled), pkg(pk::Info::Removing, kLibInstalled)};
+    p.fake->answer("RemovePackages", sim, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.installedOffer("packagekit:gimp").has_value(); }));
+    const std::string t = action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "awaiting-confirmation"));
+    const auto plan = p.b.transaction(t).property<dbus::VariantMap>("Plan");
+    ASSERT_TRUE(plan);
+    EXPECT_TRUE(plan->at("requires-confirmation").value<bool>(false));
+    const auto reasons = plan->at("reasons").value<std::vector<std::string>>();
+    EXPECT_NE(std::find(reasons.begin(), reasons.end(), "removes-packages"), reasons.end());
+    EXPECT_GT(p.b.transaction(t).property<std::uint64_t>("ConfirmationDeadline").value_or(0), 0u);
+    EXPECT_EQ(p.calls("RemovePackages"), 0); // nothing removed yet
+    // The same offer cannot be engaged twice (Busy).
+    const dbus::Reply again = p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{});
+    EXPECT_EQ(errorName(again), "org.cutefish.Store1.Error.Busy");
+    const dbus::Reply ok = p.b.transaction(t).call("Confirm");
+    EXPECT_FALSE(ok.isError()) << errorName(ok);
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "succeeded");
+    EXPECT_EQ(p.calls("RemovePackages"), 1);
+    // Confirm is refused outside awaiting-confirmation.
+    EXPECT_EQ(errorName(p.b.transaction(t).call("Confirm")), "org.cutefish.Store1.Error.NotAllowed");
+}
+
+TEST(ServiceTransactions, AProtectedPackageIsRefusedWhilePlanning)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled));
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Removing, kGimpInstalled),
+                    pkg(pk::Info::Removing, "cutefish-desktop;1.0;all;manual:cutefish-trixie-nightly-main")};
+    p.fake->answer("RemovePackages", sim, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.installedOffer("packagekit:gimp").has_value(); }));
+    const std::string t = action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "failed");
+    const auto error = p.b.transaction(t).property<dbus::VariantMap>("Error");
+    ASSERT_TRUE(error);
+    EXPECT_EQ(error->at("code").value<std::string>(), "not-allowed"); // D-032
+    EXPECT_EQ(p.calls("RemovePackages"), 0);
+}
+
+TEST(ServiceTransactions, AChangedPlanIsNeverExecutedWithoutConfirmation)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer first;
+    first.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    Answer second = first; // the check before executing: now removes a package
+    second.packages.push_back(pkg(pk::Info::Removing, kLibInstalled));
+    p.fake->answer("InstallPackages", first, true);
+    p.fake->answer("InstallPackages", second, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "awaiting-confirmation"));
+    const auto reasons = p.b.transaction(t).property<dbus::VariantMap>("Plan")->at("reasons").value<std::vector<std::string>>();
+    EXPECT_NE(std::find(reasons.begin(), reasons.end(), "plan-changed"), reasons.end());
+    EXPECT_EQ(p.calls("InstallPackages"), 0); // no real transaction
+    EXPECT_FALSE(p.b.transaction(t).call("Cancel").isError());
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "cancelled");
+}
+
+TEST(ServiceTransactions, AnUnansweredConfirmationExpires)
+{
+    ServiceSetup setup = withPackageKit();
+    setup.confirmationTimeout = 500ms; // D-019 is 10 minutes
+    PkBus p(setup);
+    p.fake->answer("GetPackages", installed({kGimpInstalled, kLibInstalled}));
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled));
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Removing, kGimpInstalled), pkg(pk::Info::Removing, kLibInstalled)};
+    p.fake->answer("RemovePackages", sim, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.installedOffer("packagekit:gimp").has_value(); }));
+    const std::string t = action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, t, "awaiting-confirmation"));
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "cancelled");
+    EXPECT_EQ(p.calls("RemovePackages"), 0);
+}
+
+TEST(ServiceTransactions, AWaitingConfirmationDoesNotBlockTheBackend)
+{
+    // D-030: the lane is released while the user decides.
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled, kLibInstalled}));
+    p.fake->answer("Resolve", resolved(pk::Info::Installed, kGimpInstalled));
+    Answer cascade;
+    cascade.packages = {pkg(pk::Info::Removing, kGimpInstalled), pkg(pk::Info::Removing, kLibInstalled)};
+    p.fake->answer("RemovePackages", cascade, true);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.installedOffer("packagekit:gimp").has_value(); }));
+    const std::string removal = action(p.b, "Remove", p.b.store().call("Remove", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitState(p.b, removal, "awaiting-confirmation"));
+    // A Refresh takes the lane meanwhile and completes.
+    const std::string r = refresh(p.b);
+    ASSERT_TRUE(waitFinished(p.b, r));
+    EXPECT_EQ(transactionState(p.b, r), "succeeded");
+    EXPECT_EQ(transactionState(p.b, removal), "awaiting-confirmation");
+}
+
+TEST(ServiceTransactions, AuthorizationRefusedFailsTheTransaction)
+{
+    PkBus p;
+    p.fake->answer("Resolve", resolved(pk::Info::Available, kGimpAvailableId));
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Installing, "gimp;3.0.4-3+deb13u11;amd64;+manual:debian-stable-security-main")};
+    p.fake->answer("InstallPackages", sim, true);
+    Answer denied;
+    denied.exit = pk::Exit::Failed;
+    denied.error = fakepk::errorCode("not-authorized");
+    p.fake->answer("InstallPackages", denied, false);
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.backendAvailable(); }));
+    const std::string t = action(p.b, "Install", p.b.store().call("Install", std::string("packagekit:gimp"), dbus::VariantMap{}));
+    ASSERT_TRUE(waitFinished(p.b, t));
+    EXPECT_EQ(transactionState(p.b, t), "failed");
+    EXPECT_EQ(p.b.transaction(t).property<dbus::VariantMap>("Error")->at("code").value<std::string>(), "auth-denied");
+}
+
+TEST(ServiceTransactions, ActionsCheckTheirInputs)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.installedOffer("packagekit:gimp").has_value(); }));
+    auto install = [&](const std::string& offer, dbus::VariantMap options = {}) {
+        return errorName(p.b.store().call("Install", offer, options));
+    };
+    EXPECT_EQ(install("packagekit:no-such-package"), "org.cutefish.Store1.Error.NotFound");
+    EXPECT_EQ(install("packagekit:gimp"), "org.cutefish.Store1.Error.NotAllowed"); // already installed
+    EXPECT_EQ(install("packagekit:gimp", {{"force", true}}), "org.freedesktop.DBus.Error.InvalidArgs");
+    EXPECT_EQ(install("not an offer"), "org.freedesktop.DBus.Error.InvalidArgs");
+    EXPECT_EQ(install("flatpak:user:flathub:app/org.example.App/x86_64/stable"),
+              "org.cutefish.Store1.Error.BackendUnavailable");
+    EXPECT_EQ(errorName(p.b.store().call("Remove", std::string("packagekit:example-tool"), dbus::VariantMap{})),
+              "org.cutefish.Store1.Error.NotFound"); // not installed
+    EXPECT_EQ(errorName(p.b.store().call("Update", std::vector<std::string>{"packagekit:gimp"}, dbus::VariantMap{})),
+              "org.cutefish.Store1.Error.NotFound"); // no update
+    EXPECT_EQ(errorName(p.b.store().call("UpdateAll", dbus::VariantMap{})), "org.cutefish.Store1.Error.NotFound");
+    EXPECT_TRUE(p.noAction());
+}
+
+TEST(ServiceTransactions, UpdateAllIsAParentOfOneChildPerBackend)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    Answer updates;
+    updates.packages = {pkg(pk::Info::Security, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("GetUpdates", updates);
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Updating, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("UpdatePackages", sim, true);
+    std::vector<std::string> added;
+    auto match = p.b.client->subscribe(rule(kPath, kInterface, "TransactionAdded"), [&](const dbus::Message& m) {
+        dbus::ObjectPath path;
+        if (m.read(path))
+            added.push_back(path.path);
+    });
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.b.property<std::uint32_t>("UpdateCount") == std::optional<std::uint32_t>(1); }));
+    const std::string parent = action(p.b, "UpdateAll", p.b.store().call("UpdateAll", dbus::VariantMap{}));
+    ASSERT_TRUE(p.b.waitUntil([&] { return added.size() == 2; }));
+    EXPECT_EQ(p.b.transaction(parent).property<std::string>("Kind"), std::optional<std::string>("update-all"));
+    EXPECT_EQ(p.b.transaction(parent).property<std::string>("Backend"), std::optional<std::string>("multiple"));
+    const std::string child = added[0] == parent ? added[1] : added[0];
+    EXPECT_EQ(p.b.transaction(child).property<dbus::ObjectPath>("Parent")->path, parent);
+    ASSERT_TRUE(waitFinished(p.b, child));
+    EXPECT_EQ(transactionState(p.b, child), "succeeded");
+    ASSERT_TRUE(waitFinished(p.b, parent));
+    EXPECT_EQ(transactionState(p.b, parent), "succeeded");
+    EXPECT_EQ(p.calls("UpdatePackages"), 1);
 }

@@ -48,6 +48,7 @@ struct ServiceSetup
     std::chrono::milliseconds retention = 60s;
     /// Seconds the indexer waits before working (a slow refresh).
     int indexerDelay = 0;
+    std::chrono::milliseconds confirmationTimeout = 60s;
     /// --packagekit: `off` so that no test reaches the system's packagekitd;
     /// `session` for a simulated one on the test's bus (fakepackagekit.h).
     std::string packagekit = "off";
@@ -188,7 +189,8 @@ private:
         out << "[D-BUS Service]\nName=" << kName << "\nExec=" << SERVICE_BINARY << " --data-dir "
             << (dir / "data").string() << " --sources " << (dir / "sources.conf").string() << " --indexer "
             << (dir / "indexer.sh").string() << " --idle-timeout-ms " << s.idleTimeout.count()
-            << " --retention-ms " << s.retention.count() << " --locale C --packagekit " << s.packagekit
+            << " --retention-ms " << s.retention.count()
+            << " --confirmation-timeout-ms " << s.confirmationTimeout.count() << " --locale C --packagekit " << s.packagekit
             << " --swcatalog " << (dir / "swcatalog").string() << "\n";
     }
 

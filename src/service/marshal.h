@@ -7,6 +7,7 @@
 #include <cutefish/store/application.h>
 #include <cutefish/store/backend.h>
 #include <cutefish/store/catalog.h>
+#include <cutefish/store/confirmation.h>
 #include <cutefish/store/error.h>
 #include <cutefish/store/installed.h>
 #include <cutefish/store/search.h>
@@ -71,6 +72,14 @@ dbus::VariantMap toMap(const AvailableUpdate& update, BackendKind backend);
 /// `formats` (as).
 dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
                             const std::string& reason);
+/// The `Plan` of a transaction (SERVICE.md §4.6): `kind`, `backend`,
+/// `scope`, `requires-confirmation` (b), `reasons` (as), `download-size`
+/// (t), `installed-size-change` (x), and `operations` (aa{sv}): `operation`,
+/// `kind`, `package`, `requested` (b), `from-version`, `to-version`,
+/// `origin` when known, `download-size` (t), `reasons` (as, the concerns of
+/// that item). Reasons only while a confirmation is pending.
+dbus::VariantMap planMap(const Plan& plan, const ConfirmationReasons& reasons,
+                         std::span<const ConfirmationConcern> concerns);
 /// `code`, `message`, `details` (ARCHITECTURE §5.3, property `Error`).
 dbus::VariantMap errorMap(const Error& error);
 

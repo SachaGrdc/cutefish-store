@@ -266,7 +266,7 @@ Result<SimulatedPlan> planFromSimulation(const PlanRequest& request, const PkRes
         }
         const std::string name = id->qualifiedName(profile.nativeArch);
         if (op == PlanOperation::Remove && profile.isProtected && profile.isProtected(name))
-            return Error::invalidArgument("the plan would remove " + name + ", which the store protects");
+            return Error::notAllowed("the plan would remove " + name + ", which the store protects");
         const bool isRequested = requested.contains(name);
         PlanItemSpec item{.operation = op,
                           .kind = isRequested ? PlanItemKind::Application : PlanItemKind::Package,

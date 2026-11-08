@@ -30,6 +30,8 @@ struct ServiceOptions
     std::chrono::milliseconds idleTimeout = std::chrono::minutes(5);
     /// How long a finished transaction stays on the bus (ARCHITECTURE §5.3).
     std::chrono::milliseconds transactionRetention = std::chrono::minutes(5);
+    /// How long a transaction waits for a confirmation (D-019: 10 minutes).
+    std::chrono::milliseconds confirmationTimeout = std::chrono::minutes(10);
     /// Languages the texts are read in, most preferred first (session).
     std::vector<std::string> readLocales;
     /// Description languages given to the indexer (D-013).
@@ -46,6 +48,7 @@ struct ServiceOptions
 ///   --indexer PATH        default the installed indexer
 ///   --idle-timeout-ms N   default 300000
 ///   --retention-ms N      default 300000
+///   --confirmation-timeout-ms N   default 600000 (D-019)
 ///   --locale L            reading language, repeatable; default from the
 ///                         environment (LANGUAGE, LC_ALL, LC_MESSAGES, LANG)
 ///   --packagekit B        system (default), session or off

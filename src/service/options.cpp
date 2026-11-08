@@ -66,11 +66,13 @@ Result<ServiceOptions> parseArguments(const std::vector<std::string>& arguments)
             o.sourcesFile = value;
         } else if (arg == "--indexer") {
             o.indexer = value;
-        } else if (arg == "--idle-timeout-ms" || arg == "--retention-ms") {
+        } else if (arg == "--idle-timeout-ms" || arg == "--retention-ms" || arg == "--confirmation-timeout-ms") {
             auto ms = milliseconds(value);
             if (!ms)
                 return std::move(ms).error();
-            (arg == "--idle-timeout-ms" ? o.idleTimeout : o.transactionRetention) = *ms;
+            (arg == "--idle-timeout-ms" ? o.idleTimeout
+             : arg == "--retention-ms"  ? o.transactionRetention
+                                        : o.confirmationTimeout) = *ms;
         } else if (arg == "--packagekit") {
             if (value == "system")
                 o.packagekit = PackageKitBus::System;
