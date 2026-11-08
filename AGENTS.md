@@ -62,12 +62,14 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   transactions réelles, le dialogue polkit, le verrou dpkg et debconf
   restent à vérifier en VM.
 - **G** : le backend Flatpak est implémenté comme bibliothèque autonome
-  (SERVICE.md §19), testé sur un faux magasin (18 tests). Il n'est **pas
+  (SERVICE.md §19), testé sur un faux magasin (25 tests). Il refuse tout
+  ajout de remote déclenché par une transaction (P-011), filtre les remotes
+  désactivés du catalogue, et libère ses `GError`. Il n'est **pas
   encore raccordé au service** : l'intégration multi-backends (choix du
   backend, `Inventory` et `TransactionManager` sur deux backends) est la
   prochaine étape, ainsi que la gestion des sources (`EnableSource`,
-  P-011) et le raccord de `GetPermissions`. **Ne commencer aucune étape sans
-  l'accord explicite du propriétaire.**
+  P-011), le moniteur d'installation et le raccord de `GetPermissions`.
+  **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
   validée ; le propriétaire applique aussi la règle « une opération

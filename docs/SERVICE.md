@@ -1457,6 +1457,28 @@ deux threads pourra être rétablie à l'intégration sans changer le contrat.
   `capabilities().reattach` est faux.
 - `capabilities().cancelAnytime` est vrai : l'annulation passe par le
   `GCancellable`, à l'étape interruptible suivante (§7.6).
+- **Ajout de remote refusé** (G.1) : le signal `add-new-remote` de
+  libflatpak est connecté dans `resolve()` **et** `execute()` et retourne
+  `FALSE` ; toute transaction qui tenterait d'ajouter un dépôt (une
+  dépendance introuvable dans les remotes configurés) est refusée avec une
+  erreur explicite `NotAllowed`, sans rien configurer ni déployer. Seul
+  `addRemote()`, appelé sur consentement explicite (P-011), ajoute un dépôt.
+- **Erreurs et ressources** : chaque `GError` est traduit puis libéré
+  (`g_clear_error`), y compris sur les retours précoces de la double passe ;
+  l'URL d'un remote (`flatpak_remote_get_url`, transfert complet) est libérée.
+
+### Permissions
+
+Les permissions d'un ref sont lues dans les métadonnées (`flatpak_transaction_
+operation_get_metadata` / `get_old_metadata`, et `fetch_remote_ref_sync`) sous
+forme de chaînes stables `clé=valeur`, triées et dédupliquées :
+`[Context]` (`shared=network`, `socket=x11`, `filesystems=…`, …) et les
+politiques de bus (`[Session Bus Policy]`, `[System Bus Policy]`, par exemple
+`org.foo.Bar=talk`). Rien n'est aplati ni inventé : une permission absente ou
+un groupe inconnu reste absent, et le backend ne prétend jamais qu'une
+permission est accordée ou refusée au-delà de ce que les métadonnées
+déclarent. Le résumé de risque (`risk`) reste du ressort du service
+(`GetPermissions`, D-022), pas du backend.
 
 ### Portée et limites de cette étape
 
@@ -1466,25 +1488,41 @@ deux threads pourra être rétablie à l'intégration sans changer le contrat.
   distincts), mises à jour, métadonnées d'un ref (permissions, tailles, fin
   de vie), et les transactions install/remove/update.
 - Le catalogue Flatpak passe par l'indexeur existant : `catalogSources()`
-  fournit `appstream.xml.gz` et le dossier d'icônes de chaque remote ; aucune
-  base parallèle. Les versions et licences viennent de l'AppStream, jamais
+  fournit `appstream.xml.gz` et le dossier d'icônes de chaque remote
+  **activé** ; un remote désactivé n'alimente pas le catalogue (ses
+  applications ne sont donc jamais proposées depuis lui). Aucune base
+  parallèle ; les versions et licences viennent de l'AppStream, jamais
   fabriquées.
 - **Non raccordé** : le service n'utilise pas encore ce backend ; `sources()`
   et `EnableSource`/`DisableSource` restent absents de l'API (D-022), et
   l'ajout de la remote Flathub (P-011, encore proposée) ne se fait jamais
   silencieusement : `addRemote` n'est appelé que sur consentement explicite.
-- **Non surveillé** : `setChangeListener` ne pose pas de moniteur
-  d'installation (il faudrait un `GMainContext`) ; l'état n'est relu qu'au
-  rafraîchissement et après une transaction.
+- **Surveillance des changements externes** : `setChangeListener` ne pose pas
+  de moniteur d'installation (`flatpak_installation_create_monitor` demande
+  un `GMainContext`). Sans moniteur, un `flatpak install/remove` fait en
+  ligne de commande n'est pas répercuté immédiatement : l'état ne serait
+  relu qu'au rafraîchissement et après une transaction du service. Cette
+  limitation est sans effet tant que le backend n'est pas raccordé au
+  service ; le moniteur est à ajouter à l'intégration (H), quand l'inventaire
+  du service s'appuiera sur ce backend. Coût d'un moniteur par installation :
+  un `GMainContext` et un `GFileMonitor` ; bénéfice : réconciliation sans
+  rafraîchissement manuel. Sans lui, le risque est un `GetInstalled`/`GetUpdates`
+  périmé jusqu'au prochain rafraîchissement, pas une incohérence du
+  catalogue ni une opération erronée.
 - **À vérifier en VM** : toute transaction réelle, le dialogue polkit de
   `flatpak-system-helper` pour l'installation système, et les remotes GPG/HTTP.
 
 ### Tests
 
-`tests/backend-flatpak/` (18 tests) : logique pure (analyse des refs,
-classement des remotes, correspondance des erreurs, permissions, plan) et le
-backend piloté par un faux magasin (`fakestore.h`) — disponibilité, état
-installé, mises à jour, permissions, sources, plan, exécution compatible,
-plan changé jamais exécuté, correspondance des erreurs et annulation. Aucun
+`tests/backend-flatpak/` (25 tests) : logique pure (analyse des refs,
+classement des remotes, correspondance des erreurs, permissions, plan, un
+changement de permission exige une nouvelle confirmation, un simple écart de
+taille reste compatible) et le backend piloté par un faux magasin
+(`fakestore.h`) — disponibilité, état installé, mises à jour, permissions,
+sources et `catalogSources` (remote désactivé exclu), plan install/remove/
+update, exécution compatible, plan changé jamais exécuté, erreur pendant la
+seconde passe, refus d'un ajout de remote (à la planification et à
+l'exécution, sans déploiement), ajout/suppression/activation d'un remote par
+la seule voie explicite, correspondance des erreurs et annulation. Aucun
 test ne touche une installation Flatpak réelle.
 
