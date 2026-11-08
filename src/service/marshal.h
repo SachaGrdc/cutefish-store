@@ -5,6 +5,7 @@
 // (SERVICE.md §10). Pure functions: no bus, no thread.
 
 #include <cutefish/store/application.h>
+#include <cutefish/store/backend.h>
 #include <cutefish/store/catalog.h>
 #include <cutefish/store/error.h>
 #include <cutefish/store/installed.h>
@@ -61,6 +62,15 @@ dbus::VariantMap toMap(const InstalledItem& item);
 dbus::VariantMap toMap(const RecordedSource& source, std::optional<UnixSeconds> lastRefresh);
 /// A finished transaction of the journal.
 dbus::VariantMap toMap(const TransactionRecord& record);
+/// An available update (GetUpdates): `offer-id`, `app-id` (absent for a
+/// runtime), `backend`, `kind`, `from-version`, `to-version` when known,
+/// `download-size` (t, 0 when unknown).
+dbus::VariantMap toMap(const AvailableUpdate& update, BackendKind backend);
+/// An entry of the Backends property (ARCHITECTURE §5.2): `id`,
+/// `available` (b, false while not known yet), `reason` (s), `scopes` (as),
+/// `formats` (as).
+dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
+                            const std::string& reason);
 /// `code`, `message`, `details` (ARCHITECTURE §5.3, property `Error`).
 dbus::VariantMap errorMap(const Error& error);
 

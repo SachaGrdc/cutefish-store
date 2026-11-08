@@ -30,6 +30,22 @@ TEST(ServiceOptions, DefaultsAndOverrides)
     EXPECT_FALSE(parseArguments({"--data-dir"}));
 }
 
+TEST(ServiceOptions, PackageKitBus)
+{
+    auto d = parseArguments({});
+    ASSERT_TRUE(d);
+    EXPECT_EQ(d->packagekit, PackageKitBus::System); // production
+    EXPECT_EQ(d->swcatalog, "/var/lib/swcatalog");
+    auto o = parseArguments({"--packagekit", "session", "--swcatalog", "/tmp/sw"});
+    ASSERT_TRUE(o);
+    EXPECT_EQ(o->packagekit, PackageKitBus::Session);
+    EXPECT_EQ(o->swcatalog, "/tmp/sw");
+    auto off = parseArguments({"--packagekit", "off"});
+    ASSERT_TRUE(off);
+    EXPECT_EQ(off->packagekit, PackageKitBus::Off);
+    EXPECT_FALSE(parseArguments({"--packagekit", "maybe"}));
+}
+
 TEST(SourcesFile, ParsesSourcesAndComments)
 {
     auto s = parseSources("# comment\n\n"

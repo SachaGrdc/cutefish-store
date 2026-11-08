@@ -35,3 +35,19 @@ if(TARGET store-backend-packagekit)
     target_link_libraries(store-pkbackend-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
     gtest_discover_tests(store-pkbackend-tests PROPERTIES TIMEOUT 60)
 endif()
+
+# The service with its PackageKit backend, against a simulated PackageKit on
+# the test's bus (--packagekit session): never the system's packagekitd.
+if(TARGET store-backend-packagekit)
+    add_executable(store-service-pk-tests testservicepk.cpp busfixture.h fakepackagekit.h)
+    target_include_directories(store-service-pk-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
+    target_compile_definitions(store-service-pk-tests PRIVATE
+        SERVICE_BINARY="$<TARGET_FILE:cutefish-store-service>"
+        INDEXER_BINARY="$<TARGET_FILE:cutefish-store-indexer>"
+        SERVICE_TEST_DATA="${CMAKE_SOURCE_DIR}/tests/indexer/data"
+        DBUS_DAEMON="${DBUS_DAEMON_EXECUTABLE}")
+    add_dependencies(store-service-pk-tests cutefish-store-service cutefish-store-indexer)
+    target_compile_options(store-service-pk-tests PRIVATE -Wall -Wextra)
+    target_link_libraries(store-service-pk-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+    gtest_discover_tests(store-service-pk-tests PROPERTIES TIMEOUT 60)
+endif()

@@ -71,6 +71,17 @@ Result<ServiceOptions> parseArguments(const std::vector<std::string>& arguments)
             if (!ms)
                 return std::move(ms).error();
             (arg == "--idle-timeout-ms" ? o.idleTimeout : o.transactionRetention) = *ms;
+        } else if (arg == "--packagekit") {
+            if (value == "system")
+                o.packagekit = PackageKitBus::System;
+            else if (value == "session")
+                o.packagekit = PackageKitBus::Session;
+            else if (value == "off")
+                o.packagekit = PackageKitBus::Off;
+            else
+                return Error::invalidArgument("--packagekit expects system, session or off, got " + value);
+        } else if (arg == "--swcatalog") {
+            o.swcatalog = value;
         } else if (arg == "--locale") {
             o.readLocales.push_back(value);
             localesGiven = true;

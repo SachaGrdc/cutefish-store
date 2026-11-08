@@ -36,7 +36,8 @@ Refresher::~Refresher()
         m_process->kill();
 }
 
-void Refresher::start(bool force, std::uint64_t generation, std::function<void(Result<RefreshOutcome>)> done)
+void Refresher::start(bool force, std::uint64_t generation, std::vector<ConfiguredSource> provided,
+                      std::function<void(Result<RefreshOutcome>)> done)
 {
     m_running = true;
     m_replacing = false;
@@ -52,13 +53,21 @@ void Refresher::start(bool force, std::uint64_t generation, std::function<void(R
     // Worker thread: read the configuration, the recorded fingerprints, and
     // probe every file (hashing when size or time changed).
     m_io.run(
-                [a, sourcesFile, generation] {
+                [a, sourcesFile, generation, provided = std::move(provided)]() mutable {
                     auto configured = readSources(sourcesFile);
                     if (!configured) {
                         a->status = std::move(configured).error();
                         return;
                     }
                     a->configured = std::move(configured).value();
+                    for (ConfiguredSource& p : provided) {
+                        const bool inFile = std::any_of(a->configured.begin(), a->configured.end(),
+                                                        [&](const ConfiguredSource& c) {
+                                                            return c.source.id() == p.source.id();
+                                                        });
+                        if (!inFile)
+                            a->configured.push_back(std::move(p));
+                    }
                     std::vector<RecordedSource> recorded;
                     if (generation > 0) {
                         if (auto c = SqliteCatalog::open(a->catalog))

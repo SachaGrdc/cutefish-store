@@ -149,6 +149,38 @@ dbus::VariantMap toMap(const InstalledItem& i)
     return m;
 }
 
+dbus::VariantMap toMap(const AvailableUpdate& u, BackendKind backend)
+{
+    dbus::VariantMap m{{"offer-id", u.offer.str()},
+                       {"backend", std::string(toString(backend))},
+                       {"kind", std::string(toString(u.kind))},
+                       {"download-size", u.downloadSize}};
+    if (u.app)
+        m.emplace("app-id", u.app->str());
+    if (u.fromVersion)
+        m.emplace("from-version", u.fromVersion->str());
+    if (u.toVersion)
+        m.emplace("to-version", u.toVersion->str());
+    return m;
+}
+
+dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
+                            const std::string& reason)
+{
+    std::vector<std::string> scopes;
+    if (caps.systemScope)
+        scopes.emplace_back(toString(Scope::System));
+    if (caps.userScope)
+        scopes.emplace_back(toString(Scope::User));
+    // One format per backend in v1 (D-003): deb through PackageKit.
+    const PackageFormat format = kind == BackendKind::PackageKit ? PackageFormat::Deb : PackageFormat::Flatpak;
+    return {{"id", std::string(toString(kind))},
+            {"available", available.value_or(false)},
+            {"reason", available ? reason : std::string("not checked yet")},
+            {"scopes", scopes},
+            {"formats", std::vector<std::string>{std::string(toString(format))}}};
+}
+
 dbus::VariantMap toMap(const RecordedSource& r, std::optional<UnixSeconds> lastRefresh)
 {
     const Source& s = r.source;

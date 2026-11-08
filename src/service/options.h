@@ -13,6 +13,10 @@
 
 namespace cutefish::store::service {
 
+/// Where the service finds PackageKit: the system bus in production, the
+/// session bus for the tests (a simulated daemon), or not at all.
+enum class PackageKitBus { Off, System, Session };
+
 struct ServiceOptions
 {
     /// Holds catalog.sqlite and state.sqlite.
@@ -31,6 +35,9 @@ struct ServiceOptions
     /// Description languages given to the indexer (D-013).
     std::vector<std::string> indexLocales = {"fr"};
     std::string busName = "org.cutefish.Store";
+    PackageKitBus packagekit = PackageKitBus::System;
+    /// The distribution's DEP-11 catalogues (Debian profile of PackageKit).
+    std::filesystem::path swcatalog = "/var/lib/swcatalog";
 };
 
 /// Options:
@@ -41,6 +48,8 @@ struct ServiceOptions
 ///   --retention-ms N      default 300000
 ///   --locale L            reading language, repeatable; default from the
 ///                         environment (LANGUAGE, LC_ALL, LC_MESSAGES, LANG)
+///   --packagekit B        system (default), session or off
+///   --swcatalog DIR       default /var/lib/swcatalog
 /// InvalidArgument for anything else.
 Result<ServiceOptions> parseArguments(const std::vector<std::string>& arguments);
 

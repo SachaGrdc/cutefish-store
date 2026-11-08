@@ -4,10 +4,15 @@
 #include "options.h"
 #include "storeservice.h"
 
+#ifdef CUTEFISH_STORE_HAVE_PACKAGEKIT
+#include "pkbackend.h"
+#endif
+
 #include <base/dbus.h>
 #include <base/event_loop.h>
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -34,7 +39,18 @@ int main(int argc, char** argv)
     disconnected.member = "Disconnected";
     auto lost = connection->subscribe(disconnected, [&loop](const base::dbus::Message&) { loop.quit(1); });
     const std::string name = options->busName;
-    store::service::StoreService service(loop, *connection, std::move(options).value());
+    // The only place that knows which backend the service uses.
+    std::unique_ptr<store::Backend> backend;
+#ifdef CUTEFISH_STORE_HAVE_PACKAGEKIT
+    if (options->packagekit != store::service::PackageKitBus::Off) {
+        store::service::PackageKitBackend::Options pk;
+        pk.bus = options->packagekit == store::service::PackageKitBus::System ? store::service::PkTransport::Bus::System
+                                                                               : store::service::PkTransport::Bus::Session;
+        pk.swcatalog = options->swcatalog;
+        backend = std::make_unique<store::service::PackageKitBackend>(loop, std::move(pk));
+    }
+#endif
+    store::service::StoreService service(loop, *connection, std::move(options).value(), std::move(backend));
     service.onIdle = [&] {
         connection->releaseName(name);
         loop.quit(0);

@@ -48,6 +48,12 @@ struct ServiceSetup
     std::chrono::milliseconds retention = 60s;
     /// Seconds the indexer waits before working (a slow refresh).
     int indexerDelay = 0;
+    /// --packagekit: `off` so that no test reaches the system's packagekitd;
+    /// `session` for a simulated one on the test's bus (fakepackagekit.h).
+    std::string packagekit = "off";
+    /// The Debian test source in sources.conf (otherwise it may come from
+    /// the backend's catalogue sources, `swcatalog`).
+    bool debianInFile = true;
 };
 
 /// The bus, the service's files and a client.
@@ -61,7 +67,8 @@ public:
         // The test sources, copied so that a test may change or remove them.
         std::filesystem::copy_file(std::filesystem::path(SERVICE_TEST_DATA) / "debian.yml", dir / "debian.yml");
         std::filesystem::copy_file(std::filesystem::path(SERVICE_TEST_DATA) / "flathub.xml", dir / "flathub.xml");
-        writeSources(true);
+        writeSources(true, setup.debianInFile);
+        std::filesystem::create_directories(dir / "swcatalog" / "yaml");
         writeIndexer(setup.indexerDelay);
         writeServiceFile(setup);
         writeConfig();
@@ -90,14 +97,15 @@ public:
         }
     }
 
-    /// Lists the two test sources, or Debian only.
-    void writeSources(bool withFlathub)
+    /// Lists the two test sources, or one of them.
+    void writeSources(bool withFlathub, bool withDebian = true)
     {
         std::ofstream out(dir / "sources.conf", std::ios::trunc);
-        out << "# test sources\n"
-            << "id=packagekit:test-main,backend=packagekit,scope=system,kind=distribution,origin=test-main,"
-               "priority=10,file="
-            << (dir / "debian.yml").string() << "\n";
+        out << "# test sources\n";
+        if (withDebian)
+            out << "id=packagekit:test-main,backend=packagekit,scope=system,kind=distribution,origin=test-main,"
+                   "priority=10,file="
+                << (dir / "debian.yml").string() << "\n";
         if (withFlathub)
             out << "id=flatpak:user:flathub,backend=flatpak,scope=user,kind=flathub,origin=flathub,priority=20,file="
                 << (dir / "flathub.xml").string() << "\n";
@@ -180,7 +188,8 @@ private:
         out << "[D-BUS Service]\nName=" << kName << "\nExec=" << SERVICE_BINARY << " --data-dir "
             << (dir / "data").string() << " --sources " << (dir / "sources.conf").string() << " --indexer "
             << (dir / "indexer.sh").string() << " --idle-timeout-ms " << s.idleTimeout.count()
-            << " --retention-ms " << s.retention.count() << " --locale C\n";
+            << " --retention-ms " << s.retention.count() << " --locale C --packagekit " << s.packagekit
+            << " --swcatalog " << (dir / "swcatalog").string() << "\n";
     }
 
     void writeConfig()

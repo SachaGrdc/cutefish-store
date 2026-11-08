@@ -11,6 +11,8 @@ set(CUTEFISH_STORE_INDEXER_PATH "${CMAKE_INSTALL_FULL_LIBEXECDIR}/cutefish-store
 set(CUTEFISH_STORE_SERVICE_PATH "${CMAKE_INSTALL_FULL_LIBEXECDIR}/cutefish-store-service")
 
 add_library(store-service STATIC
+    inventory.cpp
+    inventory.h
     lifecycle.cpp
     lifecycle.h
     marshal.cpp

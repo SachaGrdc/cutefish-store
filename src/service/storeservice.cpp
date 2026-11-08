@@ -29,14 +29,32 @@ void replyError(base::dbus::MethodCall& call, const Result<T>& r)
 
 } // namespace
 
-StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connection, ServiceOptions options)
+StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connection, ServiceOptions options,
+                           std::unique_ptr<Backend> backend)
     : m_loop(loop), m_connection(connection), m_options(std::move(options)),
       m_reads(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite", m_options.readLocales),
       m_refresher(loop, m_options), m_lifecycle(loop, connection, m_options.idleTimeout, [this] {
           if (onIdle)
               onIdle();
-      })
+      }),
+      m_backend(std::move(backend))
 {
+    if (!m_backend)
+        return;
+    m_inventory = std::make_unique<Inventory>(*m_backend, m_options.dataDir / "catalog.sqlite",
+                                              m_options.dataDir / "state.sqlite");
+    m_inventory->onAvailabilityChanged = [this] {
+        m_object->emitPropertiesChanged({"Backends"});
+        if (m_generation > 0)
+            setState("ready"); // or degraded, see setState()
+    };
+    m_inventory->onInstalledChanged = [this](const std::vector<std::string>& apps) {
+        m_object->emitSignal("InstalledChanged", apps);
+    };
+    m_inventory->onUpdatesChanged = [this] {
+        m_object->emitPropertiesChanged({"UpdateCount"});
+        m_object->emitSignal("UpdatesChanged", static_cast<std::uint32_t>(m_inventory->updates().size()));
+    };
 }
 
 StoreService::~StoreService() = default;
@@ -68,12 +86,20 @@ Result<void> StoreService::start()
     if (!m_connection.requestName(m_options.busName))
         return Error::conflict("the name " + m_options.busName + " is owned by another instance");
     loadGeneration();
+    // The backend is asked once the name is ours: its answers become
+    // signals and properties.
+    if (m_inventory)
+        m_inventory->check();
     m_lifecycle.evaluate();
     return {};
 }
 
 void StoreService::setState(std::string state)
 {
+    // A configured backend that cannot be used degrades a ready service
+    // (ARCHITECTURE §5.2): the catalogue reads, nothing can be installed.
+    if (state == "ready" && m_inventory && m_inventory->available() == std::optional<bool>(false))
+        state = "degraded";
     if (state == m_stateName)
         return;
     m_stateName = std::move(state);
@@ -93,8 +119,7 @@ void StoreService::loadGeneration()
                 return c ? c->generation() : 0;
             },
             [this](std::uint64_t generation) {
-                m_generation = generation;
-                m_reads.setGeneration(generation);
+                setGeneration(generation);
                 if (generation > 0) {
                     setState("ready");
                     m_object->emitPropertiesChanged({"CatalogGeneration"});
@@ -107,6 +132,14 @@ void StoreService::loadGeneration()
             });
 }
 
+void StoreService::setGeneration(std::uint64_t generation)
+{
+    m_generation = generation;
+    m_reads.setGeneration(generation);
+    if (m_inventory)
+        m_inventory->setGeneration(generation);
+}
+
 std::string StoreService::newTransaction()
 {
     return std::string(kPath) + "/Transactions/" + std::to_string(m_nextTransaction++);
@@ -115,17 +148,102 @@ std::string StoreService::newTransaction()
 void StoreService::startRefresh(bool force, RefreshTransaction* transaction)
 {
     m_refreshing = true;
+    m_refreshCancelled = false;
     m_lifecycle.beginActivity();
     m_object->emitPropertiesChanged({"Refreshing"});
-    m_refresher.start(force, m_generation,
-                      [this, transaction](Result<RefreshOutcome> r) { refreshDone(std::move(r), transaction); });
+    // A Refresh asked for (not the initial import) first lets the backend
+    // reread its repositories (PackageKit: RefreshCache), when it can.
+    if (transaction && m_inventory && m_inventory->available() == std::optional<bool>(true)
+        && m_backend->capabilities().refresh) {
+        m_refreshPhase = RefreshPhase::Backend;
+        m_refreshOperation = base::Uuid::generate().toString();
+        m_refreshBackendCancellable = false;
+        OperationEvents events;
+        events.progress = [this, transaction](const Progress& p) {
+            if (p.cancellable == m_refreshBackendCancellable)
+                return;
+            m_refreshBackendCancellable = p.cancellable;
+            transaction->updateCancellable();
+        };
+        m_backend->refresh(m_refreshOperation, std::move(events), [this, force, transaction](Result<void> r) {
+            m_refreshOperation.clear();
+            m_refreshBackendCancellable = false;
+            if (!r)
+                return refreshDone(std::move(r).error(), transaction);
+            if (m_refreshCancelled)
+                return refreshDone(Error::cancelled("refresh cancelled"), transaction);
+            indexSources(force, transaction);
+        });
+        transaction->updateCancellable();
+        return;
+    }
+    indexSources(force, transaction);
+}
+
+void StoreService::indexSources(bool force, RefreshTransaction* transaction)
+{
+    auto index = [this, force, transaction](std::vector<ConfiguredSource> provided) {
+        m_refreshPhase = RefreshPhase::Index;
+        m_refresher.start(force, m_generation, std::move(provided),
+                          [this, transaction](Result<RefreshOutcome> r) { refreshDone(std::move(r), transaction); });
+        if (transaction)
+            transaction->updateCancellable();
+    };
+    if (!m_backend)
+        return index({});
+    m_refreshPhase = RefreshPhase::Sources;
     if (transaction)
         transaction->updateCancellable();
+    m_backend->catalogSources([this, transaction, index](Result<std::vector<SourceMetadata>> list) {
+        if (m_refreshCancelled)
+            return refreshDone(Error::cancelled("refresh cancelled"), transaction);
+        std::vector<ConfiguredSource> provided;
+        if (list) {
+            for (SourceMetadata& m : *list)
+                provided.push_back({std::move(m.source), std::move(m.files)});
+        } else {
+            CF_WARNING(cfStore) << "no catalogue sources from " << toString(m_backend->kind()) << ": "
+                                << list.error().message();
+        }
+        index(std::move(provided));
+    });
+}
+
+bool StoreService::cancelRefresh()
+{
+    switch (m_refreshPhase) {
+    case RefreshPhase::Backend:
+        // Only while the backend allows it; its completion then tells.
+        if (!m_refreshBackendCancellable || !m_backend->cancel(m_refreshOperation))
+            return false;
+        m_refreshCancelled = true;
+        return true;
+    case RefreshPhase::Sources:
+        m_refreshCancelled = true;
+        return true;
+    case RefreshPhase::Index:
+        return m_refresher.cancel();
+    case RefreshPhase::None:
+        break;
+    }
+    return false;
+}
+
+bool StoreService::refreshCancellable() const
+{
+    switch (m_refreshPhase) {
+    case RefreshPhase::Backend: return m_refreshBackendCancellable;
+    case RefreshPhase::Sources: return !m_refreshCancelled;
+    case RefreshPhase::Index: return m_refresher.cancellable();
+    case RefreshPhase::None: break;
+    }
+    return false;
 }
 
 void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction* transaction)
 {
     m_refreshing = false;
+    m_refreshPhase = RefreshPhase::None;
     std::vector<std::string> changed{"Refreshing"};
     if (result) {
         if (auto ok = m_state->recordRefresh(result->refreshedSources, now()); ok) {
@@ -135,8 +253,7 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
             CF_WARNING(cfStore) << "cannot record the refresh: " << ok.error().message();
         }
         if (result->replaced) {
-            m_generation = result->generation;
-            m_reads.setGeneration(m_generation);
+            setGeneration(result->generation);
             changed.push_back("CatalogGeneration");
         }
         if (m_generation > 0)
@@ -162,6 +279,10 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
         retire(transaction->path());
     }
     m_currentRefresh.clear();
+    // The backend is asked again: a daemon may have come back, and a
+    // refreshed cache gives other updates.
+    if (m_inventory)
+        m_inventory->check();
     m_lifecycle.endActivity();
 }
 
@@ -201,10 +322,17 @@ void StoreService::exportObject()
     o.addProperty("Version", [] { return std::string(CUTEFISH_STORE_VERSION); });
     o.addProperty("State", [this] { return m_stateName; });
     o.addProperty("CatalogGeneration", [this] { return m_generation; });
-    // No backend in service v0.1 (steps F and G).
-    o.addProperty("Backends", [] { return std::vector<VariantMap>{}; });
+    o.addProperty("Backends", [this] {
+        std::vector<VariantMap> out;
+        if (m_inventory)
+            out.push_back(backendMap(m_backend->kind(), m_backend->capabilities(), m_inventory->available(),
+                                     m_inventory->reason()));
+        return out;
+    });
     o.addProperty("Refreshing", [this] { return m_refreshing; });
     o.addProperty("LastRefresh", [this] { return static_cast<std::uint64_t>(m_lastRefresh.value_or(0)); });
+    if (m_inventory)
+        o.addProperty("UpdateCount", [this] { return static_cast<std::uint32_t>(m_inventory->updates().size()); });
 
     // --- Signals (§4.7) ------------------------------------------------------
     o.addSignal("CatalogChanged", "t", {"generation"});
@@ -212,6 +340,8 @@ void StoreService::exportObject()
     o.addSignal("TransactionAdded", "o", {"transaction"});
     o.addSignal("TransactionRemoved", "o", {"transaction"});
     o.addSignal("SourcesChanged", "", {});
+    if (m_inventory)
+        o.addSignal("UpdatesChanged", "u", {"count"});
 
     // --- Reading (§4.3) ------------------------------------------------------
     o.addMethod(
@@ -423,6 +553,21 @@ void StoreService::exportObject()
             },
             {{"options"}, {"items"}});
 
+    if (m_inventory) {
+        // What the backend reports, filtered by the catalogue (D-010); kept
+        // in memory, refreshed on the backend's signals and each refresh.
+        o.addMethod(
+                "GetUpdates", "", "aa{sv}",
+                [this](MethodCall& call) {
+                    admit(call, false);
+                    std::vector<VariantMap> out;
+                    for (const AvailableUpdate& u : m_inventory->updates())
+                        out.push_back(toMap(u, m_backend->kind()));
+                    call.reply(out);
+                },
+                {{}, {"updates"}});
+    }
+
     o.addMethod(
             "ListSources", "", "aa{sv}",
             [this](MethodCall& call) {
@@ -517,7 +662,7 @@ void StoreService::exportObject()
                 const std::string path = newTransaction();
                 auto t = std::make_unique<RefreshTransaction>(
                         &m_connection, path, base::Uuid::generate().toString(), now(),
-                        [this] { return m_refresher.cancel(); }, [this] { return m_refresher.cancellable(); });
+                        [this] { return cancelRefresh(); }, [this] { return refreshCancellable(); });
                 RefreshTransaction* raw = t.get();
                 m_transactions[path] = std::move(t);
                 m_currentRefresh = path;

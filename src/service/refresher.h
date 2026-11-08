@@ -3,9 +3,9 @@
 // Catalogue refresh in service v0.1 (D-015, SERVICE.md §3.5): read the
 // configured sources, probe and assess them (CATALOG §11), run the indexer
 // as a separate process if something changed, then validate and put the
-// candidate in service with replaceCatalog(). Without the backends (steps F
-// and G) nothing is downloaded: the refresh rereads the metadata files
-// already on disk.
+// candidate in service with replaceCatalog(). The refresher itself downloads
+// nothing: it rereads the metadata files on disk (the host asks a backend to
+// refresh its repositories first, when it can, step F).
 //
 // Disk work (probing, hashing, replacement with its fsync calls) runs on a
 // worker thread; the indexer runs in its own process; the main loop only
@@ -54,8 +54,12 @@ public:
 
     /// Starts a refresh. `force` imports even when nothing changed (a manual
     /// refresh, or the initial import). `generation` is the one in service
-    /// (0 if none). Precondition: not running.
-    void start(bool force, std::uint64_t generation, std::function<void(Result<RefreshOutcome>)> done);
+    /// (0 if none). `provided`: the sources the backends report
+    /// (Backend::catalogSources), indexed with those of the sources file;
+    /// the file's entry wins on a shared id, so that it can override a
+    /// backend's. Precondition: not running.
+    void start(bool force, std::uint64_t generation, std::vector<ConfiguredSource> provided,
+               std::function<void(Result<RefreshOutcome>)> done);
     /// Asks to stop: the indexer is terminated; done() then reports
     /// Cancelled. False when there is nothing left to cancel.
     bool cancel();
