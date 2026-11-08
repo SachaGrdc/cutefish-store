@@ -97,6 +97,13 @@ std::string planToJson(const Plan& plan)
     appendKey(out, "installedSizeChange");
     out += std::to_string(plan.installedSizeChange());
     out += ',';
+    // Optional (D-029): only a backend's total. Absent, the size is the sum
+    // of the items, as in records written before it existed.
+    if (plan.hasTotalDownloadSize()) {
+        appendKey(out, "downloadSize");
+        out += std::to_string(plan.downloadSize());
+        out += ',';
+    }
     appendKey(out, "items");
     out += '[';
     bool first = true;
@@ -158,7 +165,8 @@ Result<Plan> planFromJson(Database& db, std::string_view json)
     auto head = Statement::prepare(db, "SELECT json_valid(?1), json_extract(?1, '$.v'), json_extract(?1, '$.kind'),"
                                        " json_extract(?1, '$.backend'), json_extract(?1, '$.scope'),"
                                        " json_type(?1, '$.installedSizeChange'), json_extract(?1, '$.installedSizeChange'),"
-                                       " json_type(?1, '$.items')");
+                                       " json_type(?1, '$.items'),"
+                                       " json_type(?1, '$.downloadSize'), json_extract(?1, '$.downloadSize')");
     if (!head)
         return std::move(head).error();
     head->bind(1, json);
@@ -175,6 +183,11 @@ Result<Plan> planFromJson(Database& db, std::string_view json)
         return invalid("installedSizeChange must be an integer");
     PlanSpec spec{.kind = *kind, .backend = *backend, .scope = *scope, .items = {},
                   .installedSizeChange = head->columnInt(6)};
+    if (!head->columnIsNull(8)) {
+        if (head->columnText(8) != "integer" || head->columnInt(9) < 0)
+            return invalid("downloadSize must be a non-negative integer");
+        spec.downloadSize = static_cast<std::uint64_t>(head->columnInt(9));
+    }
     if (head->columnText(7) != "array")
         return invalid("items must be an array");
 

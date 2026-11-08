@@ -14,7 +14,9 @@ namespace cutefish::store::detail {
 
 class Database;
 
-/// Format version written in "v". Readers refuse any other value.
+/// Format version written in "v". Readers refuse any other value. Optional
+/// keys added later (the plan's `downloadSize`, D-029) keep the version:
+/// records without them still read the same.
 inline constexpr int kPlanJsonVersion = 1;
 
 std::string planToJson(const Plan& plan);

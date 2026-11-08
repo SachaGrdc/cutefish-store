@@ -120,6 +120,8 @@ void expectSamePlan(const Plan& a, const Plan& b)
     EXPECT_EQ(a.backend(), b.backend());
     EXPECT_EQ(a.scope(), b.scope());
     EXPECT_EQ(a.installedSizeChange(), b.installedSizeChange());
+    EXPECT_EQ(a.hasTotalDownloadSize(), b.hasTotalDownloadSize());
+    EXPECT_EQ(a.downloadSize(), b.downloadSize());
     ASSERT_EQ(a.items().size(), b.items().size());
     for (std::size_t i = 0; i < a.items().size(); ++i) {
         const PlanItem& x = a.items()[i];
@@ -392,6 +394,47 @@ TEST_F(StateStoreTest, TransactionsRoundTrip)
     EXPECT_EQ(restored.concerns(), t.concerns());
 
     EXPECT_FALSE(store.transaction("unknown")->has_value());
+}
+
+TEST_F(StateStoreTest, APackageKitPlanKeepsItsDownloadTotal)
+{
+    // D-029: PackageKit gives the total only; it must survive the journal.
+    auto store = open();
+    Plan plan = unwrap(Plan::create({.kind = TransactionKind::Install,
+                                     .backend = BackendKind::PackageKit,
+                                     .scope = Scope::System,
+                                     .items = {debPackage(PlanOperation::Install, "gimp", true),
+                                               debPackage(PlanOperation::Install, "libgimp-3.0-0", false)},
+                                     .downloadSize = 52458144}));
+    ASSERT_TRUE(plan.hasTotalDownloadSize());
+    Transaction t(TransactionKind::Install);
+    ASSERT_TRUE(t.startPlanning());
+    ASSERT_TRUE(t.planReady(plan));
+    const TransactionRecord in{.id = "6f1c2a9e-0000-4000-8000-000000000029",
+                               .backend = BackendKind::PackageKit,
+                               .scope = Scope::System,
+                               .offers = {{unwrap(OfferId::parse("packagekit:gimp")), appId("org.gimp.GIMP")}},
+                               .snapshot = t.snapshot(),
+                               .created = kT0,
+                               .updated = kT0};
+    ASSERT_TRUE(store.saveTransaction(in));
+    auto out = store.transaction(in.id);
+    ASSERT_TRUE(out && out->has_value()) << (out ? "" : out.error().message());
+    ASSERT_TRUE((*out)->snapshot.plan);
+    const Plan& back = *(*out)->snapshot.plan;
+    EXPECT_TRUE(back.hasTotalDownloadSize());
+    EXPECT_EQ(back.downloadSize(), 52458144u);
+    expectSamePlan(back, plan);
+
+    // A record written before the key existed reads as the sum of the items.
+    rawExec(path, "UPDATE transactions SET current_plan = json_remove(current_plan, '$.downloadSize')");
+    auto old = store.transaction(in.id);
+    ASSERT_TRUE(old && old->has_value());
+    EXPECT_FALSE((*old)->snapshot.plan->hasTotalDownloadSize());
+    EXPECT_EQ((*old)->snapshot.plan->downloadSize(), 0u);
+    // A wrong value is refused, not trusted.
+    rawExec(path, "UPDATE transactions SET current_plan = json_set(current_plan, '$.downloadSize', -1)");
+    EXPECT_FALSE(store.transaction(in.id));
 }
 
 TEST_F(StateStoreTest, SavingAgainReplacesTheRecord)
