@@ -1018,6 +1018,117 @@ TEST(ServiceTransactions, ActionsCheckTheirInputs)
     EXPECT_TRUE(p.noAction());
 }
 
+TEST(ServiceTransactions, UpdateAllParentConfirmationReachesItsChild)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    Answer updates;
+    updates.packages = {pkg(pk::Info::Security, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("GetUpdates", updates);
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Updating, "gimp;3.0.4-4;amd64;debian-trixie-security"),
+                    pkg(pk::Info::Removing, kLibInstalled)};
+    p.fake->answer("UpdatePackages", sim, true); // plan (removes a package: confirmation)
+    p.fake->answer("UpdatePackages", sim, true); // check after Confirm
+    p.fake->answer("UpdatePackages", Answer{}, false);
+    std::vector<std::string> added;
+    auto match = p.b.client->subscribe(rule(kPath, kInterface, "TransactionAdded"), [&](const dbus::Message& m) {
+        dbus::ObjectPath path;
+        if (m.read(path))
+            added.push_back(path.path);
+    });
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.b.property<std::uint32_t>("UpdateCount") == std::optional<std::uint32_t>(1); }));
+
+    const std::string parent = action(p.b, "UpdateAll", p.b.store().call("UpdateAll", dbus::VariantMap{}));
+    ASSERT_TRUE(p.b.waitUntil([&] { return added.size() == 2; }));
+    const std::string child = added[0] == parent ? added[1] : added[0];
+    ASSERT_TRUE(waitState(p.b, parent, "awaiting-confirmation"));
+    ASSERT_TRUE(waitState(p.b, child, "awaiting-confirmation"));
+    EXPECT_EQ(p.calls("UpdatePackages"), 0);
+
+    ASSERT_FALSE(p.b.transaction(parent).call("Confirm").isError());
+    ASSERT_TRUE(waitFinished(p.b, child));
+    EXPECT_EQ(transactionState(p.b, child), "succeeded");
+    ASSERT_TRUE(waitFinished(p.b, parent));
+    EXPECT_EQ(transactionState(p.b, parent), "succeeded");
+    EXPECT_EQ(p.calls("UpdatePackages"), 1);
+    EXPECT_TRUE(journalEntry(p.b, p.b.transaction(child).property<std::string>("Id").value()).has_value());
+    EXPECT_FALSE(journalEntry(p.b, p.b.transaction(parent).property<std::string>("Id").value()).has_value());
+}
+
+TEST(ServiceTransactions, UpdateAllParentCancellationReachesItsChild)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    Answer updates;
+    updates.packages = {pkg(pk::Info::Security, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("GetUpdates", updates);
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Updating, "gimp;3.0.4-4;amd64;debian-trixie-security"),
+                    pkg(pk::Info::Removing, kLibInstalled)};
+    p.fake->answer("UpdatePackages", sim, true);
+    std::vector<std::string> added;
+    auto match = p.b.client->subscribe(rule(kPath, kInterface, "TransactionAdded"), [&](const dbus::Message& m) {
+        dbus::ObjectPath path;
+        if (m.read(path))
+            added.push_back(path.path);
+    });
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.b.property<std::uint32_t>("UpdateCount") == std::optional<std::uint32_t>(1); }));
+
+    const std::string parent = action(p.b, "UpdateAll", p.b.store().call("UpdateAll", dbus::VariantMap{}));
+    ASSERT_TRUE(p.b.waitUntil([&] { return added.size() == 2; }));
+    const std::string child = added[0] == parent ? added[1] : added[0];
+    ASSERT_TRUE(waitState(p.b, parent, "awaiting-confirmation"));
+    ASSERT_TRUE(waitState(p.b, child, "awaiting-confirmation"));
+
+    ASSERT_FALSE(p.b.transaction(parent).call("Cancel").isError());
+    ASSERT_TRUE(waitFinished(p.b, child));
+    EXPECT_EQ(transactionState(p.b, child), "cancelled");
+    ASSERT_TRUE(waitFinished(p.b, parent));
+    EXPECT_EQ(transactionState(p.b, parent), "cancelled");
+    EXPECT_EQ(p.calls("UpdatePackages"), 0); // nothing executed
+    const auto journal = journalEntry(p.b, p.b.transaction(child).property<std::string>("Id").value());
+    ASSERT_TRUE(journal);
+    EXPECT_EQ(journal->at("state").value<std::string>(), "cancelled");
+}
+
+TEST(ServiceTransactions, UpdateAllParentFailsWhenItsChildFails)
+{
+    PkBus p;
+    p.fake->answer("GetPackages", installed({kGimpInstalled}));
+    Answer updates;
+    updates.packages = {pkg(pk::Info::Security, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("GetUpdates", updates);
+    Answer sim;
+    sim.packages = {pkg(pk::Info::Updating, "gimp;3.0.4-4;amd64;debian-trixie-security")};
+    p.fake->answer("UpdatePackages", sim, true);
+    p.fake->answer("UpdatePackages", sim, true);
+    Answer denied;
+    denied.exit = pk::Exit::Failed;
+    denied.error = fakepk::errorCode("not-authorized");
+    p.fake->answer("UpdatePackages", denied, false);
+    std::vector<std::string> added;
+    auto match = p.b.client->subscribe(rule(kPath, kInterface, "TransactionAdded"), [&](const dbus::Message& m) {
+        dbus::ObjectPath path;
+        if (m.read(path))
+            added.push_back(path.path);
+    });
+    ASSERT_TRUE(p.b.waitReady());
+    ASSERT_TRUE(p.b.waitUntil([&] { return p.b.property<std::uint32_t>("UpdateCount") == std::optional<std::uint32_t>(1); }));
+
+    const std::string parent = action(p.b, "UpdateAll", p.b.store().call("UpdateAll", dbus::VariantMap{}));
+    ASSERT_TRUE(p.b.waitUntil([&] { return added.size() == 2; }));
+    const std::string child = added[0] == parent ? added[1] : added[0];
+    ASSERT_TRUE(waitFinished(p.b, child));
+    EXPECT_EQ(transactionState(p.b, child), "failed");
+    ASSERT_TRUE(waitFinished(p.b, parent));
+    EXPECT_EQ(transactionState(p.b, parent), "failed"); // never a global success
+    EXPECT_NE(transactionError(p.b, parent).find("auth-denied"), std::string::npos) << transactionError(p.b, parent);
+    EXPECT_EQ(p.calls("UpdatePackages"), 1);
+}
+
 TEST(ServiceTransactions, UpdateAllIsAParentOfOneChildPerBackend)
 {
     PkBus p;
