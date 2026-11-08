@@ -13,6 +13,7 @@
 #include <cutefish/store/backend.h>
 
 #include <atomic>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -64,7 +65,15 @@ private:
         auto alive = m_alive;
         auto post = m_options.post;
         m_worker.run([alive, post, work = std::move(work), done = std::move(done)]() mutable {
-            Result<T> result = work();
+            Result<T> result = [&work]() -> Result<T> {
+                try {
+                    return work();
+                } catch (const std::exception& e) {
+                    return Error::internal(std::string("Flatpak backend: ") + e.what());
+                } catch (...) {
+                    return Error::internal("Flatpak backend: unknown exception");
+                }
+            }();
             post([alive, done = std::move(done), result = std::move(result)]() mutable {
                 if (*alive)
                     done(std::move(result));

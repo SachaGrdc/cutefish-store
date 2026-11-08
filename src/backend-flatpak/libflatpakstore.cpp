@@ -21,20 +21,34 @@ RefKind fromFlatpakKind(FlatpakRefKind kind)
     return kind == FLATPAK_REF_KIND_APP ? RefKind::App : RefKind::Runtime;
 }
 
-Error errorOf(const GError* error)
+/// Maps a GError to an Error and releases it (the call sites only reach this
+/// with a non-null error). Returns an internal error when none was given.
+Error errorOf(GError** error)
 {
-    if (error == nullptr)
+    if (error == nullptr || *error == nullptr)
         return Error::internal("no error given");
+    const GError* e = *error;
     std::string_view domain;
-    if (error->domain == FLATPAK_ERROR)
+    if (e->domain == FLATPAK_ERROR)
         domain = "flatpak";
-    else if (error->domain == G_IO_ERROR)
+    else if (e->domain == G_IO_ERROR)
         domain = "g-io";
-    else if (error->domain == G_DBUS_ERROR)
+    else if (e->domain == G_DBUS_ERROR)
         domain = "g-dbus";
     else
         domain = "flatpak";
-    return mapFlatpakError(domain, error->code, error->message ? error->message : "");
+    Error out = mapFlatpakError(domain, e->code, e->message ? e->message : "");
+    g_clear_error(error);
+    return out;
+}
+
+/// The explicit error when a transaction would add a remote without consent
+/// (P-011): the store never adds a repository during an operation.
+Error remoteAddError(const std::string& name, const std::string& url)
+{
+    const std::string at = url.empty() ? std::string() : " (" + url + ")";
+    return Error::notAllowed("the transaction would add the remote '" + name + "'" + at
+                             + ", which the store only adds with explicit consent");
 }
 
 FlatpakRef refFrom(const char* full)
@@ -133,13 +147,14 @@ Result<std::vector<RemoteInfo>> LibFlatpakStore::remotes(Scope scope)
     GError* error = nullptr;
     g_autoptr(GPtrArray) list = flatpak_installation_list_remotes(static_cast<FlatpakInstallation*>(*handle), nullptr, &error);
     if (list == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     std::vector<RemoteInfo> out;
     const char* arch = flatpak_get_default_arch();
     for (guint i = 0; i < list->len; ++i) {
         auto* remote = static_cast<FlatpakRemote*>(g_ptr_array_index(list, i));
+        g_autofree char* url = flatpak_remote_get_url(remote);
         RemoteInfo info{.name = flatpak_remote_get_name(remote),
-                        .url = flatpak_remote_get_url(remote),
+                        .url = url ? url : "",
                         .disabled = flatpak_remote_get_disabled(remote) != FALSE,
                         .gpgVerify = flatpak_remote_get_gpg_verify(remote) != FALSE,
                         .metadataPath = {},
@@ -166,7 +181,7 @@ Result<void> LibFlatpakStore::addRemote(Scope scope, const std::string& name, co
     g_autoptr(FlatpakRemote) remote = flatpak_remote_new(name.c_str());
     flatpak_remote_set_url(remote, url.c_str());
     if (!flatpak_installation_add_remote(static_cast<FlatpakInstallation*>(*handle), remote, FALSE, nullptr, &error))
-        return errorOf(error);
+        return errorOf(&error);
     return Result<void>::success();
 }
 
@@ -177,7 +192,7 @@ Result<void> LibFlatpakStore::removeRemote(Scope scope, const std::string& name)
         return std::move(handle).error();
     GError* error = nullptr;
     if (!flatpak_installation_remove_remote(static_cast<FlatpakInstallation*>(*handle), name.c_str(), nullptr, &error))
-        return errorOf(error);
+        return errorOf(&error);
     return Result<void>::success();
 }
 
@@ -190,10 +205,10 @@ Result<void> LibFlatpakStore::setRemoteDisabled(Scope scope, const std::string& 
     g_autoptr(FlatpakRemote) remote =
             flatpak_installation_get_remote_by_name(static_cast<FlatpakInstallation*>(*handle), name.c_str(), nullptr, &error);
     if (remote == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     flatpak_remote_set_disabled(remote, disabled);
     if (!flatpak_installation_modify_remote(static_cast<FlatpakInstallation*>(*handle), remote, nullptr, &error))
-        return errorOf(error);
+        return errorOf(&error);
     return Result<void>::success();
 }
 
@@ -229,7 +244,7 @@ Result<std::vector<InstalledRef>> LibFlatpakStore::installed(Scope scope)
     g_autoptr(GPtrArray) list =
             flatpak_installation_list_installed_refs(static_cast<FlatpakInstallation*>(*handle), nullptr, &error);
     if (list == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     std::vector<InstalledRef> out;
     for (guint i = 0; i < list->len; ++i)
         if (auto ref = installedRefOf(static_cast<FlatpakInstalledRef*>(g_ptr_array_index(list, i))))
@@ -246,7 +261,7 @@ Result<std::vector<UpdateRef>> LibFlatpakStore::updates(Scope scope)
     g_autoptr(GPtrArray) list =
             flatpak_installation_list_installed_refs_for_update(static_cast<FlatpakInstallation*>(*handle), nullptr, &error);
     if (list == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     std::vector<UpdateRef> out;
     for (guint i = 0; i < list->len; ++i) {
         auto* ref = static_cast<FlatpakInstalledRef*>(g_ptr_array_index(list, i));
@@ -271,7 +286,7 @@ Result<RefMetadata> LibFlatpakStore::metadata(Scope scope, const std::string& re
             static_cast<FlatpakInstallation*>(*handle), remote.c_str(), refKindOf(ref.kind), ref.name.c_str(),
             ref.arch.c_str(), ref.branch.c_str(), FLATPAK_QUERY_FLAGS_NONE, nullptr, &error);
     if (remoteRef == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     RefMetadata out;
     out.downloadSize = flatpak_remote_ref_get_download_size(remoteRef);
     out.installedSize = flatpak_remote_ref_get_installed_size(remoteRef);
@@ -301,6 +316,10 @@ struct TransactionState
     std::optional<Error> error;
     bool changed = false;
     bool cancelled = false;
+    /// Set when the transaction tried to add a remote (add-new-remote):
+    /// refused, and reported as an explicit error (P-011).
+    std::string refusedRemote;
+    std::string refusedUrl;
 };
 
 /// Copies the operations the transaction resolved from its `ready` signal.
@@ -352,7 +371,7 @@ Result<std::vector<FlatpakOp>> LibFlatpakStore::resolve(const TransactionSpec& s
     g_autoptr(FlatpakTransaction) tx =
             flatpak_transaction_new_for_installation(static_cast<FlatpakInstallation*>(*handle), nullptr, &error);
     if (tx == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     for (const RefRequest& r : spec.refs) {
         const std::string full = r.ref.full();
         gboolean ok = FALSE;
@@ -368,7 +387,7 @@ Result<std::vector<FlatpakOp>> LibFlatpakStore::resolve(const TransactionSpec& s
             break;
         }
         if (!ok)
-            return errorOf(error);
+            return errorOf(&error);
     }
     flatpak_transaction_set_no_interaction(tx, TRUE);
     flatpak_transaction_add_default_dependency_sources(tx);
@@ -376,14 +395,32 @@ Result<std::vector<FlatpakOp>> LibFlatpakStore::resolve(const TransactionSpec& s
     TransactionState state;
     state.spec = spec;
     g_signal_connect(tx, "ready", G_CALLBACK(onReady), &state);
+    // The store never adds a remote during a transaction (P-011): a
+    // dependency that needs a missing remote is refused with a clear error,
+    // not silently configured.
+    g_signal_connect(tx, "add-new-remote",
+                     G_CALLBACK(+[](FlatpakTransaction*, FlatpakTransactionRemoteReason, const char*,
+                                    const char* remoteName, const char* url, gpointer d) -> gboolean {
+                         auto* s = static_cast<TransactionState*>(d);
+                         s->refusedRemote = remoteName ? remoteName : "";
+                         s->refusedUrl = url ? url : "";
+                         return FALSE; // do not add it
+                     }),
+                     &state);
     g_autoptr(GCancellable) cancel = g_cancellable_new();
     gboolean ran = flatpak_transaction_run(tx, cancel, &error);
+    if (!state.refusedRemote.empty()) {
+        g_clear_error(&error);
+        return remoteAddError(state.refusedRemote, state.refusedUrl);
+    }
     if (!ran) {
         // The first pass always aborts in `ready` (FLATPAK_ERROR_ABORTED): the
         // operations are the result, not an error (ARCHITECTURE §7.3).
-        if (error && error->domain == FLATPAK_ERROR && error->code == FLATPAK_ERROR_ABORTED)
+        if (error && error->domain == FLATPAK_ERROR && error->code == FLATPAK_ERROR_ABORTED) {
+            g_clear_error(&error);
             return state.ops;
-        return errorOf(error);
+        }
+        return errorOf(&error);
     }
     return state.ops;
 }
@@ -397,7 +434,7 @@ Result<ExecutionOutcome> LibFlatpakStore::execute(const TransactionSpec& spec, E
     g_autoptr(FlatpakTransaction) tx =
             flatpak_transaction_new_for_installation(static_cast<FlatpakInstallation*>(*handle), nullptr, &error);
     if (tx == nullptr)
-        return errorOf(error);
+        return errorOf(&error);
     for (const RefRequest& r : spec.refs) {
         const std::string full = r.ref.full();
         gboolean ok = FALSE;
@@ -413,7 +450,7 @@ Result<ExecutionOutcome> LibFlatpakStore::execute(const TransactionSpec& spec, E
             break;
         }
         if (!ok)
-            return errorOf(error);
+            return errorOf(&error);
     }
     // A user action on the system installation lets polkit ask; the user
     // installation and background work never show a dialog (ARCHITECTURE §7.3).
@@ -427,6 +464,8 @@ Result<ExecutionOutcome> LibFlatpakStore::execute(const TransactionSpec& spec, E
         GCancellable* cancel = nullptr;
         bool changed = false;
         bool cancelled = false;
+        std::string refusedRemote;
+        std::string refusedUrl;
     };
     ExecuteState state;
     state.control = std::move(control);
@@ -467,18 +506,39 @@ Result<ExecutionOutcome> LibFlatpakStore::execute(const TransactionSpec& spec, E
                      }),
                      &state);
 
+    // A transaction never adds a remote (P-011): refuse it and report the
+    // attempt, so nothing is configured or deployed.
+    g_signal_connect(tx, "add-new-remote",
+                     G_CALLBACK(+[](FlatpakTransaction*, FlatpakTransactionRemoteReason, const char*,
+                                    const char* remoteName, const char* url, gpointer d) -> gboolean {
+                         auto* s = static_cast<ExecuteState*>(d);
+                         s->refusedRemote = remoteName ? remoteName : "";
+                         s->refusedUrl = url ? url : "";
+                         return FALSE; // do not add it
+                     }),
+                     &state);
+
     gboolean ran = flatpak_transaction_run(tx, cancel, &error);
+    if (!state.refusedRemote.empty()) {
+        g_clear_error(&error);
+        return remoteAddError(state.refusedRemote, state.refusedUrl);
+    }
     if (state.changed) {
         // ready returned false: nothing was executed; the fresh operations are
         // the plan that would have run.
+        g_clear_error(&error);
         return ExecutionOutcome{.type = ExecutionOutcome::Type::PlanChanged, .ops = std::move(state.ops)};
     }
-    if (state.cancelled)
+    if (state.cancelled) {
+        g_clear_error(&error);
         return Error::cancelled("cancelled");
+    }
     if (!ran) {
-        if (error && error->domain == FLATPAK_ERROR && error->code == FLATPAK_ERROR_ABORTED)
+        if (error && error->domain == FLATPAK_ERROR && error->code == FLATPAK_ERROR_ABORTED) {
+            g_clear_error(&error);
             return Error::cancelled("aborted");
-        return errorOf(error);
+        }
+        return errorOf(&error);
     }
     return ExecutionOutcome{.type = ExecutionOutcome::Type::Completed, .ops = {}};
 }

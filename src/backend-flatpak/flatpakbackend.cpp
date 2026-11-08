@@ -167,6 +167,8 @@ void FlatpakBackend::catalogSources(Completion<std::vector<SourceMetadata>> done
             if (!remotes)
                 return std::move(remotes).error();
             for (const RemoteInfo& remote : *remotes) {
+                if (remote.disabled)
+                    continue; // a disabled remote must not feed the catalogue
                 auto source = sourceForRemote(scope, remote);
                 if (!source)
                     continue;

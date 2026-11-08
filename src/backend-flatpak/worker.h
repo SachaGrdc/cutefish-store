@@ -8,7 +8,9 @@
 // transactions, which is safe and keeps the main loop unblocked.
 
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -32,7 +34,16 @@ public:
                     task = std::move(m_queue.front());
                     m_queue.pop_front();
                 }
-                task();
+                // A task must never let an exception escape the worker (that
+                // would terminate the process). The backend already maps store
+                // errors to Results; this is a backstop.
+                try {
+                    task();
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "Flatpak backend worker: %s\n", e.what());
+                } catch (...) {
+                    std::fprintf(stderr, "Flatpak backend worker: unknown exception\n");
+                }
             }
         });
     }
