@@ -1115,7 +1115,7 @@ virtuelle.
 | **D. `Backend` étendu** (fait) | Opérations du §5.4 dans `backend.h` ; faux backend scriptable | Contrat de complétion, annulation, flux de progression | A |
 | **E. Service v0.1, lecture seule** (fait, §16) | Couche hôte (`ToolkitBase`), nom de bus, cycle de vie (clients, 5 minutes), pool de lecture, `Search`, `GetDetails` (dont `default`), `GetSummaries`, import initial, indexeur `--locale fr`, `Refresh` manuel | Bus de session privé (`dbus-run-session`), faux backends | A à D ; validation de P-001, P-009, P-013 souhaitée |
 | **F. Backend PackageKit** (fait, §17) | Transport, requêtes d'état, plans par simulation, exécution, reprise (§5.6, §6) ; intégration au service en lecture (D-025) | Faux PackageKit sur bus privé ; requêtes et simulations contre le vrai démon (D-026) ; VM pour les transactions réelles (non fait) | E ; Q-9 à Q-11 |
-| **F2. Gestionnaire de transactions** (fait, §18, à valider) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | Faux PackageKit ; VM pour les transactions réelles | F |
+| **F2. Gestionnaire de transactions** (fait, §18, à valider) | `Install`, `Remove`, `Update`, `UpdateAll` : objets de transaction, plan, `Confirm`, minuterie de 10 minutes (D-019), journal (D-017, D-018), reprise au démarrage (`reattach`), file par backend (P-009) | PackageKit simulé, y compris reprise, annulations, files et parente `UpdateAll` ; gestionnaire générique avec deux faux backends pour l'échec partiel ; VM pour les transactions réelles | F |
 | **G. Backend Flatpak utilisateur** | Double passe, exécution, permissions, remote Flathub utilisateur | `FLATPAK_USER_DIR` et dépôt local (méthode du prototype 1) | E ; `libflatpak-dev` installé (D-016) ; P-011 |
 | **H. Flatpak système** | Mises à jour avec runtime (D-014), suppression, `set_no_interaction` | VM seulement | G ; O-013 pour les nouvelles installations |
 | **I. Actualisation automatique et images** | Minuterie systemd et minuterie interne, `Metered`, vérification à l'ouverture (§3.5) ; cache d'images (P-005) ; notifications plus tard | Bus système privé simulant NetworkManager ; serveur HTTP local pour les images | E ; `libcurl4-openssl-dev` installé (D-016) ; Q-12 ; O-010 pour les notifications |
@@ -1367,11 +1367,36 @@ expiré (`cancelled`) ; file libérée pendant l'attente (un `Refresh` passe) ;
 refus d'autorisation (`auth-denied`) ; validation des entrées ;
 `UpdateAll` parente et enfant.
 
-**Implémenté mais non testé** : rattachement au démarrage d'une transaction
-`running` du journal (`TransactionManager::recover`, §5.6) ; annulation
-d'une transaction `running` par D-Bus (le backend seul est testé, étape F) ;
-annulation pendant la seconde simulation ; plusieurs transactions en file
-sur le même backend.
+**Testé depuis la reprise des tests F2** :
+
+- **reprise au démarrage** (`StoreService::start()` →
+  `recoverAfterRestart()` → `TransactionManager::recover()`) : une
+  transaction `running` conservée avec sa référence PackageKit est
+  rattachée, se termine `succeeded` et reste cohérente dans le journal ; si
+  le démon ne la connaît plus, elle devient `interrupted` ; une transaction
+  restée en `planning` devient `interrupted` et n'est pas republiée ;
+- **annulation d'une transaction `running` par D-Bus** : la demande atteint
+  PackageKit, `Finished` est émis, l'état final et le journal sont
+  `cancelled`, aucune seconde transaction réelle n'est lancée ; quand
+  `AllowCancel` est faux, `Cancel` répond `NotAllowed` et la transaction
+  s'achève normalement, sans fausse confirmation d'annulation ;
+- **annulation pendant la seconde simulation** : la transaction est annulée
+  avant toute transaction réelle (`InstallPackages` non simulé jamais
+  appelé), état et journal `cancelled` ;
+- **plusieurs transactions dans une file** : la première s'exécute, la
+  seconde reste `queued`, puis obtient le créneau ; ordre des transactions
+  réelles vérifié, aucun chevauchement ; deux transactions en
+  `awaiting-confirmation` libèrent la file et s'exécutent dans l'ordre de
+  confirmation (D-030) ;
+- **parente `UpdateAll`** : `Confirm` et `Cancel` de la parente atteignent
+  l'enfant ; un enfant en échec rend la parente `failed` avec son erreur,
+  jamais `succeeded` ; les enfants sont journalisés, la parente non ;
+- **échec partiel de `UpdateAll`** (test du gestionnaire générique,
+  `tests/service/testtransactionmanager.cpp`, avec deux backends
+  scriptés) : un enfant réussit, l'autre échoue, la parente échoue et les
+  deux enfants sont dans le journal.
+
+**Implémenté mais non testé** : aucun point du périmètre F2 décrit ici.
 
 **Jamais vérifié** : toute transaction réelle (VM nécessaire), dialogue
 polkit, verrou dpkg, debconf.

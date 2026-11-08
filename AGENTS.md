@@ -48,14 +48,17 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | D | Contrat `Backend` complet | `4346051`, `4e714aa` |
 | E | Service D-Bus v0.1 en lecture | `ed56113`, `d017c02` |
 | F | Backend PackageKit, intégration en lecture, D-028, D-029 | `59084c2` … `40d3c7b` |
-| F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f` et le commit de documentation qui suit |
+| F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
 
-- **F2** : implémentée et testée contre le PackageKit simulé ; détail de ce
-  qui est testé, non testé et jamais vérifié dans SERVICE.md §18. **Le
-  propriétaire doit encore valider F2.** Points à reprendre en priorité :
-  tests du rattachement au démarrage (`TransactionManager::recover`), de
-  l'annulation d'une transaction `running` par D-Bus, et de plusieurs
-  transactions en file.
+- **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
+  ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
+  §18. **Le propriétaire doit encore valider F2.** Les reprises au
+  démarrage (rattachement, transaction perdue, `planning` interrompu),
+  l'annulation d'une transaction `running` par D-Bus, l'annulation pendant
+  la seconde simulation, plusieurs transactions en file et la parente
+  `UpdateAll` (dont l'échec partiel) ont désormais des tests. Les
+  transactions réelles, le dialogue polkit, le verrou dpkg et debconf
+  restent à vérifier en VM.
 - **Prochaine étape après F2** : G (backend Flatpak utilisateur, SERVICE.md
   §7 et §15). **Ne commencer aucune étape sans l'accord explicite du
   propriétaire.**
