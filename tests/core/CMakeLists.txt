@@ -7,6 +7,7 @@ add_executable(store-core-tests
     planfixtures.h
     testaliases.cpp
     testapplication.cpp
+    testapplicationlinks.cpp
     testbackend.cpp
     testbrowse.cpp
     testcatalog.cpp

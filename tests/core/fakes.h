@@ -156,6 +156,17 @@ public:
         return out;
     }
 
+    Result<std::vector<std::pair<OfferId, AppId>>> offerApplications(std::span<const OfferId> offers) const override
+    {
+        std::vector<std::pair<OfferId, AppId>> out;
+        for (const OfferId& id : offers)
+            for (const Application& a : m_apps)
+                for (const Offer& o : a.offers())
+                    if (o.id() == id)
+                        out.emplace_back(id, a.id());
+        return out;
+    }
+
     /// What sources() returns; set by the test.
     std::vector<RecordedSource> recordedSources;
 

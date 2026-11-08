@@ -12,6 +12,7 @@ endif()
 
 set(STORE_CORE_PUBLIC_HEADERS
     include/cutefish/store/application.h
+    include/cutefish/store/applicationlinks.h
     include/cutefish/store/backend.h
     include/cutefish/store/catalog.h
     include/cutefish/store/catalogfile.h
@@ -37,6 +38,7 @@ set(STORE_CORE_PUBLIC_HEADERS
 add_library(store-core STATIC
     ${STORE_CORE_PUBLIC_HEADERS}
     src/application.cpp
+    src/applicationlinks.cpp
     src/backend.cpp
     src/catalogfile.cpp
     src/catalogschema.h

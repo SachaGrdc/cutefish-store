@@ -178,6 +178,7 @@ struct SqliteCatalog::Impl
     mutable std::string lastKey;
     mutable std::vector<std::int64_t> lastResults;
     // Same for the last browse: row numbers only.
+    mutable std::optional<std::unordered_multimap<std::string, std::string>> offerApps; // offer_id -> app_id
     mutable std::string lastBrowseKey;
     mutable std::vector<std::int64_t> lastBrowseResults;
 
@@ -821,6 +822,33 @@ Result<std::vector<CategoryCount>> SqliteCatalog::listCategories() const
     s.reset();
     if (rc != SQLITE_DONE)
         return d->db.error("listing categories");
+    return out;
+}
+
+Result<std::vector<std::pair<OfferId, AppId>>> SqliteCatalog::offerApplications(std::span<const OfferId> offers) const
+{
+    if (!d->offerApps) {
+        auto stmt = Statement::prepare(d->db, "SELECT o.offer_id, a.app_id FROM offers o JOIN apps a ON a.id = o.app");
+        if (!stmt)
+            return std::move(stmt).error();
+        std::unordered_multimap<std::string, std::string> map;
+        int rc;
+        while ((rc = stmt->step()) == SQLITE_ROW)
+            map.emplace(std::string(stmt->columnText(0)), std::string(stmt->columnText(1)));
+        if (rc != SQLITE_DONE)
+            return d->db.error("reading the offers");
+        d->offerApps = std::move(map);
+    }
+    std::vector<std::pair<OfferId, AppId>> out;
+    for (const OfferId& offer : offers) {
+        const auto [begin, end] = d->offerApps->equal_range(offer.str());
+        for (auto it = begin; it != end; ++it) {
+            auto app = AppId::parse(it->second);
+            if (!app)
+                return Error::internal("invalid application id in catalogue: " + it->second);
+            out.emplace_back(offer, std::move(app).value());
+        }
+    }
     return out;
 }
 

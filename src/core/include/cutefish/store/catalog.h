@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace cutefish::store {
@@ -47,6 +48,11 @@ public:
 
     /// Every category with its number of applications, sorted by name.
     virtual Result<std::vector<CategoryCount>> listCategories() const = 0;
+
+    /// For each given offer that the catalogue has, the application(s) it
+    /// belongs to; unknown offers are left out. For linking what a backend
+    /// reports (applicationlinks.h).
+    virtual Result<std::vector<std::pair<OfferId, AppId>>> offerApplications(std::span<const OfferId> offers) const = 0;
 
     /// The sources this snapshot was built from, sorted by id, with the
     /// fingerprint of what was imported and the number of offers.

@@ -73,6 +73,9 @@ public:
     Result<SearchPage> browse(const BrowseQuery& query) const override;
     Result<std::vector<CategoryCount>> listCategories() const override;
     Result<std::vector<RecordedSource>> sources() const override;
+    /// The offer-to-application map is read once per instance (the
+    /// snapshot never changes): offer ids are not indexed on their own.
+    Result<std::vector<std::pair<OfferId, AppId>>> offerApplications(std::span<const OfferId> offers) const override;
 
 private:
     struct Impl;
