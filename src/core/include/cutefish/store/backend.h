@@ -191,8 +191,11 @@ public:
     /// listed with the path where its file will be.
     virtual void catalogSources(Completion<std::vector<SourceMetadata>> done) = 0;
 
-    /// Updates available for what is installed (D-010: applications and
-    /// the runtimes they use; identical versions left out).
+    /// Updates available for what is installed, as the package manager sees
+    /// them: every package with a newer version, identical versions left
+    /// out. The backend does not know the catalogue; the host keeps the
+    /// updates of applications and runtimes with applicationUpdates()
+    /// (D-010, D-023).
     virtual void queryUpdates(Completion<std::vector<AvailableUpdate>> done) = 0;
 
     /// Permissions of an offer, as stable strings (`shared=network`).

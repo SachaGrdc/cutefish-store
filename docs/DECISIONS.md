@@ -394,6 +394,8 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Écartés** : la découverte intégrée (`/var/lib/swcatalog`,
   `/var/lib/flatpak/appstream`), qui dupliquerait la logique des backends ;
   l'absence de rafraîchissement.
+- **Complétée** (étape F, D-028) : le fichier reste, et s'ajoute aux sources
+  que le backend PackageKit fournit par `catalogSources()`.
 
 ### D-021 — `Refresh` du service v0.1 : objet de transaction non journalisé
 
@@ -413,6 +415,59 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   `UpdateCount` et le signal `UpdatesChanged`, ne sont pas exportés tant que
   les backends n'existent pas. L'introspection ne montre que ce qui
   fonctionne ; un appel reçoit `UnknownMethod`.
+- **Modifiée** (étape F, D-025) : avec un backend configuré, `GetUpdates`,
+  `UpdateCount` et `UpdatesChanged` sont exportés. Les méthodes d'action et
+  `GetPermissions` restent absentes.
+
+### D-023 — Filtrage des mises à jour par l'hôte (D-010)
+
+- **Statut** : Validée (propriétaire, étape F).
+- **Décision** : un backend rapporte les mises à jour **telles que son
+  gestionnaire les voit** (pour PackageKit : tous les paquets, sans les
+  versions identiques à l'installée). L'hôte garde celles des applications du
+  catalogue et les runtimes avec une fonction pure du cœur,
+  `applicationUpdates()` (`applicationlinks.h`) ; `linkInstalled()` relie de
+  même l'inventaire installé aux applications. La signature de
+  `Backend::queryUpdates` ne change pas ; seul son commentaire est précisé.
+- **Raison** : les backends ne connaissent pas le catalogue (P-001) ; le
+  filtrage est testable sans D-Bus.
+- **Écarté** : passer le catalogue aux backends.
+
+### D-024 — Classement des dépôts APT par hôte
+
+- **Statut** : Validée (propriétaire, étape F).
+- **Décision** : dans le profil Debian, un dépôt dont l'URL a pour hôte
+  `debian.org` ou un de ses sous-domaines (`deb.debian.org`,
+  `security.debian.org`) est `distribution` ; tout autre est `third-party`
+  (y compris le dépôt Cutefish). Les sources DEP-11 de `/var/lib/swcatalog`
+  sont classées de même d'après l'hôte de leur nom de fichier.
+- **Limite** : un miroir Debian sous un autre nom d'hôte est classé
+  `third-party` ; une liste de miroirs connus pourra venir plus tard.
+
+### D-025 — Portée de l'étape F : backend complet, intégration en lecture
+
+- **Statut** : Validée (propriétaire, étape F).
+- **Décision** : le backend PackageKit implémente tout le contrat
+  (`plan`, `execute`, `reattach`, `refresh`, `cancel` compris) et est testé
+  seul contre un PackageKit simulé. Le service ne l'utilise qu'en lecture :
+  propriété `Backends`, inventaire installé dans `state.sqlite`,
+  `GetUpdates`, et `RefreshCache` dans un `Refresh` demandé. `Install`,
+  `Remove`, `Update`, `UpdateAll` et le gestionnaire de transactions forment
+  une étape ultérieure, validée séparément.
+- **Conséquence** : un service prêt dont le backend configuré est
+  inutilisable est `degraded` (ARCHITECTURE §5.2) ; le catalogue reste
+  lisible.
+
+### D-026 — Tests contre le vrai packagekitd
+
+- **Statut** : Validée (propriétaire, étape F).
+- **Décision** : des tests à part (`store-pkbackend-real-tests`), hors du
+  `ctest` par défaut, lancés seulement avec
+  `CUTEFISH_STORE_REAL_PACKAGEKIT=1`. Requêtes et transactions `SIMULATE`
+  uniquement : jamais `execute`, `reattach`, `refresh` (`RefreshCache`), ni
+  `interactive=true`. Tous les autres tests utilisent un PackageKit simulé
+  sur un bus privé ; les tests D-Bus existants du service passent
+  `--packagekit off`.
 
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
@@ -744,6 +799,44 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 ---
 
 ## Décisions proposées (à valider)
+
+### D-027 — Mises à jour gardées en mémoire
+
+- **Statut** : Proposée (étape F), à valider.
+- **Décision** : la liste filtrée des mises à jour vit dans la mémoire du
+  service ; elle est recalculée au démarrage, aux signaux du démon, à chaque
+  nouveau catalogue et après chaque `Refresh`. La table `updates` de
+  SERVICE §8.2 n'est pas encore créée.
+- **Raison** : aucune lecture ne la demande encore hors de `GetUpdates`
+  (`has-update` dans les résultats de recherche viendra avec elle) ; le
+  calcul coûte deux requêtes PackageKit.
+- **Conséquence** : juste après un démarrage, `GetUpdates` est vide le
+  temps de ces requêtes, puis `UpdatesChanged` est émis.
+
+### D-028 — Rafraîchissement avec un backend
+
+- **Statut** : Proposée (étape F), à valider.
+- **Décision** : un `Refresh` demandé appelle d'abord
+  `Backend::refresh()` (PackageKit : `RefreshCache(false)`, `interactive`,
+  sans indice `background`), puis réindexe les sources de
+  `Backend::catalogSources()` **et** celles de `sources.conf` ; sur un même
+  identifiant, le fichier l'emporte. L'import initial ne lance pas
+  `RefreshCache`. Un échec de `RefreshCache` fait échouer le rafraîchissement
+  sans réindexer (le catalogue en service reste, `LastRefresh` ne bouge
+  pas). L'annulation passe à PackageKit tant que `AllowCancel` est vrai.
+- **Écarté** : réindexer malgré l'échec, qui ferait croire à un
+  rafraîchissement réussi.
+
+### D-029 — Taille de téléchargement totale d'un plan
+
+- **Statut** : Proposée (étape F), à valider.
+- **Décision** : `PlanSpec::downloadSize` porte le total donné par un
+  backend qui ne le répartit pas par paquet (PackageKit :
+  `DownloadSizeRemaining` après la simulation) ; `Plan::downloadSize()` le
+  rend, sinon la somme des éléments. Une différence de total entre deux
+  plans est un `SizeChanged` informatif, sans nouvelle confirmation.
+- **Raison** : trouvé par les tests réels (D-026) : sans cela, tout plan
+  PackageKit annonçait 0 octet.
 
 ### P-001 — Un seul service, bibliothèques internes statiques, pas de plugins
 

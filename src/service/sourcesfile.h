@@ -1,8 +1,8 @@
 #pragma once
 
-// The sources the service indexes, until the backends provide them through
-// Backend::catalogSources() (steps F and G; owner's decision for service
-// v0.1). One source per line, in the syntax of the indexer's --source
+// Sources the service indexes besides those the backends provide through
+// Backend::catalogSources() (D-020, D-028): the file's entry wins on a
+// shared id. One source per line, in the syntax of the indexer's --source
 // option:
 //
 //   id=ID,backend=packagekit|flatpak,scope=system|user,

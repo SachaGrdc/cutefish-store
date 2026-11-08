@@ -787,8 +787,9 @@ proposition ci-dessous, qui reste la référence pour les tables à venir :
 - les raisons de confirmation ne sont pas stockées : elles sont recalculées
   depuis le plan, seul l'indicateur `plan_changed` est gardé ;
 - pas encore créées, elles viendront par migration avec leur composant :
-  `updates` (avec `queryUpdates`, étapes D et F ; prévue d'abord à l'étape
-  C), `images` (étape I), le consentement Flathub de `source_state` (P-011,
+  `updates` (avec `queryUpdates` ; prévue d'abord à l'étape C, toujours
+  reportée à l'étape F : les mises à jour restent en mémoire, D-027),
+  `images` (étape I), le consentement Flathub de `source_state` (P-011,
   étape G), le lien `parent` d'`UpdateAll` (service).
 
 Proposition initiale :
@@ -1116,7 +1117,8 @@ d'actualisation (backends, indexeur, remplacement, fusion des demandes) est
 Implémenté dans `src/service/` (`cutefish-store-service`, bibliothèque
 `store-service`), en lecture seule envers les gestionnaires de paquets
 (D-020 à D-022). Le cœur ne dépend pas du service ; seule cette couche
-utilise Cutefish Toolkit (P-006).
+utilise Cutefish Toolkit (P-006). Cette section décrit la v0.1 sans
+backend (`--packagekit off`) ; le §17 dit ce que l'étape F y ajoute.
 
 ### 16.1 API réellement exportée
 
@@ -1146,7 +1148,7 @@ en service du candidat), `Confirm` (toujours `NotAllowed`), signal
 
 | Thread | Rôle |
 |---|---|
-| Principal (`base::EventLoop`) | D-Bus, cycle de vie, écritures de `state.sqlite` (au démarrage et après un rafraîchissement) |
+| Principal (`base::EventLoop`) | D-Bus, cycle de vie, écritures de `state.sqlite` (au démarrage et après un rafraîchissement ; l'inventaire installé s'écrit sur un thread à lui depuis l'étape F, §17.4) |
 | Pool de lecture (2, `base::ThreadPool`) | Chaque thread : `SqliteCatalog` avec `state.sqlite` attachée, `SqliteInstalledState`, et un `StateStore` pour lire le journal ; rouverts à chaque nouvelle génération |
 | Travaux disque (1) | Lecture de `sources.conf`, sondes et empreintes, `replaceCatalog` (fsync, renommage) |
 | Indexeur | Processus séparé (`base::Process`), jamais attendu de façon bloquante |
@@ -1196,3 +1198,127 @@ nom soit pris (§3.1).
 - Activation testée sur un bus privé, **sans systemd** ; l'activation par
   `SystemdService` sur une vraie session n'est pas testée.
 - Mesures de latence par D-Bus (P-004, p95 < 50 ms visé) non faites.
+
+## 17. Backend PackageKit (étape F)
+
+Portée (D-025) : le backend implémente tout le contrat `Backend` et est
+testé seul ; le service ne s'en sert qu'en lecture. Aucune méthode d'action
+n'est exportée. Rien de cette étape ne demande de privilège : PackageKit et
+polkit gardent l'autorisation (P-007).
+
+### 17.1 Composants
+
+| Composant | Où | Rôle | Dépend de |
+|---|---|---|---|
+| Logique PackageKit | `src/backend-packagekit/` (`store-backend-packagekit`) | Énumérations 1.3.1, `package_id`, traduction des résultats en types du cœur : inventaire, mises à jour, plan d'une simulation, progression, erreurs | `store-core` seul |
+| Profil Debian | `debianprofile.{h,cpp}`, même bibliothèque | Architecture dpkg, dépôts (`packagekit:<repo_id>`, D-024), sources DEP-11 de `/var/lib/swcatalog`, paquets protégés | `store-core` seul |
+| Transport | `src/service/pktransport.{h,cpp}` | Thread et `EventLoop` propres, connexion au bus de PackageKit, une transaction à la fois, délais, annulation, perte du démon, rattachement | Cutefish Toolkit |
+| `PackageKitBackend` | `src/service/pkbackend.{h,cpp}` | Le contrat `Backend` sur le transport et la logique | les trois précédents |
+| `Inventory` | `src/service/inventory.{h,cpp}` | Disponibilité, inventaire dans `state.sqlite`, mises à jour filtrées ; générique (contrat `Backend` seul) | `store-core` |
+| `main` | `src/service/main.cpp` | Seul endroit qui choisit le backend (`--packagekit system|session|off`, `--swcatalog`) | — |
+
+Le service (`StoreService`) ne contient aucune logique PackageKit : il
+reçoit un `Backend` et l'utilise par son contrat (P-001).
+
+### 17.2 Correspondance avec le contrat
+
+| Méthode | Appels PackageKit | Remarques |
+|---|---|---|
+| `availability` | `GetAll` du démon | Rôles exigés, profil Debian, architecture ; sinon `Unavailable` avec la raison |
+| `queryInstalled` | `GetPackages(installed;arch)` | Architecture native et `all` seulement |
+| `sources` | `GetRepoList(none)` | Dépôts `deb` seulement |
+| `catalogSources` | — | Fichiers de `/var/lib/swcatalog/yaml`, lus sur un thread |
+| `queryUpdates` | `GetPackages(installed;arch)`, `GetUpdates(arch)` | Sans les versions identiques ; non filtré (D-023) |
+| `permissions` | — | `NotSupported` |
+| `plan` | `Resolve(~installed;arch)` ou `Resolve(installed;arch)` ou `GetUpdates`, puis l'action avec `ONLY_TRUSTED | SIMULATE` | `interactive=false`, aucune autorisation ; suppression `allow_deps=true, autoremove=false` ; paquet protégé dans le plan : refus ; taille totale (D-029) |
+| `execute` | Nouvelle simulation, `mayExecute`, puis l'action réelle `ONLY_TRUSTED`, `interactive=true` | Faux : `PlanChanged`, rien d'exécuté ; `started`, `handle` (chemin de la transaction), progression ; `verifiesExecutedPlan` = faux |
+| `reattach` | `GetTransactionList`, signaux, puis `GetAll` de la transaction | Transaction finie entre-temps : `Interrupted` (issue inconnue, l'hôte réconcilie) |
+| `refresh` | `RefreshCache(false)`, `interactive=true` | Jamais l'indice `background` (§6.6) |
+| `cancel` | `Cancel` | `NotSupported` tant qu'`AllowCancel` n'a pas été vu vrai pendant une exécution ; une demande seulement |
+| `setChangeListener` | `InstalledChanged`, `UpdatesChanged`, `RepoListChanged` | Regroupés sur 2 s |
+
+Chaque appel suit le §6.1 : `CreateTransaction`, abonnement, `SetHints`
+(`supports-plural-signals=true`, `interactive`), méthode, `Finished`. Une
+erreur D-Bus de la méthode est rendue sans attendre `Finished` ; un délai du
+service (2 min pour une requête, 30 min pour une exécution) termine ce que
+PackageKit ne finit pas. La disparition de `org.freedesktop.PackageKit`
+pendant une transaction donne `Interrupted`.
+
+Ordre des transactions : une à la fois ; la seconde moitié d'une opération
+(la simulation après son `Resolve`, la transaction réelle après sa
+simulation) passe devant les appels en attente, sans rien laisser
+s'intercaler. Au plus une opération modificatrice à la fois (`Conflict`).
+
+### 17.3 Intégration au service, en lecture
+
+- `Backends` : `id`, `available`, `reason`, `scopes` (`system`), `formats`
+  (`deb`). Un service prêt dont le backend est inutilisable est `degraded` ;
+  le catalogue reste lisible.
+- Inventaire : `queryInstalled`, puis `linkInstalled` avec les offres du
+  catalogue en service, puis `StateStore::replaceInstalled`, sur un thread de
+  travail avec sa propre connexion. `InstalledChanged` porte les applications
+  dont l'état a changé (ajout, retrait, version, lien).
+- Mises à jour : `queryUpdates`, puis `applicationUpdates` (D-023) ; en
+  mémoire (D-027). `GetUpdates` (`offer-id`, `app-id`, `backend`, `kind`,
+  `from-version`, `to-version`, `download-size`), `UpdateCount`,
+  `UpdatesChanged(u)`.
+- Déclencheurs : démarrage, signaux du démon, nouveau catalogue, fin de
+  chaque `Refresh` (qui redemande aussi la disponibilité : un démon revenu
+  est repris). Deux demandes pendant un calcul en donnent un seul de plus.
+- `Refresh` (D-028) : `RefreshCache`, puis `catalogSources` fusionnées avec
+  `sources.conf`, puis réindexation. L'import initial ne lance pas
+  `RefreshCache`.
+
+### 17.4 Threads
+
+| Thread | Rôle |
+|---|---|
+| Principal | D-Bus du service, appels du contrat `Backend`, complétions et événements (postés, dans l'ordre) |
+| PackageKit (1) | Connexion au bus système, file des transactions, signaux ; ne touche à aucune donnée du service |
+| Inventaire (1) | Lecture des liens dans le catalogue, écriture de `state.sqlite` |
+| Pool global | Lecture de `/var/lib/swcatalog` (`catalogSources`) |
+
+### 17.5 Tests
+
+| Suite | Cible | Ce qu'elle vérifie | Contre quoi |
+|---|---|---|---|
+| Unitaires | `store-backend-packagekit-tests`, `store-core-tests` (`ApplicationLinks`, plans) | Traduction, profil, liens, filtrage D-010, taille totale | Données réelles du prototype 4, sans D-Bus |
+| Backend | `store-pkbackend-tests` | Contrat complet : disponibilité, requêtes, plans, exécution vérifiée, plan changé, erreurs, délais, annulation, perte du démon, rattachement, concurrence, regroupement | PackageKit simulé (`fakepackagekit.h`) sur un bus privé |
+| Service | `store-service-pk-tests` | `Backends`, inventaire lié, `GetUpdates`, changements extérieurs, backend inutilisable puis revenu, `Refresh` avec `RefreshCache` (succès, échec, annulation), sources du backend | Service réel (processus), PackageKit simulé sur le bus de session privé |
+| Réels (D-026) | `store-pkbackend-real-tests`, hors `ctest` | Requêtes et simulations seulement | packagekitd du système |
+
+```bash
+CUTEFISH_STORE_REAL_PACKAGEKIT=1 build/tests/service/store-pkbackend-real-tests
+```
+
+### 17.6 Limites et points non vérifiés
+
+Vérifié contre le vrai démon (Debian 13, PackageKit 1.3.1, `apt`, une
+machine) : disponibilité, inventaire, dépôts, sources DEP-11, mises à jour,
+simulations d'installation, de suppression et de mise à jour, refus d'un
+paquet protégé, paquet inconnu.
+
+Seulement simulé (PackageKit factice qui reproduit le protocole, pas APT) :
+exécution réelle, progression, annulation, erreurs d'exécution, refus
+d'autorisation, disparition du démon, rattachement, délais, signaux de
+changement, `RefreshCache`.
+
+Jamais vérifié : transaction réelle, dialogue polkit et agent Cutefish,
+verrou dpkg, debconf, rattachement au vrai démon après un redémarrage du
+service, écart réel entre simulation et transaction, comportement en
+mémoire et en temps sur un gros inventaire.
+
+Limites connues :
+
+- l'origine d'une source DEP-11 vient du nom de fichier
+  (`debian-trixie-main`) ; PackageKit nomme autrement l'origine des paquets
+  (`debian-stable-main`) ; le dossier d'icônes est cherché sous le premier
+  nom ;
+- la taille à télécharger d'un plan est un total ; les éléments restent à 0 ;
+- un élément de mise à jour n'a pas de version de départ dans le plan
+  (`from-version`) : la simulation ne donne que la version cible ;
+- `GetPackages(installed)` rend tout l'inventaire à chaque réconciliation
+  (1 406 paquets mesurés, moins d'une seconde) ; pas de requête
+  incrémentale ;
+- un miroir Debian sous un autre nom d'hôte est `third-party` (D-024) ;
+- `GetDetails` ne dit pas encore si une application a une mise à jour.

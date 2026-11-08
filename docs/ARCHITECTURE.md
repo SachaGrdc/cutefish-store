@@ -1388,6 +1388,14 @@ validé) :
 - questions debconf ;
 - correspondance entre simulation et transaction réelle.
 
+**Implémentation** (étape F, D-023 à D-029) : `store-backend-packagekit`
+(logique et profil Debian, sans D-Bus) et, dans la couche hôte, le
+transport et `PackageKitBackend` ; détail, correspondance avec le contrat
+et limites dans [SERVICE.md](SERVICE.md) §17. Les requêtes et les
+simulations d'installation, de suppression et de mise à jour ont été
+refaites contre le vrai démon (D-026) ; la liste ci-dessus reste entière :
+aucune transaction réelle n'a été lancée.
+
 ### 7.3 Backend Flatpak (libflatpak)
 
 **Installations** : `flatpak_installation_new_user` et

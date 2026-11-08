@@ -147,9 +147,9 @@ Précisions :
 
 | Interface | En-tête | Implémentation prévue | Appels |
 |---|---|---|---|
-| `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2, étendue en v0.3 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries`, `browse`, `listCategories`, `sources` ; avec `state.sqlite` attachée, `installed` et `installedOnly` |
+| `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2, étendue en v0.3 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries`, `browse`, `listCategories`, `sources`, `offerApplications` (étape F) ; avec `state.sqlite` attachée, `installed` et `installedOnly` |
 | `InstalledState` | `installedstate.h` | `StateStore` (thread principal) et `SqliteInstalledState` (threads de lecture), implémentées en v0.3b (`statestore.h`) | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
-| `Backend` | `backend.h` | `backend-packagekit`, `backend-flatpak` (à écrire) ; contrat complet depuis la v0.3 (étape D) | Asynchrones (A §7.1) : `availability`, `queryInstalled`, `sources`, `catalogSources`, `queryUpdates`, `permissions`, `plan`, `execute`, `reattach`, `refresh`, `cancel`, `setChangeListener` ; `capabilities` synchrone |
+| `Backend` | `backend.h` | `PackageKitBackend` (étape F : logique dans `store-backend-packagekit`, transport D-Bus dans la couche hôte, SERVICE.md §17) ; `backend-flatpak` à écrire ; contrat complet depuis la v0.3 (étape D) | Asynchrones (A §7.1) : `availability`, `queryInstalled`, `sources`, `catalogSources`, `queryUpdates`, `permissions`, `plan`, `execute`, `reattach`, `refresh`, `cancel`, `setChangeListener` ; `capabilities` synchrone |
 
 Contrat de `Backend` :
 
@@ -228,7 +228,7 @@ PackageKit, signal `ready` d'une `FlatpakTransaction`). Un plan appartient à
 | `package` | Nom de paquet ou ref Flatpak complète, unique dans le plan |
 | `fromVersion`, `toVersion` | Versions avant et après, si connues |
 | `origin`, `revision` | Dépôt ou remote ; identifiant de construction immuable (commit Flatpak) |
-| `downloadSize` | Taille annoncée |
+| `downloadSize` | Taille annoncée ; un backend qui ne connaît que le total (PackageKit) le met dans `PlanSpec::downloadSize` et laisse les éléments à 0 (D-029) |
 | `permissions`, `oldPermissions` | Chaînes stables choisies par le backend, triées et dédoublonnées par `Plan::create` |
 | `addsSource`, `rebaseFrom`, `trusted` | Ajout d'une remote, remplacement en fin de vie, authentification |
 
@@ -310,6 +310,21 @@ n'existe pas de retour de `running` vers `awaiting-confirmation`.
 - Ni délai ni horloge : le délai de confirmation de 10 minutes (D-019) est
   appliqué par l'hôte, qui appelle `cancel()`.
 
+## Liens avec le catalogue (`applicationlinks.h`, étape F, D-023)
+
+Les backends ne connaissent pas le catalogue : ils rapportent des offres
+(`packagekit:gimp`). L'hôte relie leurs réponses aux applications avec deux
+fonctions pures, à partir des paires (offre, application) que rend
+`Catalog::offerApplications(offres)` (un paquet deb peut être l'offre de
+plusieurs applications) :
+
+| Fonction | Rôle |
+|---|---|
+| `linkInstalled(items, liens)` | Donne à chaque élément installé sans application celle de son offre (la première par identifiant s'il y en a plusieurs) ; un lien déjà donné par le backend reste |
+| `applicationUpdates(mises à jour, liens)` | D-010 : garde les mises à jour des offres du catalogue, avec leur application et le type `application`, et les runtimes ; écarte le reste (bibliothèques, noyau) |
+
+Le résultat sert à l'affichage ; rien n'y est une vérité sur le système.
+
 ## Offre proposée par défaut (`defaultoffer.h`, D-009)
 
 `defaultOffer(offers, installed)` choisit, dans l'ordre :
@@ -330,8 +345,10 @@ stockée, puisqu'elle dépend de l'état installé.
 ## `state.sqlite` (v0.3b, `statestore.h`)
 
 Ce que la boutique sait du système et de son propre travail (P-003,
-SERVICE.md §8). Un seul écrivain, `StateStore`, sur le thread principal de
-l'hôte ; des lecteurs `SqliteInstalledState`, un par thread de lecture.
+SERVICE.md §8). Les écritures passent par `StateStore`, une connexion par
+thread écrivain de l'hôte (le thread principal ; depuis l'étape F, le thread
+de l'inventaire pour `replaceInstalled`), départagées par le délai d'attente
+de SQLite ; des lecteurs `SqliteInstalledState`, un par thread de lecture.
 
 **Ce que la base n'est pas** : la source de vérité de ce qui est installé.
 PackageKit et libflatpak le sont. La table `installed` est une copie du
