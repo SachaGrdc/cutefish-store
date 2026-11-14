@@ -132,6 +132,12 @@ Inventory::Inventory(Backend& backend, std::filesystem::path catalog, InventoryI
     m_retry.setSingleShot(true);
     m_retry.onTimeout = [this] { retryWrite(); };
     m_backend.setChangeListener([this](const BackendChanges& changes) {
+        // What the package manager runs for other programs (H.2): only the
+        // Backends property changes; nothing to read again.
+        if (changes.activity && onAvailabilityChanged)
+            onAvailabilityChanged();
+        if (!changes.installed && !changes.updates && !changes.sources)
+            return;
         // A daemon that came back, or a change made outside the store.
         if (m_available != true)
             return check();

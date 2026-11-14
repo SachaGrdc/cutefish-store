@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <deque>
+#include <map>
+#include <set>
+#include <type_traits>
 #include <future>
 #include <tuple>
 
@@ -69,6 +72,18 @@ struct PkTransport::Worker
     std::string daemonOwner;
     std::vector<dbus::Match> daemonSignals;
 
+    /// Every transaction packagekitd lists, with what is known of it (H.2).
+    struct Watched
+    {
+        pk::PkTransactionInfo info;
+        bool known = false; ///< properties read
+        dbus::PendingCall pending;
+    };
+    std::map<std::string, Watched> watched;
+    std::function<void(std::vector<pk::PkTransactionInfo>)> activityChanged;
+    std::vector<dbus::Match> activitySignals;
+    dbus::PendingCall listCall;
+
     dbus::Proxy daemon() const { return dbus::Proxy(connection.get(), kService, kPath, kInterface); }
     dbus::Proxy transaction(const std::string& path) const
     {
@@ -88,14 +103,140 @@ struct PkTransport::Worker
         // packagekitd quitting while idle is normal, during work it is not.
         daemonWatch = connection->watchName(kService, [this](const std::string& owner) {
             const bool lost = !daemonOwner.empty() && owner.empty();
+            const bool came = daemonOwner.empty() && !owner.empty();
             daemonOwner = owner;
             if (lost)
                 loop->post([this] { daemonLost(); });
+            // A daemon (re)started: what does it run?
+            if (came)
+                loop->post([this] {
+                    if (activityChanged)
+                        readTransactionList();
+                });
         });
+    }
+
+    // --- Other programs' transactions (H.2) ---------------------------------
+
+    bool ownPath(const std::string& path) const
+    {
+        if (current && current->path == path)
+            return true;
+        return std::any_of(attached.begin(), attached.end(), [&](const auto& a) { return a->path == path; });
+    }
+
+    void reportActivity()
+    {
+        if (!activityChanged)
+            return;
+        std::vector<pk::PkTransactionInfo> list;
+        for (const auto& [path, w] : watched)
+            if (w.known && !ownPath(path))
+                list.push_back(w.info);
+        activityChanged(std::move(list));
+    }
+
+    void watchTransactions(std::function<void(std::vector<pk::PkTransactionInfo>)> changed)
+    {
+        activitySignals.clear();
+        watched.clear();
+        listCall = {};
+        activityChanged = std::move(changed);
+        if (!activityChanged)
+            return;
+        if (!connection)
+            return reportActivity();
+        // The list changes when a transaction is created or destroyed; its
+        // Role is set when its method is called, its Status as it works:
+        // both come as PropertiesChanged of the Transaction object.
+        activitySignals.push_back(daemon().onSignal("TransactionListChanged", [this](const dbus::Message& m) {
+            std::vector<std::string> ids;
+            if (m.read(ids))
+                setTransactionList(std::move(ids));
+            else
+                readTransactionList();
+        }));
+        dbus::MatchRule rule;
+        rule.sender = kService;
+        rule.interface = "org.freedesktop.DBus.Properties";
+        rule.member = "PropertiesChanged";
+        rule.arg0 = kTransaction;
+        activitySignals.push_back(connection->subscribe(rule, [this](const dbus::Message& m) {
+            const auto it = watched.find(m.path());
+            if (it == watched.end() || !it->second.known)
+                return;
+            std::string iface;
+            dbus::VariantMap changed;
+            std::vector<std::string> invalidated;
+            if (!m.read(iface, changed, invalidated))
+                return;
+            if (applyInfo(it->second.info, changed))
+                reportActivity();
+        }));
+        readTransactionList();
+    }
+
+    static bool applyInfo(pk::PkTransactionInfo& info, const dbus::VariantMap& properties)
+    {
+        bool changed = false;
+        auto take = [&](const char* key, auto& field) {
+            using T = std::decay_t<decltype(field)>;
+            if (const auto it = properties.find(key); it != properties.end())
+                if (const auto v = it->second.get<T>(); v && *v != field) {
+                    field = *v;
+                    changed = true;
+                }
+        };
+        take("Role", info.role);
+        take("Status", info.status);
+        take("TransactionFlags", info.flags);
+        return changed;
+    }
+
+    void readTransactionList()
+    {
+        listCall = daemon().callAsync("GetTransactionList", [this](const dbus::Reply& reply) {
+            std::vector<dbus::ObjectPath> list;
+            if (reply.isError() || !reply.read(list))
+                return setTransactionList({});
+            std::vector<std::string> paths;
+            for (auto& p : list)
+                paths.push_back(std::move(p.path));
+            setTransactionList(std::move(paths));
+        });
+    }
+
+    void setTransactionList(std::vector<std::string> paths)
+    {
+        const std::set<std::string> now(paths.begin(), paths.end());
+        const bool removed = std::erase_if(watched, [&](const auto& w) { return !now.contains(w.first); }) > 0;
+        for (const std::string& path : now) {
+            if (watched.contains(path))
+                continue;
+            Watched& w = watched[path];
+            w.info.path = path;
+            w.pending = transaction(path).getAllAsync([this, path](const dbus::Reply& reply) {
+                const auto it = watched.find(path);
+                if (it == watched.end())
+                    return;
+                if (const auto all = reply.value<dbus::VariantMap>()) {
+                    applyInfo(it->second.info, *all);
+                    it->second.known = true;
+                    reportActivity();
+                }
+                // Gone before it could be read: the next list drops it.
+            });
+        }
+        if (removed)
+            reportActivity();
     }
 
     void daemonLost()
     {
+        if (activityChanged && !watched.empty()) {
+            watched.clear();
+            reportActivity();
+        }
         auto lose = [this](Running* r) {
             if (r && r->methodCalled && !r->finished)
                 finish(*r, exitResult(pk::Exit::Killed, "packagekitd went away during the transaction"));
@@ -356,6 +497,10 @@ PkTransport::PkTransport(Bus bus) : m_worker(std::make_unique<Worker>(bus))
         ready.set_value(loop.handle());
         loop.run();
         // Everything that uses the loop goes before it.
+        m_worker->activitySignals.clear();
+        m_worker->watched.clear();
+        m_worker->listCall = {};
+        m_worker->activityChanged = {};
         m_worker->daemonSignals.clear();
         m_worker->attached.clear();
         m_worker->current.reset();
@@ -469,6 +614,11 @@ void PkTransport::watchDaemon(std::function<void(bool, bool, bool)> changed)
             changed(false, false, true);
         }));
     });
+}
+
+void PkTransport::watchTransactions(std::function<void(std::vector<pk::PkTransactionInfo>)> changed)
+{
+    post([changed = std::move(changed)](Worker& w) mutable { w.watchTransactions(std::move(changed)); });
 }
 
 } // namespace cutefish::store::service

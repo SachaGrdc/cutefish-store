@@ -294,4 +294,55 @@ Result<SimulatedPlan> planFromSimulation(const PlanRequest& request, const PkRes
     return SimulatedPlan{std::move(plan).value(), result.downloadSizeRemaining};
 }
 
+ExternalActivity externalActivity(std::span<const PkTransactionInfo> transactions)
+{
+    using Kind = ExternalActivity::Kind;
+    auto kindOf = [](const PkTransactionInfo& t) {
+        if (t.status == static_cast<std::uint32_t>(Status::Finished))
+            return Kind::None;
+        switch (static_cast<Role>(t.role)) {
+        case Role::Unknown:
+        case Role::Cancel:
+            return Kind::None;
+        default:
+            break;
+        }
+        if (t.flags & flag::kSimulate)
+            return Kind::Checking;
+        switch (static_cast<Role>(t.role)) {
+        case Role::RefreshCache:
+        case Role::DownloadPackages:
+            return Kind::Refreshing;
+        case Role::UpdatePackages:
+            return (t.flags & flag::kOnlyDownload) ? Kind::Refreshing : Kind::Changing;
+        case Role::InstallFiles:
+        case Role::InstallPackages:
+        case Role::InstallSignature:
+        case Role::RemovePackages:
+        case Role::RepoEnable:
+        case Role::RepoSetData:
+        case Role::UpgradeSystem:
+        case Role::RepairSystem:
+        case Role::RepoRemove:
+            return Kind::Changing;
+        default:
+            return Kind::Checking;
+        }
+    };
+    const PkTransactionInfo* best = nullptr;
+    Kind bestKind = Kind::None;
+    for (const PkTransactionInfo& t : transactions) {
+        const Kind k = kindOf(t);
+        if (k == Kind::None)
+            continue;
+        if (!best || k > bestKind || (k == bestKind && t.path < best->path)) {
+            best = &t;
+            bestKind = k;
+        }
+    }
+    if (!best)
+        return {};
+    return {.kind = bestKind, .role = std::string(roleName(best->role)), .status = std::string(statusName(best->status))};
+}
+
 } // namespace cutefish::store::packagekit

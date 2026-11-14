@@ -418,7 +418,7 @@ void StoreService::exportObject()
             const Backend* backend = m_backends.backend(kind);
             const Inventory* inventory = m_backends.inventory(kind);
             out.push_back(backendMap(kind, backend->capabilities(), inventory->available(), inventory->reason(),
-                                     inventory->recordError()));
+                                     inventory->recordError(), backend->externalActivity()));
         }
         return out;
     });

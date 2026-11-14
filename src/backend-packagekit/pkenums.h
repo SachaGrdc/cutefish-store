@@ -13,8 +13,10 @@
 namespace cutefish::store::packagekit {
 
 enum class Role : std::uint32_t {
-    Unknown = 0, Cancel = 1, GetPackages = 5, GetRepoList = 6, GetUpdates = 9, InstallPackages = 11,
-    RefreshCache = 13, RemovePackages = 14, Resolve = 17, UpdatePackages = 22,
+    Unknown = 0, Cancel = 1, GetPackages = 5, GetRepoList = 6, GetUpdates = 9, InstallFiles = 10,
+    InstallPackages = 11, InstallSignature = 12, RefreshCache = 13, RemovePackages = 14, RepoEnable = 15,
+    RepoSetData = 16, Resolve = 17, UpdatePackages = 22, AcceptEula = 24, DownloadPackages = 25,
+    UpgradeSystem = 29, RepairSystem = 30, RepoRemove = 33,
 };
 
 enum class Status : std::uint32_t {
@@ -45,6 +47,7 @@ enum class Info : std::uint32_t {
 std::string_view errorName(std::uint32_t code) noexcept;
 std::string_view statusName(std::uint32_t status) noexcept;
 std::string_view exitName(std::uint32_t exit) noexcept;
+std::string_view roleName(std::uint32_t role) noexcept;
 
 /// Bit values of PkFilterEnum and PkTransactionFlagEnum.
 namespace filter {
@@ -57,6 +60,7 @@ inline constexpr std::uint64_t kArch = 1ull << 18;
 namespace flag {
 inline constexpr std::uint64_t kOnlyTrusted = 1ull << 1;
 inline constexpr std::uint64_t kSimulate = 1ull << 2;
+inline constexpr std::uint64_t kOnlyDownload = 1ull << 3;
 } // namespace flag
 
 constexpr std::uint64_t bit(Role role) noexcept { return 1ull << static_cast<std::uint32_t>(role); }

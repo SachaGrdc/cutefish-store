@@ -203,7 +203,8 @@ dbus::VariantMap planMap(const Plan& plan, const ConfirmationReasons& reasons,
 }
 
 dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
-                            const std::string& reason, const std::string& inventoryError)
+                            const std::string& reason, const std::string& inventoryError,
+                            const ExternalActivity& activity)
 {
     std::vector<std::string> scopes;
     if (caps.systemScope)
@@ -221,6 +222,11 @@ dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, s
     // GetInstalled lists for this backend is then older than the backend.
     if (!inventoryError.empty())
         m.emplace("inventory-error", inventoryError);
+    // What the package manager runs for other programs (H.2): `changing`
+    // means the store's actions on this backend wait for it to end.
+    m.emplace("activity", std::string(toString(activity.kind)));
+    if (activity.kind != ExternalActivity::Kind::None)
+        m.emplace("activity-role", activity.role);
     return m;
 }
 

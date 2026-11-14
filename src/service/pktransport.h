@@ -99,6 +99,17 @@ public:
     /// `changed(installed, updates, repositories)`, on the PackageKit thread.
     void watchDaemon(std::function<void(bool installed, bool updates, bool repositories)> changed);
 
+    /// The transactions packagekitd runs for other programs (H.2): every
+    /// transaction it lists except this transport's own (the running call
+    /// and the attached ones), with its Role, Status and TransactionFlags.
+    /// `changed(list)` runs on the PackageKit thread: once the list is read,
+    /// then whenever it changes or one of those properties does (the
+    /// daemon's TransactionListChanged and the transactions'
+    /// PropertiesChanged), and with an empty list when the daemon goes
+    /// away. Only observes: nothing is cancelled or waited for. An empty
+    /// function stops.
+    void watchTransactions(std::function<void(std::vector<pk::PkTransactionInfo>)> changed);
+
 private:
     struct Worker;
     void post(std::function<void(Worker&)> job);

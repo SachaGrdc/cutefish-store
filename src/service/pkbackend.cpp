@@ -1,5 +1,7 @@
 #include "pkbackend.h"
 
+#include <base/logging.h>
+
 #include "debianprofile.h"
 #include "pkenums.h"
 
@@ -33,6 +35,18 @@ std::vector<std::string> names(const PlanRequest& request)
     return out;
 }
 
+base::LogCategory cfPkBackend("cutefish.store.packagekit");
+
+/// A request refused because PackageKit changes the system for another
+/// program (H.2): temporary, nothing was started.
+Error busyError(const ExternalActivity& a)
+{
+    return Error::backend(BackendFailure::Locked,
+                          "PackageKit is busy with another program's operation (" + a.role
+                                  + (a.status.empty() ? "" : ", " + a.status)
+                                  + "); nothing was started: try again once it has finished");
+}
+
 } // namespace
 
 PackageKitBackend::PackageKitBackend(base::EventLoop& main, Options options)
@@ -46,6 +60,24 @@ PackageKitBackend::PackageKitBackend(base::EventLoop& main, Options options)
         if (m_listener)
             m_listener(changes);
     };
+    // Other programs' transactions (H.2): observed from the start, so that
+    // the first request already knows whether PackageKit is busy.
+    m_transport->watchTransactions([this](std::vector<PkTransactionInfo> list) {
+        // On the PackageKit thread.
+        m_pkActivity = packagekit::externalActivity(list);
+        toMain([this, activity = m_pkActivity] {
+            // Told when what it is (kind) or who (role) changes, not at each
+            // step of its progress.
+            const bool changed = activity.kind != m_activity.kind || activity.role != m_activity.role;
+            m_activity = activity;
+            if (changed) {
+                CF_INFO(cfPkBackend) << "PackageKit, other programs: " << toString(activity.kind)
+                                     << (activity.role.empty() ? "" : " (" + activity.role + ")");
+                if (m_listener)
+                    m_listener(BackendChanges{.activity = true});
+            }
+        });
+    });
 }
 
 PackageKitBackend::~PackageKitBackend()
@@ -293,6 +325,10 @@ void PackageKitBackend::simulate(const std::string& id, PlanRequest request, con
 
 void PackageKitBackend::plan(const std::string& id, const PlanRequest& request, Completion<Plan> done)
 {
+    // A simulation would only wait behind the other program's transaction
+    // in packagekitd, for as long as it lasts.
+    if (m_activity.blocksChanges())
+        return later(std::move(done), Result<Plan>(busyError(m_activity)));
     if (auto ok = admit(id, &request, false); !ok)
         return later(std::move(done), Result<Plan>(std::move(ok).error()));
     auto shared = std::make_shared<Completion<Plan>>(std::move(done));
@@ -318,6 +354,8 @@ void PackageKitBackend::execute(const std::string& id, const PlanRequest& reques
                                 OperationEvents events, Completion<ExecutionResult> done)
 {
     using R = Result<ExecutionResult>;
+    if (m_activity.blocksChanges())
+        return later(std::move(done), R(busyError(m_activity)));
     if (auto ok = admit(id, &request, true); !ok)
         return later(std::move(done), R(std::move(ok).error()));
     auto shared = std::make_shared<Completion<ExecutionResult>>(std::move(done));
@@ -345,6 +383,11 @@ void PackageKitBackend::execute(const std::string& id, const PlanRequest& reques
                                  return finish(ExecutionResult{ExecutionResult::Outcome::PlanChanged, std::move(p->plan)});
                              if (*cancelled)
                                  return finish(Error::cancelled("cancelled before the transaction"));
+                             // Last check, on the thread that submits the
+                             // real transaction: another program may have
+                             // started changing the system meanwhile.
+                             if (m_pkActivity.blocksChanges())
+                                 return finish(busyError(m_pkActivity));
                              const std::uint64_t total = p->downloadSize;
                              toMain([this, id, ev, plan = p->plan] {
                                  if (auto it = m_operations.find(id); it != m_operations.end())
@@ -442,6 +485,8 @@ void PackageKitBackend::reattach(const std::string& id, const std::string& backe
 
 void PackageKitBackend::refresh(const std::string& id, OperationEvents events, Completion<void> done)
 {
+    if (m_activity.blocksChanges())
+        return later(std::move(done), Result<void>(busyError(m_activity)));
     if (auto ok = admit(id, nullptr, true); !ok)
         return later(std::move(done), Result<void>(std::move(ok).error()));
     if (auto it = m_operations.find(id); it != m_operations.end())

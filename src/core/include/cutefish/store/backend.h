@@ -136,7 +136,38 @@ struct BackendChanges
     bool installed = false;
     bool updates = false;
     bool sources = false;
+    /// externalActivity() changed.
+    bool activity = false;
 };
+
+/// What the package manager behind a backend is busy with for another
+/// program (H.2): a system update from Cutefish Settings, `pkcon`, another
+/// store. Never an operation of this store. The backend only observes it:
+/// it never cancels it, never waits on a lock it holds, never forces one.
+struct ExternalActivity
+{
+    enum class Kind : std::uint8_t {
+        None,       ///< Idle, or nothing that concerns the store.
+        Checking,   ///< Queries and simulations: nothing changes.
+        Refreshing, ///< Repository metadata, downloads: no package changes.
+        Changing,   ///< Installs, removals, updates, repository changes.
+    };
+    Kind kind = Kind::None;
+    /// The package manager's name for it (`update-packages`); empty for None.
+    std::string role = {};
+    /// Its current step when it was seen (`download`, `install`); may be empty.
+    std::string status = {};
+
+    /// While true the backend starts nothing that changes the system: plan,
+    /// execute and refresh complete at once with BackendFailure::Locked (a
+    /// temporary failure: the same request may be made again once it is
+    /// over), and nothing is sent to the package manager.
+    bool blocksChanges() const noexcept { return kind == Kind::Changing; }
+
+    bool operator==(const ExternalActivity&) const = default;
+};
+
+std::string_view toString(ExternalActivity::Kind kind) noexcept;
 
 /// A package manager as seen by the core (ARCHITECTURE §7.1): PackageKit or
 /// Flatpak. Implementations live outside the core (backend-packagekit,
@@ -246,6 +277,12 @@ public:
     /// main thread; replaces any previous receiver; an empty function stops
     /// the notifications.
     virtual void setChangeListener(std::function<void(const BackendChanges&)> listener) = 0;
+
+    /// What the package manager is busy with for another program, as last
+    /// seen (H.2); reported through the change listener (`activity`). Only
+    /// a backend whose package manager is shared with other programs and
+    /// can tell (PackageKit) reports anything; the default is None.
+    virtual ExternalActivity externalActivity() const { return {}; }
 
 protected:
     Backend() = default;

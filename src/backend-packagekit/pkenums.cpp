@@ -12,6 +12,15 @@ constexpr const char* kStatus[] = {
     "scan-applications", "generate-package-list", "waiting-for-lock", "waiting-for-auth",
     "scan-process-list", "check-executable-files", "check-libraries", "copy-files", "run-hook"};
 
+// PkRoleEnum, in its order (PackageKit 1.x, pk-enum.c).
+constexpr const char* kRole[] = {
+    "unknown", "cancel", "depends-on", "get-details", "get-files", "get-packages", "get-repo-list",
+    "required-by", "get-update-detail", "get-updates", "install-files", "install-packages",
+    "install-signature", "refresh-cache", "remove-packages", "repo-enable", "repo-set-data", "resolve",
+    "search-details", "search-file", "search-group", "search-name", "update-packages", "what-provides",
+    "accept-eula", "download-packages", "get-distro-upgrades", "get-categories", "get-old-transactions",
+    "upgrade-system", "repair-system", "get-details-local", "get-files-local", "repo-remove"};
+
 constexpr const char* kExit[] = {
     "unknown", "success", "failed", "cancelled", "key-required", "eula-required", "killed",
     "media-change-required", "need-untrusted", "cancelled-priority", "skip-transaction", "repair-required"};
@@ -47,5 +56,6 @@ std::string_view lookup(const char* const (&table)[N], std::uint32_t v) noexcept
 std::string_view errorName(std::uint32_t code) noexcept { return lookup(kError, code); }
 std::string_view statusName(std::uint32_t status) noexcept { return lookup(kStatus, status); }
 std::string_view exitName(std::uint32_t exit) noexcept { return lookup(kExit, exit); }
+std::string_view roleName(std::uint32_t role) noexcept { return lookup(kRole, role); }
 
 } // namespace cutefish::store::packagekit

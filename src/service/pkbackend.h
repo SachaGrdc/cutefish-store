@@ -66,6 +66,12 @@ public:
     void refresh(const std::string& operationId, OperationEvents events, Completion<void> done) override;
     Result<void> cancel(const std::string& operationId) override;
     void setChangeListener(std::function<void(const BackendChanges&)> listener) override;
+    /// What packagekitd runs for other programs (H.2, SERVICE.md §22):
+    /// followed from construction; while it changes the system (a system
+    /// update from Cutefish Settings, an install by `pkcon`), plan, execute
+    /// and refresh complete at once with BackendFailure::Locked and send
+    /// nothing to PackageKit. Never cancels or waits for it.
+    ExternalActivity externalActivity() const override { return m_activity; }
 
 private:
     struct Operation
@@ -102,6 +108,11 @@ private:
     std::function<void(const BackendChanges&)> m_listener;
     BackendChanges m_pendingChanges;
     base::Timer m_changeTimer;
+    /// On the main loop.
+    ExternalActivity m_activity;
+    /// The same, on the PackageKit thread only: checked right before the
+    /// real transaction of an execution, which is submitted from there.
+    ExternalActivity m_pkActivity;
     /// Last: destroyed first, so its thread is joined before any member its
     /// callbacks reach (m_alive through toMain(), m_options) goes away.
     std::unique_ptr<PkTransport> m_transport;

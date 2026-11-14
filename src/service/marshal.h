@@ -69,11 +69,13 @@ dbus::VariantMap toMap(const TransactionRecord& record);
 dbus::VariantMap toMap(const AvailableUpdate& update, BackendKind backend);
 /// An entry of the Backends property (ARCHITECTURE §5.2): `id`,
 /// `available` (b, false while not known yet), `reason` (s), `scopes` (as),
-/// `formats` (as), and `inventory-error` (s) only when the backend's last
-/// inventory could not be recorded (H.2).
+/// `formats` (as), `inventory-error` (s) only when the backend's last
+/// inventory could not be recorded (H.2), `activity` (s: none, checking,
+/// refreshing, changing) and, unless none, `activity-role` (s): what its
+/// package manager runs for other programs (H.2, SERVICE.md §22).
 dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
                             const std::string& reason,
-                            const std::string& inventoryError = {});
+                            const std::string& inventoryError = {}, const ExternalActivity& activity = {});
 /// The `Plan` of a transaction (SERVICE.md §4.6): `kind`, `backend`,
 /// `scope`, `requires-confirmation` (b), `reasons` (as), `download-size`
 /// (t), `installed-size-change` (x), and `operations` (aa{sv}): `operation`,

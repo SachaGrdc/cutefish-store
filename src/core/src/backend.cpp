@@ -15,4 +15,15 @@ std::string_view toString(OperationPhase phase) noexcept
     return "finishing";
 }
 
+std::string_view toString(ExternalActivity::Kind kind) noexcept
+{
+    switch (kind) {
+    case ExternalActivity::Kind::None: return "none";
+    case ExternalActivity::Kind::Checking: return "checking";
+    case ExternalActivity::Kind::Refreshing: return "refreshing";
+    case ExternalActivity::Kind::Changing: return "changing";
+    }
+    return "none";
+}
+
 } // namespace cutefish::store

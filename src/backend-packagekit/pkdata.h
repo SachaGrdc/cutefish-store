@@ -58,4 +58,14 @@ struct PkProgress
     std::string item = {};
 };
 
+/// A transaction packagekitd runs (GetTransactionList, then the
+/// Transaction's properties), as the transport last saw it.
+struct PkTransactionInfo
+{
+    std::string path;
+    std::uint32_t role = 0;
+    std::uint32_t status = 0;
+    std::uint64_t flags = 0; ///< TransactionFlags
+};
+
 } // namespace cutefish::store::packagekit

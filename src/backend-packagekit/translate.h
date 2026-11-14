@@ -29,6 +29,22 @@ struct Profile
     std::function<bool(std::string_view name)> isProtected;
 };
 
+/// What packagekitd is busy with for other programs (H.2), from the
+/// transactions it runs that are not the store's own (the caller leaves
+/// those out). The most significant one wins (Changing over Refreshing over
+/// Checking); between two of the same kind, the first by path. Rules
+/// (SERVICE.md §22.3):
+/// - finished, unknown-role (not started yet) and cancel transactions are
+///   left out;
+/// - a simulation (flag `simulate`) only checks;
+/// - refresh-cache, download-packages and an update with `only-download`
+///   refresh: they change no installed package;
+/// - install-files, install-packages, install-signature, remove-packages,
+///   update-packages, upgrade-system, repair-system and the repository
+///   changes (repo-enable, repo-set-data, repo-remove) change the system;
+/// - everything else (queries, get-updates, resolve...) only checks.
+ExternalActivity externalActivity(std::span<const PkTransactionInfo> transactions);
+
 /// Success for exit `success`; otherwise the error, mapped from ErrorCode
 /// (ARCHITECTURE §7.2 "Erreurs"): cancellations to ErrorCode::Cancelled,
 /// the rest to ErrorCode::Backend with its BackendFailure. The PackageKit
