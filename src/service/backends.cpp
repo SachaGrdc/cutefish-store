@@ -4,15 +4,16 @@
 
 namespace cutefish::store::service {
 
-Backends::Backends(std::filesystem::path catalog, std::filesystem::path state)
-    : m_catalog(std::move(catalog)), m_io(std::move(state))
+Backends::Backends(std::filesystem::path catalog, std::filesystem::path state, InventoryIo::Options io)
+    : m_catalog(std::move(catalog)), m_io(std::move(state), std::move(io))
 {
 }
 
 Backends::~Backends()
 {
     // Inventories first (they cancel their jobs and stop listening), then
-    // their backends; m_io goes last and waits for the started work.
+    // their backends; m_io goes last, without waiting for a job in progress
+    // (it ends on its own, its result dropped).
     for (auto& [kind, entry] : m_entries)
         entry.inventory.reset();
 }

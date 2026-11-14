@@ -21,10 +21,6 @@ namespace {
 
 base::LogCategory cfInventory("cutefish.store.inventory");
 
-/// Attempts to record one inventory before giving up until the next
-/// reconciliation (each may wait up to the busy timeout of state.sqlite).
-constexpr int kWriteAttempts = 3;
-
 UnixSeconds now()
 {
     return static_cast<UnixSeconds>(std::time(nullptr));
@@ -72,11 +68,6 @@ bool same(const std::vector<AvailableUpdate>& a, const std::vector<AvailableUpda
                       [](const AvailableUpdate& x, const AvailableUpdate& y) { return key(x) == key(y); });
 }
 
-struct InstalledOutcome
-{
-    bool changed = false;
-    std::vector<std::string> apps;
-};
 
 auto key(const InstalledItem& i)
 {
@@ -138,6 +129,8 @@ std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<Avai
 Inventory::Inventory(Backend& backend, std::filesystem::path catalog, InventoryIo& io)
     : m_backend(backend), m_catalogPath(std::move(catalog)), m_io(io)
 {
+    m_retry.setSingleShot(true);
+    m_retry.onTimeout = [this] { retryWrite(); };
     m_backend.setChangeListener([this](const BackendChanges& changes) {
         // A daemon that came back, or a change made outside the store.
         if (m_available != true)
@@ -222,88 +215,131 @@ void Inventory::reconcileInstalled()
         }
         const BackendKind kind = m_backend.kind();
         const BackendCapabilities caps = m_backend.capabilities();
-        std::set<Scope> scopes;
+        Pending p;
         if (caps.systemScope)
-            scopes.insert(Scope::System);
+            p.scopes.insert(Scope::System);
         if (caps.userScope)
-            scopes.insert(Scope::User);
-        std::vector<InstalledItem> list = normalizeInstalled(kind, std::move(items).value());
-        for (const InstalledItem& i : list)
-            scopes.insert(i.scope());
-        m_installedJob = m_io.write(
-                [catalog = m_catalogPath, generation = m_generation, kind, scopes,
-                 items = std::move(list)](StateStore& store) mutable -> Result<InstalledOutcome> {
-                    std::vector<OfferId> offers;
-                    for (const InstalledItem& i : items)
-                        offers.push_back(i.offer());
-                    const auto links = linksFor(catalog, generation, offers);
-                    std::vector<InstalledItem> linked = linkInstalled(std::move(items), links);
-
-                    auto previous = store.items(kind);
-                    if (!previous)
-                        return std::move(previous).error();
-                    const UnixSeconds t = now();
-                    auto write = [&]() -> Result<void> {
-                        for (Scope scope : scopes) {
-                            std::vector<InstalledItem> part;
-                            for (const InstalledItem& i : linked)
-                                if (i.scope() == scope)
-                                    part.push_back(i);
-                            if (auto ok = store.replaceInstalled(kind, scope, part, t); !ok)
-                                return ok;
-                        }
-                        return {};
-                    };
-                    // Each replaceInstalled is atomic and idempotent. One
-                    // that fails (most likely the busy timeout: SQLite's
-                    // busy handler polls, it is no queue, and a busy writer
-                    // on another connection can make it wait past the
-                    // timeout) is tried again rather than lost until the
-                    // next change: bounded, on this thread, never the main
-                    // one.
-                    for (int attempt = 1;; ++attempt) {
-                        auto ok = write();
-                        if (ok)
-                            break;
-                        if (attempt == kWriteAttempts)
-                            return std::move(ok).error();
-                        CF_WARNING(cfInventory) << toString(kind) << ": installed state not recorded (attempt "
-                                                << attempt << "), trying again: " << ok.error().message();
-                    }
-
-                    // What changed, by offer: the applications to tell about.
-                    using Seen = std::pair<std::string, std::string>; // app, version
-                    std::map<std::string, Seen> before;
-                    std::map<std::string, Seen> after;
-                    for (const InstalledItem& i : *previous)
-                        before.emplace(i.offer().str(), Seen{text(i.app()), text(i.version())});
-                    for (const InstalledItem& i : linked)
-                        after.emplace(i.offer().str(), Seen{text(i.app()), text(i.version())});
-                    InstalledOutcome out;
-                    std::set<std::string> apps;
-                    auto note = [&](const std::map<std::string, Seen>& from, const std::map<std::string, Seen>& to) {
-                        for (const auto& [offer, seen] : from) {
-                            const auto it = to.find(offer);
-                            if (it != to.end() && it->second == seen)
-                                continue;
-                            out.changed = true;
-                            if (!seen.first.empty())
-                                apps.insert(seen.first);
-                        }
-                    };
-                    note(before, after);
-                    note(after, before);
-                    out.apps.assign(apps.begin(), apps.end());
-                    return out;
-                },
-                [this](Result<InstalledOutcome> outcome) {
-                    if (!outcome)
-                        CF_WARNING(cfInventory) << "installed state not recorded: " << outcome.error().message();
-                    else if (outcome->changed && onInstalledChanged)
-                        onInstalledChanged(outcome->apps);
-                    installedDone();
-                });
+            p.scopes.insert(Scope::User);
+        p.items = normalizeInstalled(kind, std::move(items).value());
+        for (const InstalledItem& i : p.items)
+            p.scopes.insert(i.scope());
+        p.generation = m_generation;
+        m_pending = std::move(p);
+        writeInstalled();
     });
+}
+
+void Inventory::writeInstalled()
+{
+    // The inventory read from the backend is kept (m_pending) until it is
+    // recorded: a failed attempt is tried again from it, without asking the
+    // backend again.
+    ++m_pending->attempts;
+    m_installedJob = m_io.write(
+            [catalog = m_catalogPath, kind = m_backend.kind(), p = *m_pending](StateStore& store) mutable
+            -> Result<InstalledOutcome> {
+                std::vector<OfferId> offers;
+                for (const InstalledItem& i : p.items)
+                    offers.push_back(i.offer());
+                const auto links = linksFor(catalog, p.generation, offers);
+                std::vector<InstalledItem> linked = linkInstalled(std::move(p.items), links);
+
+                auto previous = store.items(kind);
+                if (!previous)
+                    return std::move(previous).error();
+                // Every scope of the backend in one SQLite transaction: an
+                // attempt is applied entirely or not at all, so trying it
+                // again never applies half of it twice, and the difference
+                // with `previous` (read on this thread, the only writer of
+                // these rows) is exact even after a failed attempt.
+                const std::vector<Scope> scopes(p.scopes.begin(), p.scopes.end());
+                if (auto ok = store.replaceInstalled(kind, scopes, linked, now()); !ok)
+                    return std::move(ok).error();
+
+                // What changed, by offer: the applications to tell about.
+                using Seen = std::pair<std::string, std::string>; // app, version
+                std::map<std::string, Seen> before;
+                std::map<std::string, Seen> after;
+                for (const InstalledItem& i : *previous)
+                    before.emplace(i.offer().str(), Seen{text(i.app()), text(i.version())});
+                for (const InstalledItem& i : linked)
+                    after.emplace(i.offer().str(), Seen{text(i.app()), text(i.version())});
+                InstalledOutcome out;
+                std::set<std::string> apps;
+                auto note = [&](const std::map<std::string, Seen>& from, const std::map<std::string, Seen>& to) {
+                    for (const auto& [offer, seen] : from) {
+                        const auto it = to.find(offer);
+                        if (it != to.end() && it->second == seen)
+                            continue;
+                        out.changed = true;
+                        if (!seen.first.empty())
+                            apps.insert(seen.first);
+                    }
+                };
+                note(before, after);
+                note(after, before);
+                out.apps.assign(apps.begin(), apps.end());
+                return out;
+            },
+            [this](Result<InstalledOutcome> outcome) { installedWritten(std::move(outcome)); });
+}
+
+void Inventory::installedWritten(Result<InstalledOutcome> outcome)
+{
+    if (outcome) {
+        m_pending.reset();
+        setRecordError({});
+        if (outcome->changed && onInstalledChanged)
+            onInstalledChanged(outcome->apps);
+        return installedDone();
+    }
+    const Error& e = outcome.error();
+    const bool temporary = e.code() == ErrorCode::Conflict;
+    const auto& delays = m_io.options().retryDelays;
+    const int attempts = m_pending->attempts;
+    // A newer reconciliation was asked meanwhile: it supersedes this one
+    // (installedDone() runs it, from a new answer of the backend).
+    if (m_installedRun.again) {
+        m_pending.reset();
+        return installedDone();
+    }
+    if (temporary && static_cast<std::size_t>(attempts) <= delays.size()) {
+        const auto delay = delays[static_cast<std::size_t>(attempts) - 1];
+        CF_INFO(cfInventory) << toString(m_backend.kind()) << ": installed state not recorded yet (attempt "
+                             << attempts << "): " << e.message() << "; trying again in " << delay.count() << " ms";
+        // Still running: a request meanwhile only marks `again`.
+        m_retry.start(delay);
+        return;
+    }
+    // A permanent error, or a temporary one that lasted past every attempt:
+    // reported (the Backends property carries it) and kept until a
+    // reconciliation goes through. The previous inventory stays recorded.
+    CF_WARNING(cfInventory) << toString(m_backend.kind()) << ": installed state not recorded after " << attempts
+                            << " attempt(s)" << (temporary ? " (the file stayed locked)" : "") << ": "
+                            << e.message();
+    m_pending.reset();
+    setRecordError(e.message());
+    installedDone();
+}
+
+void Inventory::retryWrite()
+{
+    if (!m_pending)
+        return;
+    if (m_installedRun.again) {
+        m_pending.reset();
+        return installedDone();
+    }
+    writeInstalled();
+}
+
+void Inventory::setRecordError(std::string error)
+{
+    if (error == m_recordError)
+        return;
+    m_recordError = std::move(error);
+    if (onAvailabilityChanged)
+        onAvailabilityChanged();
 }
 
 void Inventory::installedDone()

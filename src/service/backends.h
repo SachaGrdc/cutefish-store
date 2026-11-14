@@ -8,7 +8,8 @@
 //
 // The inventories share one I/O thread and one connection to state.sqlite
 // (inventoryio.h, H.2): each writes its own (backend, scope) rows, one write
-// after the other.
+// after the other. Destroying the registry never waits for that thread's
+// I/O (inventoryio.h).
 //
 // The aggregation of H.2: updates() is what GetUpdates lists and what
 // UpdateCount counts, so the two always agree.
@@ -40,7 +41,7 @@ class Backends
 public:
     /// `catalog` and `state`: the files every inventory links with and
     /// records into.
-    Backends(std::filesystem::path catalog, std::filesystem::path state);
+    Backends(std::filesystem::path catalog, std::filesystem::path state, InventoryIo::Options io = {});
     ~Backends();
 
     Backends(const Backends&) = delete;
@@ -71,6 +72,8 @@ public:
     std::vector<BackendUpdate> updates() const;
     /// updates().size(): the UpdateCount property.
     std::uint32_t updateCount() const;
+
+    const InventoryIo& io() const noexcept { return m_io; }
 
 private:
     struct Entry

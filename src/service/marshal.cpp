@@ -203,7 +203,7 @@ dbus::VariantMap planMap(const Plan& plan, const ConfirmationReasons& reasons,
 }
 
 dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, std::optional<bool> available,
-                            const std::string& reason)
+                            const std::string& reason, const std::string& inventoryError)
 {
     std::vector<std::string> scopes;
     if (caps.systemScope)
@@ -212,11 +212,16 @@ dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, s
         scopes.emplace_back(toString(Scope::User));
     // One format per backend in v1 (D-003): deb through PackageKit.
     const PackageFormat format = kind == BackendKind::PackageKit ? PackageFormat::Deb : PackageFormat::Flatpak;
-    return {{"id", std::string(toString(kind))},
-            {"available", available.value_or(false)},
-            {"reason", available ? reason : std::string("not checked yet")},
-            {"scopes", scopes},
-            {"formats", std::vector<std::string>{std::string(toString(format))}}};
+    dbus::VariantMap m{{"id", std::string(toString(kind))},
+                       {"available", available.value_or(false)},
+                       {"reason", available ? reason : std::string("not checked yet")},
+                       {"scopes", scopes},
+                       {"formats", std::vector<std::string>{std::string(toString(format))}}};
+    // Only when the last inventory could not be recorded (H.2): what
+    // GetInstalled lists for this backend is then older than the backend.
+    if (!inventoryError.empty())
+        m.emplace("inventory-error", inventoryError);
+    return m;
 }
 
 dbus::VariantMap toMap(const RecordedSource& r, std::optional<UnixSeconds> lastRefresh)

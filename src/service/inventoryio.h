@@ -1,87 +1,215 @@
 #pragma once
 
 // The one I/O thread and the one connection to state.sqlite that every
-// Inventory of a service shares (H.2). The inventories of two backends
-// write disjoint rows ((backend, scope) of `installed`, and their own
-// `meta` keys), so SQLite alone would keep the data right; but each write is
-// an fsync'd transaction, and two writers of the same process would then
-// wait on each other through the busy timeout (up to 5 s, after which the
-// write is dropped) and compete with the journal writes of the main thread.
-// One thread here serialises them by construction: in-process, no
-// inventory write ever waits for another, the order of the writes is the
-// order of the requests, and the main thread meets at most one inventory
-// write at a time. The catalogue reads that link the inventory run here
-// too, behind the writes.
+// Inventory of a service shares (H.2).
 //
-// Lifetime: destroyed after every Inventory that uses it (Backends declares
-// it first). The destructor waits for the work that has started; results
-// still on their way to the loop are dropped by the inventories' Jobs.
+// Why one thread: the inventories of two backends write disjoint rows
+// ((backend, scope) of `installed`, and their own `meta` keys), so SQLite
+// alone keeps the data right; but two writers of the same process would
+// wait on each other through the busy timeout. One thread serialises them
+// by construction: in-process, no inventory write ever waits for another,
+// and the writes happen in the order they were asked. The catalogue reads
+// that link the inventory run here too.
+//
+// What the main thread never does here (H.2 finalisation):
+// - wait for a write: work and results go through a queue and the loop;
+// - wait at destruction: an idle thread is joined (it is only waiting on a
+//   condition variable, no I/O); a thread in the middle of a job is
+//   detached instead, finishes that one job (bounded by its busy timeout)
+//   without delivering it, closes the connection and ends. Jobs not yet
+//   started are dropped.
+// - retry: a failed write is not retried here; the Inventory schedules a
+//   new attempt on its loop (inventory.cpp), so this thread never spins.
+//
+// The connection waits `busyTimeout` for another connection's lock (short:
+// the main thread's journal has the priority, the retries do the rest), and
+// its commits do not wait for the disk (synchronous=NORMAL): it only writes
+// the installed state, a cache rebuilt from the backends (SERVICE.md §21.5).
+// So the main thread, when its journal meets an inventory write, waits for a
+// short write without fsync, never for this thread's fsync.
 
 #include <cutefish/store/result.h>
 #include <cutefish/store/statestore.h>
 
-#include <base/thread_pool.h>
+#include <base/event_loop.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <ctime>
+#include <deque>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace cutefish::store::service {
+
+/// A result on its way back to the loop. Destroyed or cancelled, the work
+/// still runs to its end (or is dropped if it has not started), but its
+/// result is never delivered. Kept by the object the result is for.
+class IoJob
+{
+public:
+    IoJob() = default;
+    ~IoJob() { cancel(); }
+    IoJob(IoJob&& o) noexcept : m_state(std::move(o.m_state)) {}
+    IoJob& operator=(IoJob&& o) noexcept
+    {
+        if (this != &o) {
+            cancel();
+            m_state = std::move(o.m_state);
+        }
+        return *this;
+    }
+    IoJob(const IoJob&) = delete;
+    IoJob& operator=(const IoJob&) = delete;
+
+    bool isPending() const noexcept { return m_state && !m_state->cancelled; }
+    void cancel() noexcept
+    {
+        if (m_state)
+            m_state->cancelled = true;
+        m_state.reset();
+    }
+
+    struct State
+    {
+        std::atomic<bool> cancelled = false;
+    };
+
+private:
+    friend class InventoryIo;
+    explicit IoJob(std::shared_ptr<State> s) : m_state(std::move(s)) {}
+    std::shared_ptr<State> m_state;
+};
+
+/// How the shared I/O thread treats state.sqlite (InventoryIo::Options).
+struct InventoryIoOptions
+{
+    /// How long a write waits for another connection's lock before it
+    /// fails with Conflict (then the Inventory tries again later).
+    std::chrono::milliseconds busyTimeout = std::chrono::milliseconds(250);
+    /// The delays before each new attempt of a write that failed with
+    /// a temporary error (Conflict); one attempt more than delays. After
+    /// the last one the error is reported and kept until the next
+    /// reconciliation (SERVICE.md §21.5).
+    std::vector<std::chrono::milliseconds> retryDelays = {
+            std::chrono::seconds(1),  std::chrono::seconds(2),  std::chrono::seconds(4),
+            std::chrono::seconds(8),  std::chrono::seconds(16), std::chrono::seconds(30),
+            std::chrono::seconds(60), std::chrono::seconds(60), std::chrono::seconds(60)};
+};
 
 class InventoryIo
 {
 public:
-    explicit InventoryIo(std::filesystem::path state) : m_disk(std::make_shared<Disk>(std::move(state))) {}
+    using Options = InventoryIoOptions;
+
+    explicit InventoryIo(std::filesystem::path state, Options options = {});
+    /// Never waits for I/O (see above).
+    ~InventoryIo();
 
     InventoryIo(const InventoryIo&) = delete;
     InventoryIo& operator=(const InventoryIo&) = delete;
 
-    const std::filesystem::path& statePath() const noexcept { return m_disk->path; }
+    const std::filesystem::path& statePath() const noexcept { return m_shared->path; }
+    const Options& options() const noexcept { return m_shared->options; }
 
     /// Runs work(store) on the I/O thread with its connection to
-    /// state.sqlite, opened at the first use, then done(result) on the
-    /// calling thread's loop. `work` returns a Result; an error to open the
-    /// file is given to `done` instead.
+    /// state.sqlite (opened at the first use, and again after a failed
+    /// open), then done(result) on the calling thread's loop. `work` returns
+    /// a Result; an error to open the file is given to `done` instead.
     template <typename Work, typename Done>
-    base::Job write(Work work, Done done)
+    IoJob write(Work work, Done done)
     {
         using R = std::invoke_result_t<Work&, StateStore&>;
-        return m_pool.run(
-                [disk = m_disk, work = std::move(work)]() mutable -> R {
-                    if (!disk->store) {
-                        auto s = StateStore::open(disk->path, static_cast<UnixSeconds>(std::time(nullptr)));
+        std::shared_ptr<Shared> shared = m_shared;
+        return enqueue(
+                [shared, work = std::move(work)]() mutable -> R {
+                    ++shared->writes;
+                    if (!shared->store) {
+                        auto s = StateStore::open(shared->path, static_cast<UnixSeconds>(std::time(nullptr)));
                         if (!s)
                             return std::move(s).error();
-                        disk->store.emplace(std::move(s).value());
+                        s->setBusyTimeout(shared->options.busyTimeout);
+                        if (auto ok = s->setDurableCommits(false); !ok)
+                            return std::move(ok).error();
+                        shared->store.emplace(std::move(s).value());
                     }
-                    return work(*disk->store);
+                    return work(*shared->store);
                 },
                 std::move(done));
     }
 
     /// Runs work() on the I/O thread, without the state connection.
     template <typename Work, typename Done>
-    base::Job run(Work work, Done done)
+    IoJob run(Work work, Done done)
     {
-        return m_pool.run(std::move(work), std::move(done));
+        return enqueue(std::move(work), std::move(done));
     }
 
+    /// Write jobs started so far (attempts included), for the tests.
+    int writes() const noexcept { return m_shared->writes; }
+    /// Ready once the I/O thread has ended, after destruction.
+    std::shared_future<void> stopped() const { return m_stopped; }
+
 private:
-    struct Disk
+    struct Shared
     {
-        explicit Disk(std::filesystem::path p) : path(std::move(p)) {}
-        std::filesystem::path path;
+        Shared(std::filesystem::path p, Options o) : path(std::move(p)), options(std::move(o)) {}
+        const std::filesystem::path path;
+        const Options options;
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::deque<std::function<void()>> queue;
+        bool stopping = false;
+        bool busy = false;
+        std::atomic<int> writes = 0;
         /// Used on the I/O thread only.
         std::optional<StateStore> store;
+        std::promise<void> stopped;
     };
 
-    // The pool is destroyed first (it waits for the started work), then the
-    // connection, if no started work still holds it.
-    std::shared_ptr<Disk> m_disk;
-    base::ThreadPool m_pool{1};
+    template <typename Work, typename Done>
+    IoJob enqueue(Work work, Done done)
+    {
+        auto state = std::make_shared<IoJob::State>();
+        auto callables = std::make_shared<std::pair<Work, Done>>(std::move(work), std::move(done));
+        base::LoopHandle loop = base::EventLoop::current()->handle();
+        post([state, callables, loop] {
+            if (state->cancelled)
+                return; // not started: nothing to do, nothing to deliver
+            if constexpr (std::is_void_v<std::invoke_result_t<Work&>>) {
+                callables->first();
+                loop.post([state, callables] {
+                    if (!state->cancelled)
+                        callables->second();
+                });
+            } else {
+                using Result = std::invoke_result_t<Work&>;
+                auto result = std::make_shared<Result>(callables->first());
+                // False once the loop is gone: the result is dropped.
+                loop.post([state, callables, result] {
+                    if (!state->cancelled)
+                        callables->second(std::move(*result));
+                });
+            }
+        });
+        return IoJob(std::move(state));
+    }
+
+    void post(std::function<void()> task);
+    static void threadMain(std::shared_ptr<Shared> shared);
+
+    std::shared_ptr<Shared> m_shared;
+    std::shared_future<void> m_stopped;
+    std::thread m_thread;
 };
 
 } // namespace cutefish::store::service

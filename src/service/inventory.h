@@ -25,13 +25,14 @@
 #include <cutefish/store/result.h>
 
 #include <base/event_loop.h>
-#include <base/thread_pool.h>
+#include <base/timer.h>
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,13 @@ std::vector<InstalledItem> normalizeInstalled(BackendKind kind, std::vector<Inst
 /// first by its contents). Sorted by offer id: one entry per offer.
 std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<AvailableUpdate> updates);
 
+/// What one recorded inventory changed (internal to the inventory).
+struct InstalledOutcome
+{
+    bool changed = false;
+    std::vector<std::string> apps;
+};
+
 class Inventory
 {
 public:
@@ -58,7 +66,8 @@ public:
     Inventory(const Inventory&) = delete;
     Inventory& operator=(const Inventory&) = delete;
 
-    /// On the main loop, after the change is visible through the getters.
+    /// On the main loop, after the change is visible through the getters:
+    /// available(), reason() or recordError().
     std::function<void()> onAvailabilityChanged;
     /// The applications whose installed state changed (added, removed,
     /// another version, another link); may be empty when only packages
@@ -80,6 +89,12 @@ public:
     /// The updates of applications, D-010, normalised (normalizeUpdates);
     /// empty until known and while the backend is not usable.
     const std::vector<AvailableUpdate>& updates() const noexcept { return m_updates; }
+    /// Why the last inventory read from the backend could not be recorded
+    /// in state.sqlite, once every attempt failed (a permanent error, or a
+    /// lock held past every new attempt); empty when the last one was
+    /// recorded, or while attempts go on. The recorded state is then older
+    /// than the backend's (SERVICE.md §21.5).
+    const std::string& recordError() const noexcept { return m_recordError; }
 
 private:
     struct Run
@@ -92,6 +107,19 @@ private:
     void reconcileUpdates();
     void installedDone();
     void updatesDone();
+    void writeInstalled();
+    void installedWritten(Result<InstalledOutcome> outcome);
+    void retryWrite();
+    void setRecordError(std::string error);
+
+    /// An inventory read from the backend, until it is recorded.
+    struct Pending
+    {
+        std::vector<InstalledItem> items;
+        std::set<Scope> scopes;
+        std::uint64_t generation = 0;
+        int attempts = 0;
+    };
 
     Backend& m_backend;
     std::filesystem::path m_catalogPath;
@@ -103,10 +131,14 @@ private:
     std::vector<AvailableUpdate> m_updates;
     Run m_installedRun;
     Run m_updatesRun;
+    std::optional<Pending> m_pending;
+    std::string m_recordError;
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
-    // Destroyed first: a result still on its way is dropped.
-    base::Job m_installedJob;
-    base::Job m_updatesJob;
+    // Destroyed first: no new attempt, and a result still on its way is
+    // dropped.
+    base::Timer m_retry;
+    IoJob m_installedJob;
+    IoJob m_updatesJob;
 };
 
 } // namespace cutefish::store::service
