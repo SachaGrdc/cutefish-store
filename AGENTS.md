@@ -52,6 +52,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
 | G | Backend Flatpak autonome (`store-backend-flatpak`) | `feat(backend-flatpak): …` |
 | H.1 | Registre multi-backends et sélection (service) | `feat(service): …` |
+| H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite) | `fix(state): …`, `feat(service): …` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -71,9 +72,15 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   sélection par `offer_id` sans bascule silencieuse, propriété D-Bus
   `Backends`, sémantique `degraded` seulement quand tous les backends sont
   inutilisables, et construction optionnelle de PackageKit et Flatpak dans
-  `main.cpp` (`--flatpak`, compatible sans libflatpak). Prochaine étape :
-  H.2 (agrégation de l'inventaire, des mises à jour et d'`UpdateAll`), puis
-  H.5 (sources et API D-Bus), H.6 (moniteur Flatpak), H.7 (catalogue unifié).
+  `main.cpp` (`--flatpak`, compatible sans libflatpak).
+- **H.2** : inventaire unifié (SERVICE.md §21) : normalisation de ce que
+  chaque backend liste (offres étrangères, doublons), `GetUpdates` et
+  `UpdateCount` tirés d'une seule liste triée par `offer_id`, signaux sans
+  doublon, un thread d'E/S partagé par les inventaires avec nouvelle
+  tentative bornée, `busy_timeout` fixé dès l'ouverture de `state.sqlite`.
+  **Le propriétaire doit encore valider H.2.** Prochaines étapes : H.3
+  (transactions), H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
+  (moniteur Flatpak), H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est

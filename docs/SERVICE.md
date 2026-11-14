@@ -919,7 +919,9 @@ Choix :
 
 ### 8.4 Accès
 
-- Écriture : thread principal seulement, transactions courtes.
+- Écriture : transactions courtes ; le journal des transactions par le
+  thread principal, l'inventaire installé par le thread d'E/S que partagent
+  les inventaires de tous les backends (H.2, §21.5).
 - Lecture : chaque thread de lecture ouvre `catalog.sqlite` (`immutable=1`)
   et y **attache** `state.sqlite` en lecture seule, comme prévu au A §6.3 ;
   `search`, `installed` et `has-update` sont résolus en une requête.
@@ -1540,9 +1542,9 @@ liste triée (`kinds()`), et `allUnavailable()` : vrai seulement quand au
 moins un backend est configuré et qu'aucun n'est utilisable.
 
 Chaque `Inventory` écrit ses propres lignes `(backend, scope)` de
-`state.sqlite` sur son propre thread d'E/S ; deux backends réconcilient donc
-en parallèle, le `busy_timeout` de SQLite arbitrant le fichier partagé
-(aucune migration de schéma).
+`state.sqlite` (aucune migration de schéma). Depuis H.2, les inventaires
+partagent un seul thread d'E/S et une seule connexion (§21.5) au lieu d'un
+thread chacun.
 
 ### Sélection (`StoreService::actionInventory`)
 
@@ -1579,10 +1581,191 @@ construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
 - **Fait (H.1)** : registre, un `Inventory` par backend, enregistrement dans
   le `TransactionManager`, sélection par `offer_id`, propriété `Backends`,
   sémantique `degraded`, construction optionnelle des deux backends.
-- **À faire (H.2–H.8)** : agrégation soignée de `GetInstalled`/`GetUpdates`/
-  `UpdateCount` (déduplication, liens), `UpdateAll` multi-backends complet,
+- **Fait (H.2)** : inventaire unifié, §21.
+- **À faire (H.3–H.8)** : `UpdateAll` multi-backends complet,
   gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
   `GetPermissions`), moniteur de changements externes Flatpak, et catalogue
   unifié (l'indexeur lit déjà les deux sources ; l'agrégation fine est à
   vérifier).
 
+## 21. Inventaire unifié multi-backends (H.2)
+
+H.2 consolide ce que H.1 agrégeait mécaniquement : les applications
+installées et les mises à jour de PackageKit et de Flatpak, sans perdre leur
+provenance ni confondre deux offres, et la sûreté des écritures de deux
+inventaires dans `state.sqlite`. Aucune méthode, propriété ni signal D-Bus
+n'est ajouté ; aucune migration de schéma.
+
+### 21.1 Identité d'une installation et d'une mise à jour
+
+L'identité est l'`offer_id`, construit par le cœur : `packagekit:<paquet>`
+ou `flatpak:<scope>:<remote>:<ref>`. Il nomme donc le backend, et pour
+Flatpak le scope, la remote et la ref (branche comprise). Conséquences :
+
+- deux backends ne listent jamais la même offre ;
+- une même application (même `app-id` AppStream) installée par deux
+  backends, dans deux scopes, depuis deux remotes ou sur deux branches
+  donne autant d'entrées distinctes ; rien n'est fusionné sur l'`app-id` ;
+- un « doublon réellement identique » est la même offre listée deux fois
+  par un backend (par exemple un paquet multiarch, même nom donc même
+  offre) : il est gardé une fois.
+
+La table `installed` (clé `offer_id`, avec `backend`, `scope`, `origin`,
+`app_id`, `version`) contient déjà tout cela : pas de migration.
+
+### 21.2 Normalisation par l'inventaire (`inventory.{h,cpp}`)
+
+Avant d'enregistrer ou de lister, chaque `Inventory` normalise ce que son
+backend répond :
+
+- `normalizeInstalled(kind, items)` écarte un élément d'un autre backend
+  (avec un avertissement), garde une fois une offre listée deux fois (la
+  première selon son contenu, pour ne pas dépendre de l'ordre du backend),
+  et trie par `offer_id`. Avant H.2, un seul élément de ce genre faisait
+  refuser **tout** l'inventaire du backend par `replaceInstalled`.
+- `normalizeUpdates(kind, updates)` écarte une mise à jour dont l'offre
+  n'est pas du backend, garde une entrée par offre (la première selon son
+  contenu), trie par `offer_id` ; le filtre D-010 garde cet ordre.
+- Une liste de mises à jour qui arrive après que le backend est devenu
+  inutilisable est ignorée : elle ne réapparaît plus (correctif H.2).
+
+### 21.3 `GetInstalled`
+
+Lit `state.sqlite` (pool de lecture), trié par `offer_id`, filtrable par
+`backend` comme avant. Il expose toutes les installations enregistrées des
+backends, avec `offer-id`, `app-id`, `backend`, `scope`, `origin` et
+`version`. Un backend **indisponible** garde son dernier inventaire
+enregistré (le dernier vu, §8.3) ; sa disponibilité se lit dans la
+propriété `Backends`. Un backend qui n'a pas encore répondu n'a pas de
+lignes. Limite : les lignes d'un backend qui n'est plus configuré du tout
+(service relancé sans `--flatpak`, par exemple) restent aussi ; voir §21.8.
+
+### 21.4 `GetUpdates`, `UpdateCount`, règle de comptage
+
+`Backends::updates()` est la seule source des deux : les mises à jour de
+tous les backends **utilisables**, triées par `offer_id`, une entrée par
+offre, chacune avec son backend. `GetUpdates` la renvoie telle quelle
+(`offer-id`, `app-id`, `backend`, `kind`, versions, taille) ;
+`UpdateCount` vaut `Backends::updateCount()`, c'est-à-dire sa taille.
+
+**Règle de comptage** : une mise à jour = une offre (`offer_id`) d'un backend
+utilisable, après le filtre D-010 (applications du catalogue et runtimes).
+Une offre listée deux fois compte une fois ; deux offres distinctes
+comptent deux fois, même pour une seule application (GIMP deb et GIMP
+Flathub : 2 ; QGIS `lts` et `stable` : 2 ; un runtime en scope utilisateur
+et système : 2), car ce sont deux installations à mettre à jour. Un backend
+inutilisable ne compte pas (sa liste est vidée), en cohérence avec
+`Backends.available = false` ; les autres restent listés et comptés.
+`UpdateCount` est donc toujours égal à la longueur de `GetUpdates`.
+
+### 21.5 Concurrence de `state.sqlite` (`inventoryio.h`)
+
+Constat (audit H.2) : WAL, `BEGIN IMMEDIATE`, `busy_timeout` de 5 s,
+lignes disjointes par `(backend, scope)` : pas de perte par écrasement.
+Mais :
+
+1. `StateStore::open` exécutait ses premières instructions
+   (`user_version`, `quick_check`, passage en WAL) **avant** de fixer le
+   `busy_timeout` : ouvert pendant qu'une autre connexion tenait le
+   fichier, il échouait aussitôt en `SQLITE_BUSY`. Corrigé dans le cœur
+   (le délai est fixé dès l'ouverture), test à l'appui.
+2. Le gestionnaire d'attente de SQLite **interroge périodiquement** ; ce
+   n'est pas une file. Un écrivain d'une autre connexion qui écrit sans
+   pause peut faire dépasser les 5 s : l'écriture échouait alors, et
+   l'inventaire n'était plus enregistré jusqu'au changement suivant
+   (mesuré par le test de concurrence, avant correction).
+3. Deux écrivains du même processus (un par inventaire) s'attendaient
+   mutuellement et doublaient l'attente possible du journal du thread
+   principal.
+
+Solution retenue :
+
+- **Un seul thread d'E/S et une seule connexion** pour tous les inventaires
+  (`InventoryIo`, détenu par `Backends`, déclaré avant les inventaires donc
+  détruit après eux). Entre inventaires, aucune écriture n'attend plus une
+  autre : elles sont sérialisées par construction, dans l'ordre des
+  demandes ; le thread principal ne rencontre plus qu'une écriture
+  d'inventaire à la fois. Les lectures du catalogue pour les liens passent
+  par ce même thread.
+- **Nouvelle tentative bornée** : une écriture d'inventaire qui échoue
+  (le plus souvent le délai d'attente) est retentée, jusqu'à 3 tentatives,
+  sur le thread d'E/S (jamais le thread principal). Chaque
+  `replaceInstalled` est atomique et idempotent ; un échec laisse l'état
+  précédent intact (annulation de la transaction SQLite).
+- Pas de verrou global supplémentaire ni de file d'écriture centrale pour
+  tout le processus : le journal reste écrit par le thread principal (§8.4),
+  avec des transactions courtes.
+
+Destruction : un `Inventory` détruit annule ses `Job` (aucun résultat,
+aucun rappel), cesse d'écouter son backend ; `InventoryIo` attend le travail
+commencé. Dans `StoreService`, `m_backends` est détruit avant l'objet D-Bus :
+aucun signal n'est émis pendant la destruction.
+
+### 21.6 Signaux
+
+- `InstalledChanged(as)` : émis par l'inventaire du backend concerné,
+  seulement quand son état enregistré a changé (différence par offre), avec
+  les applications touchées. Plusieurs demandes pendant une réconciliation
+  donnent une seule réconciliation de plus ; un état inchangé n'émet rien.
+- `UpdatesChanged(u)` : émis quand la liste d'un backend a changé (la même
+  liste dans un autre ordre n'est pas un changement), avec le total
+  agrégé. `PropertiesChanged(UpdateCount)` n'est émis que si ce total a
+  changé.
+- `PropertiesChanged(Backends)` : une fois par changement de disponibilité.
+  Un backend qui devient inutilisable vide ses mises à jour (donc
+  `UpdatesChanged` et, si le total change, `UpdateCount`) ; un backend qui
+  revient est réinterrogé au premier signalement de changement ou au
+  `Refresh` suivant.
+- Tout est émis sur le thread principal, depuis la boucle, jamais depuis
+  l'appel. Aucune surveillance Flatpak externe n'est ajoutée (H.6).
+
+### 21.7 Tests
+
+- `store-inventory-tests` (`tests/service/testinventory.cpp`, sans bus,
+  vrais fichiers SQLite, catalogue de test) : normalisation (éléments
+  étrangers, doublons, ordre indifférent, installations distinctes),
+  inventaire installé de PackageKit seul, Flatpak seul, des deux, même
+  application sur deux backends, deux scopes, deux remotes, résultat trié,
+  inventaire conservé quand le backend tombe ; mises à jour de chaque
+  backend et des deux, même `app-id` sur deux offres, versions différentes,
+  doublons, ordre indifférent, backend indisponible, liste tardive ignorée ;
+  notifications (changement de chaque backend, aucune notification sans
+  changement, coalescence, disponibilité), destruction pendant un travail ;
+  concurrence : deux inventaires de 1 500 lignes répondus dans la même
+  itération, 4 tours, contre un autre écrivain du fichier (journal), puis
+  `integrity_check`, comptes exacts, aucune ligne perdue ni restante ;
+  verrou tenu par une autre connexion (rien n'est enregistré pendant, tout
+  l'est après) ; verrou tenu au-delà du délai (6 s, test lent) : la
+  tentative suivante enregistre l'inventaire.
+- `store-service-multi-tests` (bus privé, service en processus) :
+  `GetInstalled` sur les deux backends avec provenance et ordre, filtre
+  `backend` ; `GetUpdates` et `UpdateCount` cohérents ; signaux
+  (`InstalledChanged` de PackageKit, `UpdatesChanged` de Flatpak, pas de
+  signal pour un réordonnancement, `UpdateCount` non réémis à total égal) ;
+  Flatpak indisponible (PackageKit reste listé et compté, `Backends`
+  cohérent) ; Flatpak qui redevient utilisable (une émission de `Backends`,
+  un `UpdatesChanged`).
+- `store-core-tests` : `OpeningWaitsForAnotherConnectionsLock`.
+
+Synchronisation des tests : chaque attente porte sur une condition ; les
+seules durées fixes sont la durée de tenue d'un verrou (les assertions
+valent quelle qu'elle soit) et une pause de 1 ms de l'écrivain concurrent,
+qui modélise la charge (un journal écrit quelques fois par transaction) et
+n'ordonne rien.
+
+### 21.8 Limites et points non vérifiés
+
+- Les lignes `installed` d'un backend qui n'est plus configuré restent
+  visibles (`GetInstalled`, `GetDetails`, `installed` des résumés). Les
+  purger ou les masquer change la sémantique de plusieurs méthodes : à
+  décider par le propriétaire.
+- Le thread principal écrit toujours le journal sur sa propre connexion :
+  il peut attendre une écriture d'inventaire en cours (transaction courte,
+  au plus une à la fois). Un écrivain d'un autre processus qui écrirait sans
+  pause pourrait encore épuiser 3 délais d'attente.
+- Le remplacement d'un inventaire est atomique par `(backend, scope)`, pas
+  pour tout un backend : un lecteur peut voir le scope système à jour et le
+  scope utilisateur pas encore (une fraction de seconde).
+- Aucune vérification contre un vrai packagekitd ni un vrai libflatpak dans
+  cette étape ; `UpdateAll` (H.4) utilise les listes normalisées, sans autre
+  changement.
