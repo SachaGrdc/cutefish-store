@@ -81,6 +81,20 @@ if(TARGET store-backend-packagekit)
     gtest_discover_tests(store-service-coexist-tests PROPERTIES TIMEOUT 60)
 endif()
 
+# Flatpak transactions through the service (H.3): the real Flatpak backend
+# over a double of libflatpak (tests/backend-flatpak/fakestore.h), with the
+# real PackageKit backend against the simulated PackageKit. No real Flatpak
+# installation, PackageKit or polkit.
+if(TARGET store-backend-packagekit AND TARGET store-backend-flatpak)
+    add_executable(store-service-flatpak-tests testserviceflatpak.cpp fakepackagekit.h privatebus.h)
+    target_include_directories(store-service-flatpak-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core
+                               ${CMAKE_SOURCE_DIR}/tests/backend-flatpak)
+    target_compile_definitions(store-service-flatpak-tests PRIVATE DBUS_DAEMON="${DBUS_DAEMON_EXECUTABLE}")
+    target_compile_options(store-service-flatpak-tests PRIVATE -Wall -Wextra)
+    target_link_libraries(store-service-flatpak-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+    gtest_discover_tests(store-service-flatpak-tests PROPERTIES TIMEOUT 60)
+endif()
+
 # The service with its PackageKit backend, against a simulated PackageKit on
 # the test's bus (--packagekit session): never the system's packagekitd.
 if(TARGET store-backend-packagekit)
