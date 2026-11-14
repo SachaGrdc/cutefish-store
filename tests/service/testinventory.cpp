@@ -1,0 +1,739 @@
+// The unified inventory of several backends (H.2), without D-Bus: the
+// normalisation of what a backend lists, the aggregation of the updates
+// (what GetUpdates lists and UpdateCount counts), the installed state that
+// two inventories record into one state.sqlite, their notifications, their
+// destruction, and the concurrency of their writes with each other and with
+// another connection. Scripted backends (fakebackend.h), the prebuilt
+// fixture catalogue, real SQLite files; no package manager.
+//
+// Synchronisation: every wait is on a condition (spin() runs the loop until
+// it holds, with a generous deadline that only turns a hang into a
+// failure). The two fixed delays below are not used to order anything: they
+// are how long a lock is held, and the assertions hold whatever its length.
+
+#include "backends.h"
+#include "fakebackend.h"
+#include "inventory.h"
+
+#include "catalogfixture.h"
+#include "fixtures.h"
+
+#include <cutefish/store/statestore.h>
+
+#include <base/event_loop.h>
+
+#include <gtest/gtest.h>
+#include <sqlite3.h>
+
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+using namespace cutefish::store;
+using namespace cutefish::store::service;
+using namespace cutefish::store::service::testutil;
+namespace base = cutefish::base;
+using fixtures::unwrap;
+using namespace std::chrono_literals;
+
+namespace {
+
+constexpr const char* kGimpFlathub = "flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable";
+constexpr const char* kQgisLts = "flatpak:user:flathub:app/org.qgis.qgis/x86_64/lts";
+constexpr const char* kQgisStable = "flatpak:user:flathub:app/org.qgis.qgis/x86_64/stable";
+constexpr const char* kPlatformUser = "flatpak:user:flathub:runtime/org.freedesktop.Platform/x86_64/24.08";
+constexpr const char* kPlatformSystem = "flatpak:system:flathub:runtime/org.freedesktop.Platform/x86_64/24.08";
+
+OfferId offer(const std::string& id)
+{
+    return unwrap(OfferId::parse(id));
+}
+
+InstalledItem debItem(const std::string& package, const char* version = "1.0-1")
+{
+    return unwrap(InstalledItem::create({.offer = offer("packagekit:" + package),
+                                         .backend = BackendKind::PackageKit,
+                                         .scope = Scope::System,
+                                         .version = unwrap(Version::debian(version)),
+                                         .origin = "debian-stable-main"}));
+}
+
+InstalledItem flatpakItem(Scope scope, const std::string& remote, const std::string& ref)
+{
+    return unwrap(InstalledItem::create({.offer = offer("flatpak:" + std::string(toString(scope)) + ":" + remote
+                                                        + ":" + ref),
+                                         .backend = BackendKind::Flatpak,
+                                         .scope = scope,
+                                         .origin = remote}));
+}
+
+AvailableUpdate debUpdate(const std::string& package, const char* from = "1.0-1", const char* to = "1.1-1")
+{
+    return {.offer = offer("packagekit:" + package),
+            .kind = PlanItemKind::Application,
+            .fromVersion = unwrap(Version::debian(from)),
+            .toVersion = unwrap(Version::debian(to))};
+}
+
+AvailableUpdate flatpakUpdate(const std::string& id, PlanItemKind kind = PlanItemKind::Application,
+                              const char* to = nullptr)
+{
+    AvailableUpdate u{.offer = offer(id), .kind = kind};
+    if (to)
+        u.toVersion = unwrap(Version::upstream(to));
+    return u;
+}
+
+std::vector<std::string> offers(const std::vector<InstalledItem>& items)
+{
+    std::vector<std::string> out;
+    for (const InstalledItem& i : items)
+        out.push_back(i.offer().str());
+    return out;
+}
+
+std::vector<std::string> offers(const std::vector<BackendUpdate>& updates)
+{
+    std::vector<std::string> out;
+    for (const BackendUpdate& u : updates)
+        out.push_back(u.update->offer.str());
+    return out;
+}
+
+std::string rawQuery(const std::filesystem::path& path, const char* sql)
+{
+    sqlite3* db = nullptr;
+    EXPECT_EQ(sqlite3_open(path.c_str(), &db), SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    std::string out;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW)
+        out = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+}
+
+// --- Normalisation (pure) ------------------------------------------------------------
+
+TEST(InventoryNormalisation, InstalledItemsOfAnotherBackendAreLeftOut)
+{
+    std::vector<InstalledItem> items{debItem("gimp"), flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    EXPECT_EQ(offers(normalizeInstalled(BackendKind::PackageKit, items)), std::vector<std::string>{"packagekit:gimp"});
+    EXPECT_EQ(offers(normalizeInstalled(BackendKind::Flatpak, items)), std::vector<std::string>{kGimpFlathub});
+}
+
+TEST(InventoryNormalisation, AnInstalledOfferListedTwiceIsKeptOnceWhateverTheOrder)
+{
+    // Multiarch: the same package name twice, one offer id.
+    const std::vector<InstalledItem> a{debItem("libfoo1", "2.0-1"), debItem("gimp"), debItem("libfoo1", "1.0-1")};
+    const std::vector<InstalledItem> b{debItem("libfoo1", "1.0-1"), debItem("libfoo1", "2.0-1"), debItem("gimp")};
+    const auto x = normalizeInstalled(BackendKind::PackageKit, a);
+    const auto y = normalizeInstalled(BackendKind::PackageKit, b);
+    EXPECT_EQ(offers(x), (std::vector<std::string>{"packagekit:gimp", "packagekit:libfoo1"}));
+    ASSERT_EQ(x.size(), y.size());
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        EXPECT_EQ(x[i].offer(), y[i].offer());
+        EXPECT_EQ(x[i].version(), y[i].version()) << "the kept item depends on the backend's order";
+    }
+}
+
+TEST(InventoryNormalisation, DistinctInstallationsOfOneApplicationAreAllKept)
+{
+    // Same AppStream id, two scopes, two remotes, two branches: four offers.
+    const std::vector<InstalledItem> items{
+            flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable"),
+            flatpakItem(Scope::System, "flathub", "app/org.gimp.GIMP/x86_64/stable"),
+            flatpakItem(Scope::User, "gnome-nightly", "app/org.gimp.GIMP/x86_64/stable"),
+            flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/beta")};
+    EXPECT_EQ(normalizeInstalled(BackendKind::Flatpak, items).size(), 4u);
+}
+
+TEST(InventoryNormalisation, UpdatesAreOnePerOfferSortedAndOfTheirBackend)
+{
+    const std::vector<AvailableUpdate> a{debUpdate("gitg"), debUpdate("gimp", "1.0-1", "2.0-1"),
+                                         debUpdate("gimp", "1.0-1", "1.5-1"), flatpakUpdate(kGimpFlathub)};
+    const auto x = normalizeUpdates(BackendKind::PackageKit, a);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_EQ(x[0].offer.str(), "packagekit:gimp");
+    EXPECT_EQ(x[1].offer.str(), "packagekit:gitg");
+    // The same list in another order keeps the same entry for gimp.
+    const std::vector<AvailableUpdate> b{a[2], a[3], a[1], a[0]};
+    const auto y = normalizeUpdates(BackendKind::PackageKit, b);
+    ASSERT_EQ(y.size(), 2u);
+    EXPECT_EQ(y[0].toVersion, x[0].toVersion);
+    EXPECT_EQ(normalizeUpdates(BackendKind::Flatpak, a).size(), 1u);
+}
+
+// --- Two inventories, one state.sqlite ----------------------------------------------
+
+class InventoryFixture : public ::testing::Test
+{
+protected:
+    void SetUp() override { catalogfixture::build(m_dir / "catalog.sqlite"); }
+
+    /// Registers the two fakes (either may be omitted), links with the
+    /// fixture catalogue (generation 1), and wires counting callbacks.
+    void start(bool packagekit = true, bool flatpak = true)
+    {
+        m_backends = std::make_unique<Backends>(m_dir / "catalog.sqlite", statePath());
+        if (packagekit) {
+            auto b = std::make_unique<FakeBackend>(m_loop, BackendKind::PackageKit);
+            m_pk = b.get();
+            m_pk->setInstalled(m_pkInstalled);
+            m_pk->setUpdates(m_pkUpdates);
+            m_backends->add(std::move(b));
+        }
+        if (flatpak) {
+            auto b = std::make_unique<FakeBackend>(m_loop, BackendKind::Flatpak);
+            m_fp = b.get();
+            m_fp->setInstalled(m_fpInstalled);
+            m_fp->setUpdates(m_fpUpdates);
+            m_backends->add(std::move(b));
+        }
+        for (const BackendKind kind : m_backends->kinds()) {
+            Inventory* inventory = m_backends->inventory(kind);
+            Counts& c = m_counts[kind == BackendKind::PackageKit ? 0 : 1];
+            inventory->onAvailabilityChanged = [&c] { ++c.availability; };
+            inventory->onInstalledChanged = [&c](const std::vector<std::string>& apps) {
+                ++c.installed;
+                c.lastApps = apps;
+            };
+            inventory->onUpdatesChanged = [&c] { ++c.updates; };
+            inventory->setGeneration(1);
+        }
+    }
+
+    void checkAll()
+    {
+        for (const BackendKind kind : m_backends->kinds())
+            m_backends->inventory(kind)->check();
+    }
+
+    std::filesystem::path statePath() const { return m_dir / "state.sqlite"; }
+
+    bool spin(const std::function<bool()>& pred, std::chrono::milliseconds timeout = 10s)
+    {
+        const auto end = std::chrono::steady_clock::now() + timeout;
+        while (!pred()) {
+            if (std::chrono::steady_clock::now() > end)
+                return false;
+            turn();
+        }
+        return true;
+    }
+
+    /// Runs the loop for one short turn.
+    void turn()
+    {
+        const int t = m_loop.startTimer(2ms, false, [this] { m_loop.quit(0); });
+        m_loop.run();
+        m_loop.stopTimer(t);
+    }
+
+    /// Runs the loop for `d`: only to observe that something does NOT
+    /// happen (a signal), never to wait for something.
+    void idle(std::chrono::milliseconds d)
+    {
+        const auto end = std::chrono::steady_clock::now() + d;
+        while (std::chrono::steady_clock::now() < end)
+            turn();
+    }
+
+    std::vector<InstalledItem> recorded(std::optional<BackendKind> backend = std::nullopt)
+    {
+        auto s = SqliteInstalledState::open(statePath());
+        if (!s)
+            return {};
+        auto items = s->items(backend);
+        return items ? std::move(items).value() : std::vector<InstalledItem>{};
+    }
+
+    std::optional<UnixSeconds> reconciled(BackendKind backend, Scope scope)
+    {
+        auto s = StateStore::open(statePath(), 0);
+        if (!s)
+            return std::nullopt;
+        auto r = s->lastReconciled(backend, scope);
+        return r ? *r : std::nullopt;
+    }
+
+    bool bothReconciled()
+    {
+        return reconciled(BackendKind::PackageKit, Scope::System) && reconciled(BackendKind::Flatpak, Scope::User)
+                && reconciled(BackendKind::Flatpak, Scope::System);
+    }
+
+    struct Counts
+    {
+        int availability = 0;
+        int installed = 0;
+        int updates = 0;
+        std::vector<std::string> lastApps;
+    };
+
+    catalogfixture::TempDir m_dir;
+    base::EventLoop m_loop;
+    std::vector<InstalledItem> m_pkInstalled;
+    std::vector<InstalledItem> m_fpInstalled;
+    std::vector<AvailableUpdate> m_pkUpdates;
+    std::vector<AvailableUpdate> m_fpUpdates;
+    std::unique_ptr<Backends> m_backends;
+    FakeBackend* m_pk = nullptr;
+    FakeBackend* m_fp = nullptr;
+    Counts m_counts[2]; // PackageKit, Flatpak
+};
+
+// --- Installed -----------------------------------------------------------------------
+
+TEST_F(InventoryFixture, RecordsPackageKitAlone)
+{
+    m_pkInstalled = {debItem("gimp"), debItem("libfoo1")};
+    start(true, false);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return reconciled(BackendKind::PackageKit, Scope::System).has_value(); }));
+    const auto items = recorded();
+    EXPECT_EQ(offers(items), (std::vector<std::string>{"packagekit:gimp", "packagekit:libfoo1"}));
+    ASSERT_TRUE(items[0].app());
+    EXPECT_EQ(items[0].app()->str(), "org.gimp.GIMP"); // linked with the catalogue
+}
+
+TEST_F(InventoryFixture, RecordsFlatpakAlone)
+{
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    start(false, true);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return reconciled(BackendKind::Flatpak, Scope::User).has_value(); }));
+    const auto items = recorded();
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0].offer().str(), kGimpFlathub);
+    EXPECT_EQ(items[0].backend(), BackendKind::Flatpak);
+    EXPECT_EQ(items[0].scope(), Scope::User);
+    EXPECT_EQ(items[0].origin(), "flathub");
+}
+
+TEST_F(InventoryFixture, RecordsBothBackendsWithoutMergingOneApplication)
+{
+    // GIMP four times: deb, Flathub user, Flathub system, another remote.
+    m_pkInstalled = {debItem("gimp")};
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable"),
+                     flatpakItem(Scope::System, "flathub", "app/org.gimp.GIMP/x86_64/stable"),
+                     flatpakItem(Scope::User, "gnome-nightly", "app/org.gimp.GIMP/x86_64/stable")};
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return bothReconciled(); }));
+    const auto items = recorded();
+    // Sorted by offer id: deterministic, whatever answered first.
+    EXPECT_EQ(offers(items), (std::vector<std::string>{
+                                     "flatpak:system:flathub:app/org.gimp.GIMP/x86_64/stable",
+                                     "flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable",
+                                     "flatpak:user:gnome-nightly:app/org.gimp.GIMP/x86_64/stable",
+                                     "packagekit:gimp"}));
+    EXPECT_EQ(recorded(BackendKind::PackageKit).size(), 1u);
+    EXPECT_EQ(recorded(BackendKind::Flatpak).size(), 3u);
+    // Each keeps its provenance.
+    EXPECT_EQ(items[0].scope(), Scope::System);
+    EXPECT_EQ(items[1].scope(), Scope::User);
+    EXPECT_EQ(items[2].origin(), "gnome-nightly");
+    EXPECT_EQ(items[3].backend(), BackendKind::PackageKit);
+}
+
+TEST_F(InventoryFixture, ADuplicateOrForeignItemDoesNotLoseTheInventory)
+{
+    // Before H.2 the whole PackageKit inventory was refused by
+    // replaceInstalled (duplicate offer, item of another backend).
+    m_pkInstalled = {debItem("gimp"), debItem("libfoo1", "1.0-1"), debItem("libfoo1", "2.0-1"),
+                     flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    start(true, false);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return reconciled(BackendKind::PackageKit, Scope::System).has_value(); }));
+    EXPECT_EQ(offers(recorded()), (std::vector<std::string>{"packagekit:gimp", "packagekit:libfoo1"}));
+}
+
+TEST_F(InventoryFixture, AnUnavailableBackendKeepsItsLastInventoryAndDoesNotBlockTheOther)
+{
+    m_pkInstalled = {debItem("gimp")};
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return bothReconciled(); }));
+
+    // Flatpak goes away; PackageKit changes meanwhile.
+    m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
+    m_fp->setInstalled({});
+    m_pk->setInstalled({debItem("gimp"), debItem("gitg")});
+    const int installedBefore = m_counts[0].installed;
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_backends->inventory(BackendKind::Flatpak)->available() == false; }));
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed > installedBefore; }));
+    // The last Flatpak inventory stays recorded (the last one seen), the
+    // PackageKit one is the new one.
+    EXPECT_EQ(offers(recorded()), (std::vector<std::string>{kGimpFlathub, "packagekit:gimp", "packagekit:gitg"}));
+    EXPECT_FALSE(m_backends->allUnavailable());
+}
+
+// --- Updates -------------------------------------------------------------------------
+
+TEST_F(InventoryFixture, UpdatesOfPackageKitAlone)
+{
+    m_pkUpdates = {debUpdate("gitg"), debUpdate("gimp"), debUpdate("libfoo1")}; // libfoo1: no application
+    start(true, false);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].updates > 0; }));
+    EXPECT_EQ(offers(m_backends->updates()), (std::vector<std::string>{"packagekit:gimp", "packagekit:gitg"}));
+    EXPECT_EQ(m_backends->updateCount(), 2u);
+}
+
+TEST_F(InventoryFixture, UpdatesOfFlatpakAlone)
+{
+    m_fpUpdates = {flatpakUpdate(kGimpFlathub), flatpakUpdate(kPlatformUser, PlanItemKind::Runtime)};
+    start(false, true);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[1].updates > 0; }));
+    EXPECT_EQ(offers(m_backends->updates()), (std::vector<std::string>{kGimpFlathub, kPlatformUser}));
+    EXPECT_EQ(m_backends->updateCount(), 2u);
+}
+
+TEST_F(InventoryFixture, UpdatesOfBothBackendsAreDistinctOffersSortedAndCountedOnce)
+{
+    // GIMP from two backends (same AppStream id, two offers), QGIS on two
+    // branches (two versions), one runtime in two scopes, and duplicates.
+    m_pkUpdates = {debUpdate("gimp"), debUpdate("gimp")};
+    m_fpUpdates = {flatpakUpdate(kQgisStable, PlanItemKind::Application, "3.42"),
+                   flatpakUpdate(kGimpFlathub),
+                   flatpakUpdate(kQgisLts, PlanItemKind::Application, "3.34.2"),
+                   flatpakUpdate(kPlatformSystem, PlanItemKind::Runtime),
+                   flatpakUpdate(kPlatformUser, PlanItemKind::Runtime),
+                   flatpakUpdate(kGimpFlathub)};
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].updates > 0 && m_counts[1].updates > 0; }));
+    const auto all = m_backends->updates();
+    EXPECT_EQ(offers(all), (std::vector<std::string>{kPlatformSystem, kGimpFlathub, kQgisLts, kQgisStable,
+                                                     kPlatformUser, "packagekit:gimp"}));
+    EXPECT_EQ(m_backends->updateCount(), all.size());
+    // Provenance and versions are kept.
+    EXPECT_EQ(all.back().backend, BackendKind::PackageKit);
+    EXPECT_EQ(all[0].backend, BackendKind::Flatpak);
+    ASSERT_TRUE(all[2].update->toVersion && all[3].update->toVersion);
+    EXPECT_EQ(all[2].update->toVersion->str(), "3.34.2");
+    EXPECT_EQ(all[3].update->toVersion->str(), "3.42");
+    ASSERT_TRUE(all[1].update->app && all[5].update->app);
+    EXPECT_EQ(all[1].update->app->str(), "org.gimp.GIMP");
+    EXPECT_EQ(all[5].update->app->str(), "org.gimp.GIMP");
+}
+
+TEST_F(InventoryFixture, UpdatesAreDeterministicWhateverTheBackendsOrder)
+{
+    m_pkUpdates = {debUpdate("gitg"), debUpdate("gimp")};
+    m_fpUpdates = {flatpakUpdate(kQgisStable), flatpakUpdate(kGimpFlathub), flatpakUpdate(kQgisLts)};
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].updates > 0 && m_counts[1].updates > 0; }));
+    const auto first = offers(m_backends->updates());
+
+    // The same content in another order...
+    std::reverse(m_pkUpdates.begin(), m_pkUpdates.end());
+    std::reverse(m_fpUpdates.begin(), m_fpUpdates.end());
+    m_pk->setUpdates(m_pkUpdates);
+    m_fp->setUpdates(m_fpUpdates);
+    m_pk->emitChange({.updates = true});
+    m_fp->emitChange({.updates = true});
+    // ...then, while that run is on its way, a real change: it runs after
+    // it (one run at a time), so its notification proves the first one
+    // ended, without one.
+    m_pk->setUpdates({debUpdate("gimp")});
+    m_fp->setUpdates({flatpakUpdate(kGimpFlathub)});
+    m_pk->emitChange({.updates = true});
+    m_fp->emitChange({.updates = true});
+    ASSERT_TRUE(spin([&] { return m_counts[0].updates == 2 && m_counts[1].updates == 2; }));
+    EXPECT_EQ(m_pk->updatesQueries(), 3);
+    EXPECT_EQ(m_fp->updatesQueries(), 3);
+    EXPECT_EQ(first, (std::vector<std::string>{kGimpFlathub, kQgisLts, kQgisStable, "packagekit:gimp",
+                                               "packagekit:gitg"}));
+    EXPECT_EQ(offers(m_backends->updates()), (std::vector<std::string>{kGimpFlathub, "packagekit:gimp"}));
+}
+
+TEST_F(InventoryFixture, AnUnavailableBackendHasNoUpdatesAndTheOtherKeepsThem)
+{
+    m_pkUpdates = {debUpdate("gimp")};
+    m_fpUpdates = {flatpakUpdate(kGimpFlathub)};
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_backends->updateCount() == 2; }));
+
+    m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
+    m_backends->inventory(BackendKind::Flatpak)->check();
+    ASSERT_TRUE(spin([&] { return m_backends->inventory(BackendKind::Flatpak)->available() == false; }));
+    EXPECT_EQ(offers(m_backends->updates()), std::vector<std::string>{"packagekit:gimp"});
+    EXPECT_EQ(m_backends->updateCount(), 1u);
+    EXPECT_EQ(m_counts[1].updates, 2); // listed, then cleared
+    EXPECT_EQ(m_counts[1].availability, 2); // usable, then not
+    EXPECT_FALSE(m_backends->allUnavailable());
+}
+
+TEST_F(InventoryFixture, ALateUpdateListDoesNotComeBackOnceTheBackendIsUnavailable)
+{
+    m_fpUpdates = {flatpakUpdate(kGimpFlathub)};
+    start(false, true);
+    m_fp->hold();
+    checkAll();
+    m_fp->release(); // availability: usable
+    m_fp->hold();
+    ASSERT_TRUE(spin([&] { return m_fp->heldAnswers() == 2; })); // installed and updates held
+    // The backend goes away while its update list is still on its way.
+    m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
+    m_backends->inventory(BackendKind::Flatpak)->check();
+    ASSERT_EQ(m_fp->heldAnswers(), 3u); // ...and the new availability
+    m_fp->release();
+    ASSERT_TRUE(spin([&] { return m_backends->inventory(BackendKind::Flatpak)->available() == false; }));
+    idle(50ms);
+    EXPECT_EQ(m_backends->updateCount(), 0u);
+}
+
+// --- Notifications --------------------------------------------------------------------
+
+TEST_F(InventoryFixture, AChangeFromEachBackendIsNotifiedByItsInventory)
+{
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return bothReconciled(); }));
+    ASSERT_TRUE(m_pk->listening() && m_fp->listening());
+
+    // `apt install gimp` outside the store.
+    m_pk->setInstalled({debItem("gimp")});
+    m_pk->emitChange({.installed = true});
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1; }));
+    EXPECT_EQ(m_counts[0].lastApps, std::vector<std::string>{"org.gimp.GIMP"});
+    EXPECT_EQ(m_counts[1].installed, 0);
+
+    // `flatpak install --user flathub org.qgis.qgis//lts` outside the store.
+    m_fp->setInstalled({flatpakItem(Scope::User, "flathub", "app/org.qgis.qgis/x86_64/lts")});
+    m_fp->emitChange({.installed = true});
+    ASSERT_TRUE(spin([&] { return m_counts[1].installed == 1; }));
+    EXPECT_EQ(m_counts[1].lastApps, std::vector<std::string>{"org.qgis.qgis"});
+    EXPECT_EQ(m_counts[0].installed, 1);
+    EXPECT_EQ(offers(recorded()), (std::vector<std::string>{kQgisLts, "packagekit:gimp"}));
+}
+
+TEST_F(InventoryFixture, NoNotificationWithoutAChangeAndRepeatedRequestsCoalesce)
+{
+    m_pkInstalled = {debItem("gimp")};
+    m_pkUpdates = {debUpdate("gimp")};
+    start(true, false);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1 && m_counts[0].updates == 1; }));
+    const int installedQueries = m_pk->installedQueries();
+
+    // Four reports while one reconciliation runs: one more run, not four.
+    // The first run sees what was installed (no change, no notification);
+    // the second one the new state (one notification).
+    m_pk->hold();
+    m_pk->emitChange({.installed = true});
+    m_pk->emitChange({.installed = true});
+    m_pk->emitChange({.installed = true});
+    m_pk->setInstalled({debItem("gimp"), debItem("gitg")});
+    m_pk->emitChange({.installed = true});
+    m_pk->release();
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 2; }));
+    EXPECT_EQ(m_pk->installedQueries(), installedQueries + 2);
+    EXPECT_EQ(m_counts[0].lastApps, std::vector<std::string>{"org.gnome.gitg"});
+    EXPECT_EQ(m_counts[0].availability, 1);
+}
+
+TEST_F(InventoryFixture, AnAvailabilityChangeIsNotifiedOnce)
+{
+    start(true, false);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].availability == 1; }));
+    checkAll(); // still usable: nothing to tell
+    ASSERT_TRUE(spin([&] { return m_pk->installedQueries() >= 2; }));
+    EXPECT_EQ(m_counts[0].availability, 1);
+    m_pk->setAvailability(Error::backend(BackendFailure::Unavailable, "gone"));
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].availability == 2; }));
+    EXPECT_EQ(m_backends->inventory(BackendKind::PackageKit)->reason(), "gone");
+    EXPECT_TRUE(m_backends->allUnavailable());
+    m_pk->setAvailability(Result<void>::success());
+    m_pk->emitChange({.installed = true}); // a daemon that came back
+    ASSERT_TRUE(spin([&] { return m_counts[0].availability == 3; }));
+    EXPECT_FALSE(m_backends->allUnavailable());
+}
+
+TEST_F(InventoryFixture, ADestroyedInventoryNeverNotifies)
+{
+    m_pkInstalled = {debItem("gimp")};
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    m_pkUpdates = {debUpdate("gimp")};
+    start();
+    bool calledAfter = false;
+    // Answers on their way when the registry goes: availability first,
+    // then the inventories, whose results would be written and notified.
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].availability == 1 && m_counts[1].availability == 1; }));
+    for (const BackendKind kind : m_backends->kinds()) {
+        Inventory* inventory = m_backends->inventory(kind);
+        inventory->onInstalledChanged = [&](const std::vector<std::string>&) { calledAfter = true; };
+        inventory->onUpdatesChanged = [&] { calledAfter = true; };
+        inventory->onAvailabilityChanged = [&] { calledAfter = true; };
+    }
+    m_backends.reset(); // waits for the write that started, drops the results
+    m_pk = m_fp = nullptr;
+    idle(100ms);
+    EXPECT_FALSE(calledAfter);
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+}
+
+// --- Concurrency of the writes ---------------------------------------------------------
+
+TEST_F(InventoryFixture, SimultaneousReconciliationsOfTwoBackendsLoseNothing)
+{
+    // Large inventories answered in the same loop iteration, several rounds,
+    // while another connection (as the main thread's journal does) writes
+    // to the same file without pause.
+    auto debs = [](int round) {
+        std::vector<InstalledItem> out;
+        for (int i = 0; i < 1500; ++i)
+            out.push_back(debItem("pkg" + std::to_string(i) + "-r" + std::to_string(round)));
+        return out;
+    };
+    auto refs = [](int round) {
+        std::vector<InstalledItem> out;
+        for (int i = 0; i < 750; ++i) {
+            const std::string ref = "app/org.example.App" + std::to_string(i) + "R" + std::to_string(round)
+                    + "/x86_64/stable";
+            out.push_back(flatpakItem(Scope::User, "flathub", ref));
+            out.push_back(flatpakItem(Scope::System, "flathub", ref));
+        }
+        return out;
+    };
+    start();
+    auto journal = unwrap(StateStore::open(statePath(), 1));
+    std::atomic<bool> stop = false;
+    std::atomic<int> journalWrites = 0;
+    std::atomic<int> journalFailures = 0;
+    std::thread other([&] {
+        for (int i = 0; !stop; ++i) {
+            TransactionRecord r{.id = "tx-" + std::to_string(i),
+                                .backend = BackendKind::Flatpak,
+                                .scope = Scope::User,
+                                .offers = {{.offer = offer(kGimpFlathub)}},
+                                .snapshot = {.kind = TransactionKind::Install, .state = TransactionState::Cancelled},
+                                .created = 1,
+                                .updated = 1,
+                                .finished = 1};
+            if (journal.saveTransaction(r))
+                ++journalWrites;
+            else
+                ++journalFailures;
+            // Load shaping, not synchronisation: the main thread writes its
+            // journal a few times per transaction, not in a tight loop. A
+            // writer that never pauses starves SQLite's polling busy
+            // handler (see AWriteDroppedAfterTheBusyTimeoutIsTriedAgain).
+            std::this_thread::sleep_for(1ms);
+        }
+    });
+
+    constexpr int kRounds = 4;
+    for (int round = 0; round < kRounds; ++round) {
+        m_pk->setInstalled(debs(round));
+        m_fp->setInstalled(refs(round));
+        const int before0 = m_counts[0].installed;
+        const int before1 = m_counts[1].installed;
+        m_pk->hold();
+        m_fp->hold();
+        if (round == 0) {
+            checkAll();
+        } else {
+            m_pk->emitChange({.installed = true});
+            m_fp->emitChange({.installed = true});
+        }
+        ASSERT_TRUE(spin([&] {
+            // availability (first round), then the inventory: release
+            // both backends' answers together each time.
+            if (m_pk->heldAnswers() > 0 && m_fp->heldAnswers() > 0) {
+                m_pk->release();
+                m_fp->release();
+                m_pk->hold();
+                m_fp->hold();
+            }
+            return m_counts[0].installed > before0 && m_counts[1].installed > before1;
+        }));
+        m_pk->release();
+        m_fp->release();
+        // Every row of this round, none of the previous one.
+        ASSERT_EQ(recorded(BackendKind::PackageKit).size(), 1500u) << "round " << round;
+        ASSERT_EQ(recorded(BackendKind::Flatpak).size(), 1500u) << "round " << round;
+        const auto pk = recorded(BackendKind::PackageKit);
+        EXPECT_TRUE(std::all_of(pk.begin(), pk.end(), [&](const InstalledItem& i) {
+            return i.offer().str().ends_with("-r" + std::to_string(round));
+        }));
+    }
+    stop = true;
+    other.join();
+    EXPECT_EQ(journalFailures.load(), 0);
+    EXPECT_GT(journalWrites.load(), 0);
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+    EXPECT_EQ(rawQuery(statePath(), "SELECT count(*) FROM installed"), "3000");
+    // The journal writes are all there too (kept within the D-018 limit).
+    EXPECT_EQ(rawQuery(statePath(), "SELECT count(*) FROM transactions"),
+              std::to_string(std::min<int>(journalWrites.load(), static_cast<int>(kMaxFinishedTransactions))));
+}
+
+TEST_F(InventoryFixture, AReconciliationWaitsForALockHeldByAnotherConnection)
+{
+    m_pkInstalled = {debItem("gimp")};
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    start();
+    // The file exists (as the service creates it before its inventories).
+    { auto s = unwrap(StateStore::open(statePath(), 1)); }
+    sqlite3* holder = nullptr;
+    ASSERT_EQ(sqlite3_open(statePath().c_str(), &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_pk->installedQueries() == 1 && m_fp->installedQueries() == 1; }));
+    // While the other connection holds the write lock, no inventory can be
+    // recorded: nothing may be notified, whatever the time it is held.
+    idle(300ms);
+    EXPECT_EQ(m_counts[0].installed, 0);
+    EXPECT_EQ(m_counts[1].installed, 0);
+    // The main loop was not blocked meanwhile: it kept turning (idle()).
+    ASSERT_EQ(sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(holder);
+
+    // Released within the busy timeout: both writes go through.
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1 && m_counts[1].installed == 1; }));
+    EXPECT_EQ(offers(recorded()), (std::vector<std::string>{kGimpFlathub, "packagekit:gimp"}));
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+}
+
+TEST_F(InventoryFixture, AWriteDroppedAfterTheBusyTimeoutIsTriedAgain)
+{
+    // Slow (about 6 s): the lock is held past the busy timeout of
+    // state.sqlite (5 s), so the first attempt fails with SQLITE_BUSY. Before
+    // H.2 the inventory was then lost until the next change; now it is
+    // written by the next attempt, once the lock is released.
+    m_pkInstalled = {debItem("gimp")};
+    start(true, false);
+    { auto s = unwrap(StateStore::open(statePath(), 1)); }
+    sqlite3* holder = nullptr;
+    ASSERT_EQ(sqlite3_open(statePath().c_str(), &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_pk->installedQueries() == 1; }));
+    idle(6s); // longer than the busy timeout: the first attempt has failed
+    EXPECT_EQ(m_counts[0].installed, 0);
+    ASSERT_EQ(sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(holder);
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1; }));
+    EXPECT_EQ(m_pk->installedQueries(), 1); // the same answer, written again
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gimp"});
+}
+
+} // namespace

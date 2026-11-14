@@ -1,8 +1,10 @@
 // The service with two scripted backends (H.1): the Backends property lists
 // both, one backend's unavailability does not degrade the other, the service
 // degrades only when all are unavailable, and an action selects the backend
-// its offer names. In-process (no service binary), on a private bus, with a
-// prebuilt catalogue; no package manager is touched.
+// its offer names. H.2: GetInstalled, GetUpdates, UpdateCount and their
+// signals over both backends, through D-Bus. In-process (no service binary),
+// on a private bus, with a prebuilt catalogue; no package manager is
+// touched.
 
 #include "fakebackend.h"
 #include "storeservice.h"
@@ -253,6 +255,320 @@ TEST_F(AllUnavailable, DegradesWhenEveryBackendIsUnavailable)
         return it != props->end() && it->second.get<std::string>().value_or("") == "degraded";
     }));
     EXPECT_EQ(props->at("State").value<std::string>(), "degraded");
+}
+
+// --- H.2: the unified inventory over D-Bus ---------------------------------------------
+
+constexpr const char* kPath = "/org/cutefish/Store";
+constexpr const char* kInterface = "org.cutefish.Store1";
+constexpr const char* kGimpFlathub = "flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable";
+constexpr const char* kGimpSystem = "flatpak:system:flathub:app/org.gimp.GIMP/x86_64/stable";
+constexpr const char* kGimpNightly = "flatpak:user:gnome-nightly:app/org.gimp.GIMP/x86_64/stable";
+constexpr const char* kQgisLts = "flatpak:user:flathub:app/org.qgis.qgis/x86_64/lts";
+constexpr const char* kQgisStable = "flatpak:user:flathub:app/org.qgis.qgis/x86_64/stable";
+constexpr const char* kPlatformUser = "flatpak:user:flathub:runtime/org.freedesktop.Platform/x86_64/24.08";
+constexpr const char* kPlatformSystem = "flatpak:system:flathub:runtime/org.freedesktop.Platform/x86_64/24.08";
+
+template <typename T>
+T must(Result<T> r)
+{
+    EXPECT_TRUE(r) << (r ? "" : r.error().message());
+    return std::move(r).value();
+}
+
+InstalledItem debItem(const std::string& package)
+{
+    return must(InstalledItem::create({.offer = must(OfferId::parse("packagekit:" + package)),
+                                       .backend = BackendKind::PackageKit,
+                                       .scope = Scope::System,
+                                       .version = must(Version::debian("1.0-1")),
+                                       .origin = "debian-stable-main"}));
+}
+
+InstalledItem flatpakItem(const std::string& id)
+{
+    const OfferId offer = must(OfferId::parse(id));
+    auto address = must(decodeOfferId(offer));
+    return must(InstalledItem::create({.offer = offer,
+                                       .backend = BackendKind::Flatpak,
+                                       .scope = address.scope,
+                                       .origin = address.origin}));
+}
+
+AvailableUpdate update(const std::string& id, PlanItemKind kind = PlanItemKind::Application, const char* to = nullptr)
+{
+    AvailableUpdate u{.offer = must(OfferId::parse(id)), .kind = kind};
+    if (to)
+        u.toVersion = id.starts_with("packagekit:") ? must(Version::debian(to)) : must(Version::upstream(to));
+    return u;
+}
+
+dbus::MatchRule rule(const std::string& interface, const std::string& member)
+{
+    dbus::MatchRule r;
+    r.path = kPath;
+    r.interface = interface;
+    r.member = member;
+    return r;
+}
+
+/// Both backends, with installations and updates of the same applications
+/// (GIMP: deb, Flathub user and system, another remote; QGIS: two branches).
+class ScriptedBackends : public ServiceFixture
+{
+protected:
+    virtual bool flatpakAvailable() const { return true; }
+
+    std::vector<std::unique_ptr<Backend>> makeBackends() override
+    {
+        auto pk = std::make_unique<FakeBackend>(loop(), BackendKind::PackageKit);
+        pk->setInstalled({debItem("gimp"), debItem("libfoo1")});
+        pk->setUpdates({update("packagekit:gimp", PlanItemKind::Application, "2.10.38-2"),
+                        update("packagekit:gimp", PlanItemKind::Application, "2.10.38-2"),
+                        update("packagekit:libfoo1")}); // no application: left out (D-010)
+        auto fp = std::make_unique<FakeBackend>(
+                loop(), BackendKind::Flatpak,
+                flatpakAvailable() ? Result<void>::success()
+                                   : Result<void>(Error::backend(BackendFailure::Unavailable, "no flatpak")));
+        fp->setInstalled({flatpakItem(kGimpFlathub), flatpakItem(kGimpSystem), flatpakItem(kGimpNightly),
+                          flatpakItem(kQgisLts)});
+        fp->setUpdates({update(kQgisStable, PlanItemKind::Application, "3.42"), update(kGimpFlathub),
+                        update(kQgisLts, PlanItemKind::Application, "3.34.2"),
+                        update(kPlatformSystem, PlanItemKind::Runtime), update(kPlatformUser, PlanItemKind::Runtime)});
+        m_pk = pk.get();
+        m_fp = fp.get();
+        std::vector<std::unique_ptr<Backend>> backends;
+        backends.push_back(std::move(pk));
+        backends.push_back(std::move(fp));
+        return backends;
+    }
+
+    std::optional<std::vector<dbus::VariantMap>> list(const char* method, bool withOptions)
+    {
+        auto fetch = std::make_shared<std::optional<std::vector<dbus::VariantMap>>>();
+        auto done = std::make_shared<bool>(false);
+        std::vector<dbus::PendingCall> calls;
+        auto cb = [fetch, done](const dbus::Reply& reply) {
+            if (!reply.isError())
+                *fetch = reply.value<std::vector<dbus::VariantMap>>();
+            *done = true;
+        };
+        if (withOptions)
+            calls.push_back(store().callAsync(method, cb, dbus::VariantMap{}));
+        else
+            calls.push_back(store().callAsync(method, cb));
+        spin([&] { return *done; });
+        return *fetch;
+    }
+
+    std::vector<dbus::VariantMap> installed() { return list("GetInstalled", true).value_or(std::vector<dbus::VariantMap>{}); }
+    std::vector<dbus::VariantMap> updates() { return list("GetUpdates", false).value_or(std::vector<dbus::VariantMap>{}); }
+
+    std::optional<std::uint32_t> updateCount()
+    {
+        auto props = properties();
+        if (!props || !props->contains("UpdateCount"))
+            return std::nullopt;
+        return props->at("UpdateCount").value<std::uint32_t>();
+    }
+
+    static std::vector<std::string> offers(const std::vector<dbus::VariantMap>& items)
+    {
+        std::vector<std::string> out;
+        for (const auto& i : items)
+            out.push_back(i.at("offer-id").value<std::string>());
+        return out;
+    }
+
+    /// The updates once both backends answered (6 with this data).
+    bool settled(std::size_t expected)
+    {
+        return spin([&] { return updateCount() == std::optional<std::uint32_t>(static_cast<std::uint32_t>(expected)); });
+    }
+
+    FakeBackend* m_pk = nullptr;
+    FakeBackend* m_fp = nullptr;
+};
+
+TEST_F(ScriptedBackends, GetInstalledListsEveryInstallationWithItsProvenance)
+{
+    std::vector<dbus::VariantMap> items;
+    // Six rows, linked: the inventory may be recorded before the catalogue
+    // is in service, and linked by the next reconciliation.
+    ASSERT_TRUE(spin([&] {
+        items = installed();
+        if (items.size() != 6)
+            return false;
+        for (const auto& i : items) {
+            const std::string offer = i.at("offer-id").value<std::string>();
+            if ((offer == kGimpFlathub || offer == "packagekit:gimp")
+                && i.at("app-id").value<std::string>() != "org.gimp.GIMP")
+                return false;
+        }
+        return true;
+    }));
+    // Sorted by offer id; GIMP four times, never merged on its AppStream id.
+    EXPECT_EQ(offers(items), (std::vector<std::string>{kGimpSystem, kGimpFlathub, kQgisLts, kGimpNightly,
+                                                       "packagekit:gimp", "packagekit:libfoo1"}));
+    auto field = [&](std::size_t i, const char* key) { return items[i].at(key).value<std::string>(); };
+    EXPECT_EQ(field(0, "backend"), "flatpak");
+    EXPECT_EQ(field(0, "scope"), "system");
+    EXPECT_EQ(field(0, "origin"), "flathub");
+    EXPECT_EQ(field(1, "scope"), "user");
+    EXPECT_EQ(field(1, "app-id"), "org.gimp.GIMP"); // linked with the catalogue
+    EXPECT_EQ(field(3, "origin"), "gnome-nightly");
+    EXPECT_EQ(field(3, "app-id"), ""); // that remote is not in the catalogue
+    EXPECT_EQ(field(4, "backend"), "packagekit");
+    EXPECT_EQ(field(4, "app-id"), "org.gimp.GIMP");
+    EXPECT_EQ(field(4, "version"), "1.0-1");
+    // The backend option still filters, and the answer does not change
+    // between calls.
+    std::vector<dbus::VariantMap> flatpakOnly;
+    auto done = std::make_shared<bool>(false);
+    std::vector<dbus::PendingCall> calls;
+    calls.push_back(store().callAsync("GetInstalled", [&, done](const dbus::Reply& reply) {
+        flatpakOnly = reply.value<std::vector<dbus::VariantMap>>().value_or(std::vector<dbus::VariantMap>{});
+        *done = true;
+    }, dbus::VariantMap{{"backend", dbus::Variant(std::string("flatpak"))}}));
+    ASSERT_TRUE(spin([&] { return *done; }));
+    EXPECT_EQ(flatpakOnly.size(), 4u);
+    EXPECT_EQ(offers(installed()), offers(items));
+}
+
+TEST_F(ScriptedBackends, GetUpdatesAndUpdateCountAgreeOverBothBackends)
+{
+    ASSERT_TRUE(settled(6));
+    const auto list = updates();
+    // One entry per offer: the duplicate deb is counted once, GIMP from two
+    // backends twice, QGIS on two branches twice, the runtime in two scopes
+    // twice.
+    EXPECT_EQ(offers(list), (std::vector<std::string>{kPlatformSystem, kGimpFlathub, kQgisLts, kQgisStable,
+                                                      kPlatformUser, "packagekit:gimp"}));
+    EXPECT_EQ(updateCount(), std::optional<std::uint32_t>(static_cast<std::uint32_t>(list.size())));
+    EXPECT_EQ(list[0].at("backend").value<std::string>(), "flatpak");
+    EXPECT_EQ(list[0].at("kind").value<std::string>(), "runtime");
+    EXPECT_EQ(list[2].at("to-version").value<std::string>(), "3.34.2");
+    EXPECT_EQ(list[3].at("to-version").value<std::string>(), "3.42");
+    EXPECT_EQ(list[5].at("backend").value<std::string>(), "packagekit");
+    EXPECT_EQ(list[5].at("app-id").value<std::string>(), "org.gimp.GIMP");
+    EXPECT_EQ(list[5].at("to-version").value<std::string>(), "2.10.38-2");
+    EXPECT_EQ(offers(updates()), offers(list)); // deterministic
+}
+
+TEST_F(ScriptedBackends, ChangesFromEachBackendAreSignalledOnceAndOnlyWhenTheyChangeSomething)
+{
+    ASSERT_TRUE(settled(6));
+    std::vector<std::vector<std::string>> installedSignals;
+    std::vector<std::uint32_t> updatesSignals;
+    int countChanges = 0;
+    std::vector<dbus::Match> matches;
+    matches.push_back(m_conn->subscribe(rule(kInterface, "InstalledChanged"), [&](const dbus::Message& m) {
+        std::vector<std::string> apps;
+        if (m.read(apps))
+            installedSignals.push_back(apps);
+    }));
+    matches.push_back(m_conn->subscribe(rule(kInterface, "UpdatesChanged"), [&](const dbus::Message& m) {
+        std::uint32_t count = 0;
+        if (m.read(count))
+            updatesSignals.push_back(count);
+    }));
+    matches.push_back(m_conn->subscribe(rule("org.freedesktop.DBus.Properties", "PropertiesChanged"),
+                                        [&](const dbus::Message& m) {
+                                            std::string iface;
+                                            dbus::VariantMap changed;
+                                            std::vector<std::string> invalidated;
+                                            if (m.read(iface, changed, invalidated) && changed.contains("UpdateCount"))
+                                                ++countChanges;
+                                        }));
+
+    // PackageKit: `apt install gitg` outside the store.
+    m_pk->setInstalled({debItem("gimp"), debItem("libfoo1"), debItem("gitg")});
+    m_pk->emitChange({.installed = true});
+    ASSERT_TRUE(spin([&] { return installedSignals.size() == 1; }));
+    EXPECT_EQ(installedSignals[0], std::vector<std::string>{"org.gnome.gitg"});
+
+    // Flatpak: the same updates in another order, then one fewer. Only the
+    // second is a change: one UpdatesChanged, carrying the new total.
+    m_fp->setUpdates({update(kPlatformUser, PlanItemKind::Runtime), update(kPlatformSystem, PlanItemKind::Runtime),
+                      update(kQgisLts, PlanItemKind::Application, "3.34.2"), update(kGimpFlathub),
+                      update(kQgisStable, PlanItemKind::Application, "3.42")});
+    m_fp->emitChange({.updates = true});
+    m_fp->setUpdates({update(kGimpFlathub), update(kQgisLts, PlanItemKind::Application, "3.34.2"),
+                      update(kQgisStable, PlanItemKind::Application, "3.42"),
+                      update(kPlatformSystem, PlanItemKind::Runtime), update(kPlatformUser, PlanItemKind::Runtime),
+                      update("flatpak:user:flathub:app/org.inkscape.Inkscape/x86_64/stable")});
+    m_fp->emitChange({.updates = true});
+    ASSERT_TRUE(spin([&] { return updatesSignals.size() == 1 && countChanges == 1; }));
+    EXPECT_EQ(updatesSignals[0], 7u);
+    EXPECT_EQ(updateCount(), std::optional<std::uint32_t>(7));
+    EXPECT_EQ(updates().size(), 7u);
+
+    // A list that changes but keeps the total: UpdatesChanged, and the
+    // UpdateCount property is not re-emitted.
+    m_fp->setUpdates({update(kGimpFlathub), update(kQgisLts, PlanItemKind::Application, "3.34.3"),
+                      update(kQgisStable, PlanItemKind::Application, "3.42"),
+                      update(kPlatformSystem, PlanItemKind::Runtime), update(kPlatformUser, PlanItemKind::Runtime),
+                      update("flatpak:user:flathub:app/org.inkscape.Inkscape/x86_64/stable")});
+    m_fp->emitChange({.updates = true});
+    ASSERT_TRUE(spin([&] { return updatesSignals.size() == 2; }));
+    EXPECT_EQ(updatesSignals[1], 7u);
+    // The PropertiesChanged would have been sent before UpdatesChanged.
+    EXPECT_EQ(countChanges, 1);
+    EXPECT_EQ(installedSignals.size(), 1u); // nothing else was signalled
+}
+
+class ScriptedFlatpakUnavailable : public ScriptedBackends
+{
+protected:
+    bool flatpakAvailable() const override { return false; }
+};
+
+TEST_F(ScriptedFlatpakUnavailable, TheOtherBackendStaysListedAndCounted)
+{
+    ASSERT_TRUE(settled(1));
+    std::vector<dbus::VariantMap> items;
+    ASSERT_TRUE(spin([&] {
+        items = installed();
+        return items.size() == 2;
+    }));
+    EXPECT_EQ(offers(items), (std::vector<std::string>{"packagekit:gimp", "packagekit:libfoo1"}));
+    EXPECT_EQ(offers(updates()), std::vector<std::string>{"packagekit:gimp"});
+    // Consistent with the Backends property.
+    const auto props = properties();
+    ASSERT_TRUE(props);
+    EXPECT_EQ(props->at("State").value<std::string>(), "ready");
+    for (const auto& entry : props->at("Backends").value<std::vector<dbus::VariantMap>>())
+        EXPECT_EQ(entry.at("available").value<bool>(false), entry.at("id").value<std::string>() == "packagekit");
+}
+
+TEST_F(ScriptedFlatpakUnavailable, ABackendThatBecomesUsableJoinsTheCount)
+{
+    ASSERT_TRUE(settled(1));
+    int backendsChanges = 0;
+    std::vector<std::uint32_t> updatesSignals;
+    std::vector<dbus::Match> matches;
+    matches.push_back(m_conn->subscribe(rule(kInterface, "UpdatesChanged"), [&](const dbus::Message& m) {
+        std::uint32_t count = 0;
+        if (m.read(count))
+            updatesSignals.push_back(count);
+    }));
+    matches.push_back(m_conn->subscribe(rule("org.freedesktop.DBus.Properties", "PropertiesChanged"),
+                                        [&](const dbus::Message& m) {
+                                            std::string iface;
+                                            dbus::VariantMap changed;
+                                            std::vector<std::string> invalidated;
+                                            if (m.read(iface, changed, invalidated) && changed.contains("Backends"))
+                                                ++backendsChanges;
+                                        }));
+    // The daemon came back: a change report makes the inventory ask again.
+    m_fp->setAvailability(Result<void>::success());
+    m_fp->emitChange({.installed = true});
+    ASSERT_TRUE(settled(6));
+    ASSERT_TRUE(spin([&] { return installed().size() == 6; }));
+    ASSERT_TRUE(spin([&] { return !updatesSignals.empty(); }));
+    EXPECT_EQ(updatesSignals.back(), 6u);
+    EXPECT_EQ(updatesSignals.size(), 1u);
+    EXPECT_EQ(backendsChanges, 1);
 }
 
 } // namespace

@@ -13,6 +13,16 @@ target_compile_options(store-backends-tests PRIVATE -Wall -Wextra)
 target_link_libraries(store-backends-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
 gtest_discover_tests(store-backends-tests)
 
+# The unified inventory of two backends (H.2): no bus; real SQLite files.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+add_executable(store-inventory-tests testinventory.cpp fakebackend.h)
+target_include_directories(store-inventory-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
+target_compile_options(store-inventory-tests PRIVATE -Wall -Wextra)
+target_link_libraries(store-inventory-tests PRIVATE store-service GTest::gtest_main Threads::Threads
+                      PkgConfig::SQLITE3)
+gtest_discover_tests(store-inventory-tests PROPERTIES TIMEOUT 60)
+
 find_program(DBUS_DAEMON_EXECUTABLE dbus-daemon)
 if(NOT DBUS_DAEMON_EXECUTABLE OR NOT CUTEFISH_STORE_BUILD_INDEXER)
     message(STATUS "D-Bus tests of the service skipped: they need dbus-daemon and the indexer")
