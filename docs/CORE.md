@@ -149,7 +149,7 @@ Précisions :
 |---|---|---|---|
 | `Catalog` | `catalog.h` | `SqliteCatalog` (`sqlitecatalog.h`), implémentée en v0.2, étendue en v0.3 ([CATALOG.md](CATALOG.md)) | Synchrones, sur les threads de lecture de l'hôte : `generation`, `application` (par id ou alias), `search`, `summaries`, `browse`, `listCategories`, `sources`, `offerApplications` (étape F) ; avec `state.sqlite` attachée, `installed` et `installedOnly` |
 | `InstalledState` | `installedstate.h` | `StateStore` (thread principal) et `SqliteInstalledState` (threads de lecture), implémentées en v0.3b (`statestore.h`) | Synchrones : `items`, `find`, `forApplication`. Ne fait jamais attendre PackageKit ou libflatpak (P-009) |
-| `Backend` | `backend.h` | `PackageKitBackend` (étape F : logique dans `store-backend-packagekit`, transport D-Bus dans la couche hôte, SERVICE.md §17) ; `backend-flatpak` à écrire ; contrat complet depuis la v0.3 (étape D) | Asynchrones (A §7.1) : `availability`, `queryInstalled`, `sources`, `catalogSources`, `queryUpdates`, `permissions`, `plan`, `execute`, `reattach`, `refresh`, `cancel`, `setChangeListener` ; `capabilities` synchrone |
+| `Backend` | `backend.h` | `PackageKitBackend` (étape F : logique dans `store-backend-packagekit`, transport D-Bus dans la couche hôte, SERVICE.md §17) ; `backend-flatpak` à écrire ; contrat complet depuis la v0.3 (étape D) | Asynchrones (A §7.1) : `availability`, `queryInstalled`, `sources`, `catalogSources`, `queryUpdates`, `permissions`, `plan`, `execute`, `reattach`, `refresh`, `cancel`, `setChangeListener` ; `capabilities` et `externalActivity` (H.2 : ce que le gestionnaire de paquets fait pour d'autres programmes ; par défaut rien) synchrones |
 
 Contrat de `Backend` :
 
@@ -399,7 +399,13 @@ Choix de persistance :
   système. Une transaction en `planning` n'a rien exécuté (D-017).
 - **Concurrence** : chaque lecture est une seule requête, donc un seul état
   validé (isolation des instantanés WAL) : un lecteur ne voit jamais un
-  inventaire à moitié remplacé. Un second écrivain attend (délai de 5 s).
+  inventaire à moitié remplacé. Un second écrivain attend (délai de 5 s par
+  défaut, `setBusyTimeout`) ; `replaceInstalled(backend, scopes, items)`
+  remplace plusieurs installations d'un backend en une transaction (H.2).
+- **Erreurs** (H.2) : `SQLITE_BUSY`/`SQLITE_LOCKED` donnent `Conflict`
+  (temporaire) ; un fichier endommagé ou des données refusées par le schéma,
+  `InvalidArgument` ; le reste, `Internal`. `setDurableCommits(false)`
+  (`synchronous = NORMAL`) est réservé à un écrivain de cache.
 - **Occupation** : `openTransactionFor(offer)` donne la transaction non
   terminée qui porte déjà sur une offre (erreur `Busy`, A §5.5).
 

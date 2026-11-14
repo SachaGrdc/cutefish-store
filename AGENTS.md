@@ -52,7 +52,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
 | G | Backend Flatpak autonome (`store-backend-flatpak`) | `feat(backend-flatpak): …` |
 | H.1 | Registre multi-backends et sélection (service) | `feat(service): …` |
-| H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite) | `fix(state): …`, `feat(service): …` |
+| H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `fix(state): …`, `feat(service): …`, `feat(backend-packagekit): …` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -78,6 +78,15 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   `UpdateCount` tirés d'une seule liste triée par `offer_id`, signaux sans
   doublon, un thread d'E/S partagé par les inventaires avec nouvelle
   tentative bornée, `busy_timeout` fixé dès l'ouverture de `state.sqlite`.
+  Finalisation : écritures d'inventaire qui ne bloquent jamais le thread
+  principal (destruction sans attente, nouvelles tentatives par minuteur),
+  erreurs SQLite classées, reprise bornée et signalée (`inventory-error`),
+  remplacement atomique de tous les scopes d'un backend ; le journal reste
+  synchrone sur le thread principal (décision du propriétaire, SERVICE.md
+  §21.5). Coexistence avec les mises à jour système de Cutefish Settings
+  (SERVICE.md §22) : activité des autres programmes dans PackageKit
+  (`activity` de `Backends`), actions deb refusées en `locked` pendant une
+  modification du système, Flatpak non concerné.
   **Le propriétaire doit encore valider H.2.** Prochaines étapes : H.3
   (transactions), H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
   (moniteur Flatpak), H.7 (catalogue unifié).

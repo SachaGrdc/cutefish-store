@@ -1678,28 +1678,93 @@ Mais :
    mutuellement et doublaient l'attente possible du journal du thread
    principal.
 
-Solution retenue :
+Solution retenue (H.2, puis finalisation H.2) :
 
 - **Un seul thread d'E/S et une seule connexion** pour tous les inventaires
   (`InventoryIo`, détenu par `Backends`, déclaré avant les inventaires donc
   détruit après eux). Entre inventaires, aucune écriture n'attend plus une
   autre : elles sont sérialisées par construction, dans l'ordre des
-  demandes ; le thread principal ne rencontre plus qu'une écriture
-  d'inventaire à la fois. Les lectures du catalogue pour les liens passent
-  par ce même thread.
-- **Nouvelle tentative bornée** : une écriture d'inventaire qui échoue
-  (le plus souvent le délai d'attente) est retentée, jusqu'à 3 tentatives,
-  sur le thread d'E/S (jamais le thread principal). Chaque
-  `replaceInstalled` est atomique et idempotent ; un échec laisse l'état
-  précédent intact (annulation de la transaction SQLite).
-- Pas de verrou global supplémentaire ni de file d'écriture centrale pour
-  tout le processus : le journal reste écrit par le thread principal (§8.4),
-  avec des transactions courtes.
+  demandes. Les lectures du catalogue pour les liens passent par ce même
+  thread.
+- **Ce thread ne bloque jamais le thread principal** (finalisation) :
+  - travail et résultats passent par une file et la boucle (`IoJob`,
+    annulable ; un résultat dont la boucle a disparu est abandonné,
+    `LoopHandle::post`) ;
+  - **destruction** : un thread inactif est joint (il n'attend qu'une
+    variable de condition, aucune E/S) ; un thread au milieu d'un travail
+    est **détaché** : il finit ce seul travail (borné par son délai
+    d'attente) sans le livrer, ferme sa connexion et se termine. Les
+    travaux non commencés sont abandonnés. `stopped()` permet aux tests de
+    le constater ;
+  - **aucune nouvelle tentative sur ce thread** : une écriture = une
+    tentative. Les suivantes sont programmées par un minuteur de la boucle
+    principale (`base::Timer`) : jamais d'attente active, jamais de boucle
+    sur le thread d'E/S ;
+  - la connexion de l'inventaire attend **250 ms** au plus le verrou d'une
+    autre connexion (le journal du thread principal a la priorité, les
+    nouvelles tentatives font le reste) et ses validations **n'attendent
+    pas le disque** (`synchronous = NORMAL` : la table `installed` est un
+    cache reconstruit depuis les backends ; en WAL le fichier reste cohérent
+    après une panne, seules les dernières écritures de l'inventaire
+    peuvent être perdues à une coupure de courant, et la réconciliation
+    suivante les refait).
+- **Atomicité** : `StateStore::replaceInstalled(backend, scopes, items)`
+  remplace tous les scopes d'un backend dans **une** transaction SQLite.
+  Une tentative est appliquée entièrement ou pas du tout : la rejouer ne
+  peut ni appliquer deux fois une moitié, ni produire de doublon (clé
+  `offer_id`), et la différence avec l'état précédent (lu sur le même
+  thread, seul écrivain de ces lignes) reste exacte : `InstalledChanged`
+  n'est jamais émis deux fois pour un même inventaire.
 
-Destruction : un `Inventory` détruit annule ses `Job` (aucun résultat,
-aucun rappel), cesse d'écouter son backend ; `InventoryIo` attend le travail
-commencé. Dans `StoreService`, `m_backends` est détruit avant l'objet D-Bus :
-aucun signal n'est émis pendant la destruction.
+#### Politique de reprise (problème B)
+
+Les erreurs SQLite sont classées par le cœur (`errorCodeOf`, `sqlite.h`) :
+
+| Code SQLite | `ErrorCode` | Nature | Ce que fait l'inventaire |
+|---|---|---|---|
+| `SQLITE_BUSY`, `SQLITE_LOCKED` | `Conflict` | temporaire (verrou d'une autre connexion, verrou de table) | nouvelle tentative différée |
+| `SQLITE_CORRUPT`, `SQLITE_NOTADB` ; fichier étranger ou schéma plus récent à l'ouverture | `InvalidArgument` / `NotSupported` | permanente (intégrité, schéma) | signalée aussitôt, pas de nouvelle tentative |
+| `SQLITE_CONSTRAINT`, `SQLITE_MISMATCH` | `InvalidArgument` | permanente (données refusées par le schéma) | idem |
+| autres (E/S, disque plein, fichier en lecture seule) | `Internal` | permanente pour ce cycle | idem |
+
+- L'inventaire lu du backend est **conservé** (`Inventory::Pending` :
+  éléments normalisés, scopes, génération du catalogue) jusqu'à son
+  enregistrement ; une nouvelle tentative repart de lui, sans réinterroger
+  le backend.
+- Une erreur temporaire est retentée après **1, 2, 4, 8, 16, 30, 60, 60,
+  60 s** (`InventoryIoOptions::retryDelays`) : **10 tentatives sur environ
+  4 min**, puis arrêt. Une demande de réconciliation plus récente remplace
+  l'inventaire en attente (elle repart d'une réponse neuve du backend).
+- Une erreur permanente, ou un verrou qui dure au-delà de la dernière
+  tentative, est **signalée** : `Inventory::recordError()`, et la clé
+  `inventory-error` de l'entrée du backend dans la propriété `Backends`
+  (réémise). Rien n'est masqué ; l'état enregistré précédent reste intact.
+- **Toujours récupérable** : la réconciliation suivante (changement
+  signalé par le backend, `Refresh`, fin d'une transaction) repart de zéro
+  avec un nouveau budget ; sa réussite efface l'erreur (propriété réémise).
+- **Base durablement inaccessible** : après le budget, plus aucune
+  tentative automatique (ni CPU ni E/S) ; `GetInstalled` sert le dernier
+  état enregistré, `Backends` porte `inventory-error` ; chaque
+  réconciliation suivante fait au plus un nouveau cycle borné. Un fichier
+  remplacé ou supprimé est recréé à la tentative suivante (`StateStore`
+  rouvert après un échec d'ouverture).
+
+#### Thread principal et journal (décision du propriétaire, 14 novembre 2026)
+
+Le journal des transactions reste écrit **de façon synchrone par le thread
+principal** (§8.4 inchangé : `saveTransaction`, `recordRefresh`,
+`recoverAfterRestart`), avec `synchronous = FULL`. C'est la seule attente
+d'E/S SQLite qui reste sur le thread principal : sa propre validation
+(fsync), et au plus une écriture d'inventaire courte et sans fsync s'il la
+rencontre. Rendre le journal asynchrone changerait les garanties de reprise
+(D-017, §5.6) : décision d'architecture reportée, à prendre par le
+propriétaire.
+
+Destruction : un `Inventory` détruit arrête son minuteur, annule ses
+`IoJob` (aucun résultat, aucun rappel), cesse d'écouter son backend ;
+`InventoryIo` ne l'attend pas (ci-dessus). Dans `StoreService`,
+`m_backends` est détruit avant l'objet D-Bus : aucun signal n'est émis
+pendant la destruction.
 
 ### 21.6 Signaux
 
@@ -1745,7 +1810,18 @@ aucun signal n'est émis pendant la destruction.
   Flatpak indisponible (PackageKit reste listé et compté, `Backends`
   cohérent) ; Flatpak qui redevient utilisable (une émission de `Backends`,
   un `UpdatesChanged`).
-- `store-core-tests` : `OpeningWaitsForAnotherConnectionsLock`.
+- `store-core-tests` : `OpeningWaitsForAnotherConnectionsLock`,
+  `SeveralInstallationsAreReplacedTogetherOrNotAtAll`,
+  `ErrorsTellALockFromADamagedFile`.
+- Finalisation (`store-inventory-tests`) : la boucle principale tourne
+  pendant que les écritures échouent sur un verrou (`AWriteNeverBlocks…`) ;
+  un échec temporaire est retenté puis appliqué une seule fois ; une
+  écriture qui échoue à chaque tentative est signalée, bornée (le nombre de
+  tentatives est vérifié), puis récupérée ; une erreur permanente (fichier
+  qui n'est pas une base) est signalée sans nouvelle tentative et récupérée
+  une fois le fichier retiré ; détruire le registre pendant une écriture
+  rend la main en moins d'une seconde (le délai d'attente de l'écriture est
+  de 3 s) sans rien livrer ensuite ; un registre inactif joint son fil.
 
 Synchronisation des tests : chaque attente porte sur une condition ; les
 seules durées fixes sont la durée de tenue d'un verrou (les assertions
@@ -1759,13 +1835,173 @@ n'ordonne rien.
   visibles (`GetInstalled`, `GetDetails`, `installed` des résumés). Les
   purger ou les masquer change la sémantique de plusieurs méthodes : à
   décider par le propriétaire.
-- Le thread principal écrit toujours le journal sur sa propre connexion :
-  il peut attendre une écriture d'inventaire en cours (transaction courte,
-  au plus une à la fois). Un écrivain d'un autre processus qui écrirait sans
-  pause pourrait encore épuiser 3 délais d'attente.
-- Le remplacement d'un inventaire est atomique par `(backend, scope)`, pas
-  pour tout un backend : un lecteur peut voir le scope système à jour et le
-  scope utilisateur pas encore (une fraction de seconde).
+- Le thread principal écrit toujours le journal (voir « Thread principal et
+  journal » ci-dessus, décision du propriétaire).
+- Un fil d'E/S détaché à la destruction peut encore écrire, au plus une
+  fois et pendant au plus son délai d'attente, après la fin du service ; à
+  la sortie du processus, SQLite garantit qu'une transaction inachevée
+  disparaît.
+- Un écrivain d'un autre processus qui écrirait sans pause pendant plus de
+  4 minutes épuiserait le budget : l'erreur est alors signalée, et la
+  réconciliation suivante réessaie.
 - Aucune vérification contre un vrai packagekitd ni un vrai libflatpak dans
   cette étape ; `UpdateAll` (H.4) utilise les listes normalisées, sans autre
   changement.
+
+## 22. Coexistence avec les mises à jour système de Cutefish Settings (H.2)
+
+### 22.1 Ce qui a été examiné [CODE PUBLIC, 14 novembre 2026]
+
+Dépôts lus (clones superficiels, sans modification) :
+`cutefishos/settings` (`d86b211`), `cutefishos/cutefish-core` (`fb5270a`),
+`cutefishos/cutefish-framework` (`9da69aa`). Paquets installés sur la
+machine de développement : `cutefish-core` `8b20c92`, `cutefish-settings`
+`a258737`, `cutefish-framework` `9da69aa`. Les écarts (`fb5270a` : recherche
+de PackageKit installé après la connexion ; `d86b211` : demander un
+`check` quand l'état est inconnu) ne touchent pas l'interface D-Bus. Celle-ci
+a été relue telle qu'exposée par le service installé (introspection en
+lecture seule sur le bus de session).
+
+- **Service** : `cutefish-services` (cutefish-core), nom
+  `org.cutefish.Services` sur le **bus de session**, objet
+  `/org/cutefish/Services/SoftwareUpdate`, interface
+  `org.cutefish.Services.SoftwareUpdate`
+  (`cutefish-services/softwareupdate/org.cutefish.Services.SoftwareUpdate.xml`).
+  - Propriétés : `state` (s : `unknown`, `checking`, `up-to-date`,
+    `available`, `updating`, `restart`, `error`), `updates` (a(sss)),
+    `phase` (s : `downloading`, `installing`), `progress` (i), `canCancel`
+    (b), `error` (s).
+  - Méthodes, sans argument : `check` (ignorée si occupé), `update` (installe
+    **toutes** les mises à jour en attente, seulement dans l'état
+    `available`), `cancel` (seulement pendant `updating` et si
+    `AllowCancel`), `restart` (demande un redémarrage à la session).
+  - Aucun signal propre ; `PropertiesChanged` à chaque changement d'état.
+- **Client PackageKit** (cutefish-framework, `clients/packagekit/updates.cpp`,
+  `transaction.cpp`), sur le **bus système** :
+  - `check` = `RefreshCache(false)` puis `GetUpdates(filter none)` ;
+  - `update` = `UpdatePackages(only-trusted, ids)` (rôle 22, sans
+    `only-download`) ; indices `interactive=true`, ou
+    `interactive=false, background=true` en tâche de fond ;
+  - `load` suit une mise à jour déjà en cours : `GetTransactionList`, puis
+    la première transaction de rôle `update-packages` sans `only-download`
+    est rattachée (`attach`) ;
+  - annulation par `Cancel` de sa transaction ; erreurs par `ErrorCode` et
+    `Finished`.
+- **Exploitable par un autre service ?** Les propriétés de SoftwareUpdate
+  ne décrivent que ce que ce service fait lui-même, sur le bus de session ;
+  elles ne voient ni `pkcon`, ni un autre client de PackageKit. Le Store ne
+  s'appuie donc **pas** sur elles : il observe packagekitd directement, ce
+  qui couvre aussi Settings. Aucune méthode de SoftwareUpdate n'est
+  appelée (ni `update`, qui installerait toutes les mises à jour du
+  système, ni `cancel`).
+
+### 22.2 Ce que fait PackageKit des transactions concurrentes
+
+packagekitd exécute une transaction qui modifie le système à la fois
+(l'APT de Debian ne parallélise pas) et met les autres en file (`Status`
+`wait`, puis `waiting-for-lock` si dpkg est tenu par un autre programme).
+Deux clients ne se corrompent donc pas ; mais une demande du Store pendant
+une mise à jour système attendrait silencieusement toute sa durée, et un
+`apt` lancé hors PackageKit fait échouer ou attendre la transaction
+(`cannot-get-lock`, `lock-required` → `BackendFailure::Locked`). Le Store
+ne contourne jamais ces verrous et n'arrête aucun processus.
+
+### 22.3 Architecture retenue
+
+- **Contrat** (`backend.h`) : `ExternalActivity` (genre `none`, `checking`,
+  `refreshing`, `changing`, rôle, étape) et
+  `Backend::externalActivity()` (par défaut : rien, donc Flatpak et les
+  doubles ne changent pas) ; `BackendChanges::activity` le signale.
+- **Logique** (`store-backend-packagekit`, sans D-Bus, P-001) :
+  `externalActivity(transactions)` classe les transactions des autres :
+  - terminées, de rôle inconnu (pas encore commencées) ou `cancel` :
+    ignorées ;
+  - simulation (`simulate`) : `checking` ;
+  - `refresh-cache`, `download-packages`, `update-packages` avec
+    `only-download` : `refreshing` ;
+  - `install-files`, `install-packages`, `install-signature`,
+    `remove-packages`, `update-packages`, `upgrade-system`,
+    `repair-system`, `repo-enable`, `repo-set-data`, `repo-remove` :
+    `changing` (même en attente : elles passeront avant une demande
+    nouvelle) ;
+  - le reste (`get-updates`, `resolve`, recherches…) : `checking` ;
+  - la plus significative l'emporte, à égalité la première par chemin.
+- **Transport** (`PkTransport::watchTransactions`, thread PackageKit) :
+  `GetTransactionList` au démarrage et à chaque réapparition du démon,
+  `TransactionListChanged` du démon, `PropertiesChanged` des transactions
+  (`Role`, `Status`, `TransactionFlags`) ; les transactions du Store (la
+  courante et les rattachées) sont exclues ; liste vide quand le démon
+  disparaît. Observation seulement.
+- **Backend PackageKit** : suit l'activité dès sa construction ; signale un
+  changement de genre ou de rôle (pas chaque étape). Pendant `changing` :
+  `plan`, `execute` et `refresh` échouent **aussitôt** avec
+  `BackendFailure::Locked` (« PackageKit is busy with another program's
+  operation (update-packages, install); nothing was started: try again once
+  it has finished ») et n'envoient rien à PackageKit ; une **dernière
+  vérification** a lieu sur le thread PackageKit juste avant la vraie
+  transaction d'une exécution (une mise à jour commencée pendant la
+  simulation l'arrête avant tout changement). Les requêtes (inventaire,
+  mises à jour) continuent ; packagekitd les met en file.
+- **Service** : l'entrée `packagekit` de la propriété `Backends` porte
+  `activity` (`none`, `checking`, `refreshing`, `changing`) et, sauf
+  `none`, `activity-role` ; elle est réémise à chaque changement de genre
+  ou de rôle. Le backend reste `available` : occupé n'est pas
+  indisponible, et l'état du service ne passe pas en `degraded`.
+
+### 22.4 Comportements
+
+- **Mise à jour système lancée depuis Settings, puis le Store** : `Backends`
+  montre `packagekit` en `changing` (`update-packages`). Une installation,
+  suppression ou mise à jour deb crée sa transaction, qui finit `failed`
+  avec le code **`locked`** (temporaire, ARCHITECTURE §5.6) ; rien n'est
+  lancé dans PackageKit. Un `Refresh` réindexe les métadonnées locales et
+  finit en échec de dépôt (chemin existant de D-028 ; lu dans le code, pas
+  testé avec cette cause). Flatpak continue normalement. À la fin
+  (succès, échec, annulation depuis Settings), `activity` repasse à `none`
+  (propriété réémise) et l'utilisateur peut recommencer ; les signaux
+  `InstalledChanged`/`UpdatesChanged` de packagekitd font réconcilier
+  l'inventaire.
+- **Le Store installe, puis Settings lance la mise à jour** : packagekitd
+  met la transaction de Settings en file ; Settings affiche `updating`
+  pendant l'attente. Le Store ne l'annule pas, sa propre transaction va à
+  son terme, et il refuse (`locked`) toute nouvelle demande deb jusqu'à la
+  fin de celle de Settings. À noter (code public) : si `cutefish-services`
+  redémarre pendant une mise à jour lancée par le **Store**
+  (`UpdatePackages`), son `load()` la suivrait comme une mise à jour
+  système et Settings proposerait de l'annuler ; sans conséquence pour le
+  Store (une annulation lui arrive comme de PackageKit), à signaler aux
+  mainteneurs de Cutefish si cela gêne.
+- **Simple vérification ou rafraîchissement par Settings** (`checking`,
+  `refreshing`) : rien n'est bloqué ; packagekitd ordonne.
+- **PackageKit indisponible** : comportement inchangé (`available = false`,
+  `activity = none`).
+
+### 22.5 Tests (doubles uniquement)
+
+Tout est testé contre le PackageKit simulé (`fakepackagekit.h`, qui émet
+désormais `TransactionListChanged` et fixe `Role`/`TransactionFlags` comme
+packagekitd) et un Flatpak scripté ; **aucun vrai PackageKit, APT ou service
+Cutefish**. « Settings » est joué par `startExternal()` avec les appels que
+son code public fait réellement.
+
+- `store-backend-packagekit-tests` : `PackageKitActivity.*` (6) — règles de
+  classement.
+- `store-pkbackend-tests` : `PkCoexistenceTest.*` (9) — inactif, transactions
+  du Store non comptées ; vérification et rafraîchissement externes qui ne
+  bloquent rien ; mise à jour système qui bloque `plan`/`execute`/`refresh`
+  sans rien envoyer, suivie de ses étapes sans nouvelle notification, puis
+  reprise ; mise à jour déjà en cours au démarrage ; opération externe
+  annulée ou en erreur ; démon disparu puis revenu ; mise à jour commencée
+  pendant la simulation (vérifié par mutation : sans la dernière
+  vérification, le test échoue) ; scénario inverse.
+- `store-service-coexist-tests` (D-Bus, service en processus) : activité
+  `none` au repos ; mise à jour système : `Backends` (`changing`,
+  `update-packages`, `available` vrai, une émission), installation deb
+  `failed`/`locked` sans appel à PackageKit, installation Flatpak transmise
+  à son backend, une transaction chacune, fin puis nouvelle tentative qui
+  atteint PackageKit, aucune annulation, état `ready` ; vérification par
+  Settings qui ne bloque rien.
+
+Non vérifié : le comportement du vrai packagekitd (ordre des signaux
+`TransactionListChanged`/`PropertiesChanged` de `Role`, transactions
+terminées encore listées) et du vrai Settings ; à vérifier en VM.
