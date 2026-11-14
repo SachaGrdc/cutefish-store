@@ -131,7 +131,10 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   seule retiré, ajout futur depuis un `.flatpakrepo` seulement (D-040).
   Correction en passant : traduction des codes d'erreur Flatpak, GIO et
   GDBus (valeurs décalées). Tests sur doubles seulement.
-  **Le propriétaire doit encore valider H.5.** **H.5d** (ajout de
+  H.5 est **validée** par le propriétaire, avec deux interprétations
+  confirmées : réactiver une remote tierce déjà configurée est permis
+  (plan et `Confirm`), une remote `gpg-verify=false` n'est jamais
+  réactivée (`untrusted`). **H.5d** (ajout de
   Flathub) est **suspendue** jusqu'à sa décision sur P-011 et la
   fourniture du fichier `flathub.flatpakrepo` ; arbitrages D2 et D7
   reportés.

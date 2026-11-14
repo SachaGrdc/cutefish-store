@@ -1120,9 +1120,9 @@ propriétaire restant en attente ; le backend Flatpak (G, §19) et son audit
 de durcissement (G.1) sont faits et validés ; il est **raccordé au service**
 par un registre multi-backends (H.1, §20, validée) et un inventaire unifié
 (H.2, §21 et §22, validée). Les transactions multi-backends (H.3, §23)
-sont validées, ainsi que `UpdateAll` multi-backends (H.4, §24). Les
-sources et leur API (H.5, §25) sont implémentées et testées sur doubles,
-à valider ; l'ajout de Flathub (H.5d) attend P-011. Le moniteur Flatpak
+sont validées, ainsi que `UpdateAll` multi-backends (H.4, §24) et les
+sources et leur API (H.5, §25, testées sur doubles) ; l'ajout de Flathub
+(H.5d) est suspendu jusqu'à la décision sur P-011. Le moniteur Flatpak
 et le catalogue unifié (H.6–H.8) suivent. Aucune
 étape n'exige de commande root sur la machine de développement ; les étapes
 marquées « VM » se testent dans une machine virtuelle.
@@ -1598,7 +1598,7 @@ construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
 - **Fait (H.3)** : transactions Flatpak de bout en bout, à côté de
   PackageKit, §23.
 - **Fait (H.4)** : `UpdateAll` multi-backends, §24.
-- **Fait (H.5, à valider)** : sources et API D-Bus (`ListSources` tiré
+- **Fait (H.5, validée)** : sources et API D-Bus (`ListSources` tiré
   des backends, `EnableSource`, `DisableSource`, `RemoveSource`), §25.
   `AddSource` n'est pas prévu en H.5 (D-040) ; `GetPermissions` reste hors
   de l'API.
@@ -2385,7 +2385,7 @@ PackageKit simulé (`fakepackagekit.h`) et faux magasin Flatpak
 ## 25. Sources et API D-Bus (H.5)
 
 H.5 expose la gestion des sources dans les limites fixées par le
-propriétaire (DECISIONS D-039 à D-044). **Aucune source n'est ajoutée** :
+propriétaire (DECISIONS D-039 à D-044). **Validée** par le propriétaire. **Aucune source n'est ajoutée** :
 l'ajout de Flathub (H.5d) attend la décision sur P-011, qui reste
 proposée ; aucun fichier `flathub.flatpakrepo` n'est livré.
 
@@ -2495,6 +2495,16 @@ confirmation est attendue) et `source` (`id`, `name`, `origin`, `url`,
 | Activer (D-042) | `awaiting-confirmation` (délai D-019, puis `cancelled`) → `Confirm` → `queued` → `running` → `succeeded` / `failed` |
 | Activer une remote sans signatures (D-044) | `failed`, code `untrusted`, sans confirmation |
 | Désactiver, supprimer | `queued` → `running` → `succeeded` / `failed` |
+
+Deux règles confirmées par le propriétaire à la validation de H.5 :
+
+- **réactiver une remote tierce déjà configurée** est permis : ce n'est
+  pas l'ajout d'une source (D-040), mais un `EnableSource` comme un autre,
+  avec plan (`new-source`) et `Confirm` explicite (D-042) ;
+- **une remote `gpg-verify=false` n'est jamais réactivée** : la
+  transaction se termine `failed` avec le code `untrusted` (D-044), sans
+  confirmation demandée, et `can-toggle` est faux dans `ListSources` ; le
+  backend refuse aussi de lui-même (`Backend/Untrusted`).
 
 `Cancel` est immédiat en `awaiting-confirmation` et `queued` ; une
 transaction `running` n'est pas annulable. Les changements passent par la

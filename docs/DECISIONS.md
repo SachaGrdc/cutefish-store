@@ -721,6 +721,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Conséquence en H.5** : sans ajout (D-040), la règle s'applique à
   l'activation ; réactiver une remote tierce déjà configurée n'est pas un
   ajout au sens de D-040.
+- **Interprétation confirmée** (propriétaire, validation de H.5) : la
+  réactivation d'une remote tierce déjà configurée est autorisée ; ce
+  n'est pas l'ajout d'une source (arbitrage D3, D-040), mais elle passe par
+  un plan et un `Confirm` explicite.
 - **Détails** : SERVICE.md §25.
 
 ### D-043 — Transactions de source hors du journal
@@ -742,8 +746,11 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   - une remote Flatpak dont la vérification GPG est désactivée
     (`gpg-verify=false`) n'est jamais utilisée pour installer ou mettre à
     jour : la transaction échoue avec `untrusted` pendant sa
-    planification (ARCHITECTURE §9.3) ; elle ne peut pas non plus être
-    activée ; elle reste listée, désactivable et supprimable ;
+    planification (ARCHITECTURE §9.3) ; elle ne peut jamais être
+    réactivée : la transaction échoue explicitement avec `untrusted`, sans
+    confirmation demandée (interprétation confirmée par le propriétaire à
+    la validation de H.5) ; elle reste listée, désactivable et
+    supprimable ;
   - Flathub reste reconnu par l'hôte de son URL (`translate.cpp`) ;
     ARCHITECTURE §7.3 est corrigée en ce sens. Ce n'est pas une
     validation de P-011.
