@@ -47,7 +47,8 @@ add_executable(store-service-multi-tests testservice.cpp fakebackend.h privatebu
 target_include_directories(store-service-multi-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
 target_compile_definitions(store-service-multi-tests PRIVATE DBUS_DAEMON="${DBUS_DAEMON_EXECUTABLE}")
 target_compile_options(store-service-multi-tests PRIVATE -Wall -Wextra)
-target_link_libraries(store-service-multi-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+target_link_libraries(store-service-multi-tests PRIVATE store-service GTest::gtest_main Threads::Threads
+                      PkgConfig::SQLITE3)
 gtest_discover_tests(store-service-multi-tests PROPERTIES TIMEOUT 60)
 
 # The generic manager with two scripted backends: the partial failure of an

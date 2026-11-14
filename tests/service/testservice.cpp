@@ -16,8 +16,12 @@
 #include <base/event_loop.h>
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 #include <algorithm>
+#include <future>
+#include <atomic>
+#include <functional>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -596,3 +600,226 @@ TEST_F(ScriptedFlatpakUnavailable, ABackendThatBecomesUsableJoinsTheCount)
 }
 
 } // namespace
+
+// --- H.2 final audit: a new instance right after an idle shutdown ------------------------
+//
+// Instance A goes idle while its inventory write is held on its I/O thread,
+// before it reaches SQLite (where its long waits are: the busy timeout, the
+// catalogue read; inside its transaction it only writes, for milliseconds —
+// that case is covered in testinventory.cpp, AWriteOfAStoppedInstance…);
+// as main.cpp does, onIdle releases the bus name (StoreService stops its
+// inventory writes first). A is destroyed with the write still held.
+// Instance B takes the name at once and records a newer inventory. Only then
+// does A's thread go on. Ordered by barriers on A's thread, not by delays.
+
+namespace {
+
+InstalledItem debInstalled(const std::string& package)
+{
+    return must(InstalledItem::create({.offer = must(OfferId::parse("packagekit:" + package)),
+                                       .backend = BackendKind::PackageKit,
+                                       .scope = Scope::System,
+                                       .version = must(Version::debian("1.0-1")),
+                                       .origin = "debian-stable-main"}));
+}
+
+ServiceOptions instanceOptions(const std::filesystem::path& dir)
+{
+    ServiceOptions options;
+    options.dataDir = dir;
+    options.sourcesFile = dir / "sources.conf";
+    options.indexer = "cutefish-store-indexer";
+    options.readLocales = {"C"};
+    options.busName = "org.cutefish.Store";
+    return options;
+}
+
+} // namespace
+
+TEST(ServiceRestart, ANewInstanceNeverSeesTheOldOnesLateWrite)
+{
+    privatebus::PrivateBus bus;
+    base::EventLoop loop;
+    catalogfixture::TempDir dir;
+    catalogfixture::build(dir / "catalog.sqlite");
+    auto conn = dbus::Connection::open(dbus::Connection::Bus::Session, &loop);
+    ASSERT_TRUE(conn);
+    auto spin = [&](const std::function<bool()>& pred) {
+        const auto end = std::chrono::steady_clock::now() + 10s;
+        while (!pred()) {
+            if (std::chrono::steady_clock::now() > end)
+                return false;
+            const int t = loop.startTimer(5ms, false, [&] { loop.quit(0); });
+            loop.run();
+            loop.stopTimer(t);
+        }
+        return true;
+    };
+
+    // Instance A: idle after 50 ms; its first inventory write is held.
+    auto reachedA = std::make_shared<std::promise<void>>();
+    auto openA = std::make_shared<std::promise<void>>();
+    std::shared_future<void> reached = reachedA->get_future().share();
+    std::shared_future<void> opened = openA->get_future().share();
+    auto endedA = std::make_shared<std::promise<void>>();
+    std::shared_future<void> aEnded = endedA->get_future().share();
+    ServiceOptions a = instanceOptions(dir.path());
+    a.idleTimeout = 50ms;
+    a.inventoryIo.hooks.beforeWrite = [reachedA, opened, used = std::make_shared<std::atomic<bool>>(false)] {
+        if (used->exchange(true))
+            return;
+        reachedA->set_value();
+        opened.wait();
+    };
+    a.inventoryIo.hooks.threadEnded = [endedA] { endedA->set_value(); };
+    std::vector<std::unique_ptr<Backend>> aBackends;
+    auto aPk = std::make_unique<FakeBackend>(loop, BackendKind::PackageKit);
+    aPk->setInstalled({debInstalled("gimp")});
+    aBackends.push_back(std::move(aPk));
+    auto serviceA = std::make_unique<StoreService>(loop, *conn, std::move(a), std::move(aBackends));
+    bool idle = false;
+    serviceA->onIdle = [&] {
+        conn->releaseName("org.cutefish.Store"); // as main.cpp
+        idle = true;
+    };
+    ASSERT_TRUE(serviceA->start());
+    // A's write is held, about to reach SQLite.
+    ASSERT_TRUE(spin([&] { return reached.wait_for(0s) == std::future_status::ready; }));
+    ASSERT_TRUE(spin([&] { return idle; }));
+    const auto before = std::chrono::steady_clock::now();
+    serviceA.reset();
+    EXPECT_LT(std::chrono::steady_clock::now() - before, 1s); // no wait for the held write
+
+    // Instance B, at once: the name is free, the write lock is A's.
+    ServiceOptions b = instanceOptions(dir.path());
+    b.inventoryIo.busyTimeout = 20ms;
+    b.inventoryIo.retryDelays = std::vector<std::chrono::milliseconds>(100, 20ms);
+    std::vector<std::unique_ptr<Backend>> bBackends;
+    auto bPk = std::make_unique<FakeBackend>(loop, BackendKind::PackageKit);
+    bPk->setInstalled({debInstalled("gitg")});
+    bBackends.push_back(std::move(bPk));
+    auto serviceB = std::make_unique<StoreService>(loop, *conn, std::move(b), std::move(bBackends));
+    const auto startB = std::chrono::steady_clock::now();
+    ASSERT_TRUE(serviceB->start()) << "the restart must not wait for the old write";
+    EXPECT_LT(std::chrono::steady_clock::now() - startB, 1s);
+    auto installed = [&] {
+        auto out = std::make_shared<std::vector<std::string>>();
+        auto done = std::make_shared<bool>(false);
+        std::vector<dbus::PendingCall> calls;
+        calls.push_back(dbus::Proxy(conn.get(), "org.cutefish.Store", "/org/cutefish/Store", "org.cutefish.Store1")
+                                .callAsync("GetInstalled", [out, done](const dbus::Reply& r) {
+                                    for (const auto& i : r.value<std::vector<dbus::VariantMap>>().value_or(
+                                                 std::vector<dbus::VariantMap>{}))
+                                        out->push_back(i.at("offer-id").value<std::string>());
+                                    *done = true;
+                                }, dbus::VariantMap{}));
+        spin([&] { return *done; });
+        return *out;
+    };
+    // B records its inventory while A's write is still held.
+    ASSERT_TRUE(spin([&] { return installed() == std::vector<std::string>{"packagekit:gitg"}; }));
+    ASSERT_NE(aEnded.wait_for(0s), std::future_status::ready);
+
+    // Only now does A's thread go on: stopped, it writes nothing.
+    openA->set_value();
+    ASSERT_EQ(aEnded.wait_for(10s), std::future_status::ready);
+    for (int i = 0; i < 5; ++i)
+        EXPECT_EQ(installed(), std::vector<std::string>{"packagekit:gitg"});
+    serviceB.reset();
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open((dir / "state.sqlite").c_str(), &db), SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &stmt, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)), "ok");
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+TEST(ServiceRestart, AnOldInstanceStillAliveAfterReleasingItsNameWritesNothing)
+{
+    // As in production: once A has released its name it still exists for a
+    // moment (its loop ends, then it is destroyed), while B, another
+    // process, may already run. A's held write goes on during that moment.
+    privatebus::PrivateBus bus;
+    base::EventLoop loop;
+    catalogfixture::TempDir dir;
+    catalogfixture::build(dir / "catalog.sqlite");
+    auto connA = dbus::Connection::open(dbus::Connection::Bus::Session, &loop);
+    auto connB = dbus::Connection::open(dbus::Connection::Bus::Session, &loop);
+    ASSERT_TRUE(connA && connB);
+    auto spin = [&](const std::function<bool()>& pred) {
+        const auto end = std::chrono::steady_clock::now() + 10s;
+        while (!pred()) {
+            if (std::chrono::steady_clock::now() > end)
+                return false;
+            const int t = loop.startTimer(5ms, false, [&] { loop.quit(0); });
+            loop.run();
+            loop.stopTimer(t);
+        }
+        return true;
+    };
+    auto reachedA = std::make_shared<std::promise<void>>();
+    auto openA = std::make_shared<std::promise<void>>();
+    std::shared_future<void> reached = reachedA->get_future().share();
+    std::shared_future<void> opened = openA->get_future().share();
+    auto endedA = std::make_shared<std::promise<void>>();
+    std::shared_future<void> aEnded = endedA->get_future().share();
+    std::atomic<int> aWriteJobs = 0;
+    ServiceOptions a = instanceOptions(dir.path());
+    a.idleTimeout = 50ms;
+    a.inventoryIo.hooks.beforeWrite = [reachedA, opened, &aWriteJobs] {
+        if (++aWriteJobs != 1)
+            return;
+        reachedA->set_value();
+        opened.wait();
+    };
+    a.inventoryIo.hooks.threadEnded = [endedA] { endedA->set_value(); };
+    std::vector<std::unique_ptr<Backend>> aBackends;
+    auto aPk = std::make_unique<FakeBackend>(loop, BackendKind::PackageKit);
+    aPk->setInstalled({debInstalled("gimp")});
+    aBackends.push_back(std::move(aPk));
+    auto serviceA = std::make_unique<StoreService>(loop, *connA, std::move(a), std::move(aBackends));
+    bool idle = false;
+    serviceA->onIdle = [&] {
+        connA->releaseName("org.cutefish.Store"); // as main.cpp
+        idle = true;
+    };
+    ASSERT_TRUE(serviceA->start());
+    ASSERT_TRUE(spin([&] { return reached.wait_for(0s) == std::future_status::ready; }));
+    ASSERT_TRUE(spin([&] { return idle; }));
+
+    // B, on its own connection, while A still exists.
+    std::vector<std::unique_ptr<Backend>> bBackends;
+    auto bPk = std::make_unique<FakeBackend>(loop, BackendKind::PackageKit);
+    bPk->setInstalled({debInstalled("gitg")});
+    bBackends.push_back(std::move(bPk));
+    auto serviceB = std::make_unique<StoreService>(loop, *connB, instanceOptions(dir.path()), std::move(bBackends));
+    ASSERT_TRUE(serviceB->start());
+    auto installed = [&] {
+        auto out = std::make_shared<std::vector<std::string>>();
+        auto done = std::make_shared<bool>(false);
+        std::vector<dbus::PendingCall> calls;
+        calls.push_back(dbus::Proxy(connB.get(), "org.cutefish.Store", "/org/cutefish/Store", "org.cutefish.Store1")
+                                .callAsync("GetInstalled", [out, done](const dbus::Reply& r) {
+                                    for (const auto& i : r.value<std::vector<dbus::VariantMap>>().value_or(
+                                                 std::vector<dbus::VariantMap>{}))
+                                        out->push_back(i.at("offer-id").value<std::string>());
+                                    *done = true;
+                                }, dbus::VariantMap{}));
+        spin([&] { return *done; });
+        return *out;
+    };
+    ASSERT_TRUE(spin([&] { return installed() == std::vector<std::string>{"packagekit:gitg"}; }));
+
+    // A's write goes on while A is alive: stopped at idle, it writes
+    // nothing, and A's loop gets nothing to apply either.
+    openA->set_value();
+    ASSERT_TRUE(spin([&] { return aWriteJobs.load() >= 1; }));
+    for (int i = 0; i < 10; ++i)
+        EXPECT_EQ(installed(), std::vector<std::string>{"packagekit:gitg"});
+    serviceA.reset();
+    ASSERT_EQ(aEnded.wait_for(10s), std::future_status::ready);
+    EXPECT_EQ(installed(), std::vector<std::string>{"packagekit:gitg"});
+    serviceB.reset();
+}

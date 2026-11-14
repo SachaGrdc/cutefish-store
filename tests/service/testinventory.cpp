@@ -896,4 +896,211 @@ TEST_F(InventoryFixture, DestroyingAnIdleRegistryEndsItsThread)
     EXPECT_EQ(stopped.wait_for(0s), std::future_status::ready);
 }
 
+// --- H.2 final audit: stopping, then a new instance at once -----------------------------
+//
+// The scenario: instance A of the service has an inventory write in
+// progress; A stops (bus name released, then destroyed) while the write is
+// still going; instance B starts at once on the same state.sqlite and
+// records its own, newer inventory; A's thread may only then reach SQLite.
+// Every step is ordered by barriers on A's I/O thread (InventoryIoOptions::
+// Hooks), never by a delay.
+
+/// Blocks the I/O thread at a hook, the first time only, until opened.
+struct Gate
+{
+    std::promise<void> reachedPromise;
+    std::shared_future<void> reached = reachedPromise.get_future().share();
+    std::promise<void> openPromise;
+    std::shared_future<void> opened = openPromise.get_future().share();
+    std::atomic<bool> used = false;
+
+    std::function<void()> hook()
+    {
+        return [this] {
+            if (used.exchange(true))
+                return;
+            reachedPromise.set_value();
+            opened.wait();
+        };
+    }
+    void open() { openPromise.set_value(); }
+};
+
+int threadCount()
+{
+    int n = 0;
+    for ([[maybe_unused]] const auto& e : std::filesystem::directory_iterator("/proc/self/task"))
+        ++n;
+    return n;
+}
+
+/// One instance of the service's inventory part: a registry with a
+/// PackageKit backend listing `installed`.
+struct Generation
+{
+    Generation(base::EventLoop& loop, const std::filesystem::path& dir, std::vector<InstalledItem> installed,
+               InventoryIo::Options io)
+    {
+        stopped = std::make_shared<std::promise<void>>();
+        ended = stopped->get_future().share();
+        io.hooks.threadEnded = [p = stopped] { p->set_value(); };
+        backends = std::make_unique<Backends>(dir / "catalog.sqlite", dir / "state.sqlite", std::move(io));
+        auto pk = std::make_unique<FakeBackend>(loop, BackendKind::PackageKit);
+        pk->setInstalled(std::move(installed));
+        backends->add(std::move(pk));
+        Inventory* inventory = backends->inventory(BackendKind::PackageKit);
+        inventory->onInstalledChanged = [this](const std::vector<std::string>&) { ++recorded; };
+        inventory->onAvailabilityChanged = [this] { ++availability; };
+        inventory->setGeneration(1);
+    }
+
+    /// As the service does on idle (stopInventoryWrites, then the name is
+    /// released), then destroyed. Returns how long the destruction took.
+    std::chrono::steady_clock::duration stopAndDestroy()
+    {
+        backends->stopWriting();
+        const auto before = std::chrono::steady_clock::now();
+        backends.reset();
+        return std::chrono::steady_clock::now() - before;
+    }
+
+    std::unique_ptr<Backends> backends;
+    std::shared_ptr<std::promise<void>> stopped;
+    std::shared_future<void> ended;
+    int recorded = 0;
+    int availability = 0;
+};
+
+TEST_F(InventoryFixture, AStoppedInstanceNeverWritesOverTheNextOne)
+{
+    // A is stopped while its write waits to start; B records its inventory;
+    // then A's thread goes on. It must write nothing.
+    const int threadsBefore = threadCount();
+    createState(statePath());
+    Gate gate;
+    InventoryIo::Options aIo;
+    aIo.hooks.beforeWrite = gate.hook();
+    auto a = std::make_unique<Generation>(m_loop, m_dir.path(), std::vector<InstalledItem>{debItem("gimp")}, aIo);
+    a->backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return gate.reached.wait_for(0s) == std::future_status::ready; }));
+
+    // A stops and goes: at once, although its thread is held (a join would
+    // never return here).
+    const std::shared_future<void> aEnded = a->ended;
+    int aRecordedAfter = 0;
+    a->backends->inventory(BackendKind::PackageKit)->onInstalledChanged =
+            [&](const std::vector<std::string>&) { ++aRecordedAfter; };
+    EXPECT_LT(a->stopAndDestroy(), 1s);
+    a.reset();
+
+    // B starts at once on the same file, without waiting for A's thread.
+    Generation b(m_loop, m_dir.path(), {debItem("gitg")}, {});
+    b.backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return b.recorded == 1; }));
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gitg"});
+
+    // A's thread goes on now: it finds itself stopped and writes nothing.
+    gate.open();
+    ASSERT_EQ(aEnded.wait_for(10s), std::future_status::ready);
+    idle(50ms); // a late result would be on the loop by now
+    EXPECT_EQ(aRecordedAfter, 0);
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gitg"});
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+
+    // No thread and no connection left: once B is gone too, every
+    // connection is closed (the last one removes the WAL file).
+    const std::shared_future<void> bEnded = b.ended;
+    b.stopAndDestroy();
+    ASSERT_EQ(bEnded.wait_for(10s), std::future_status::ready);
+    // A detached thread signals its end just before it returns: it leaves
+    // the process's task list a moment later.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (threadCount() != threadsBefore && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    EXPECT_EQ(threadCount(), threadsBefore);
+    EXPECT_FALSE(std::filesystem::exists(m_dir / "state.sqlite-wal"));
+}
+
+TEST_F(InventoryFixture, AWriteOfAStoppedInstanceInsideItsTransactionIsRolledBack)
+{
+    // A is stopped while its write is inside its SQLite transaction (it
+    // holds the write lock, at its commit hook). B's write waits for the
+    // lock meanwhile. A's commit must become a rollback; B's then commits.
+    createState(statePath());
+    Gate gateA;
+    InventoryIo::Options aIo;
+    aIo.hooks.beforeCommit = gateA.hook();
+    auto a = std::make_unique<Generation>(m_loop, m_dir.path(), std::vector<InstalledItem>{debItem("gimp")}, aIo);
+    a->backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return gateA.reached.wait_for(0s) == std::future_status::ready; }));
+    const std::shared_future<void> aEnded = a->ended;
+    EXPECT_LT(a->stopAndDestroy(), 1s);
+    a.reset();
+
+    // B: its first attempt meets A's lock (Conflict); its next one waits
+    // at a gate of its own, so that what A leaves can be looked at alone.
+    Gate gateB;
+    std::atomic<int> bWrites = 0;
+    InventoryIo::Options bIo;
+    bIo.busyTimeout = 20ms;
+    bIo.retryDelays = std::vector<std::chrono::milliseconds>(50, 20ms);
+    auto gateBHook = gateB.hook();
+    bIo.hooks.beforeWrite = [&bWrites, gateBHook] {
+        if (++bWrites == 2)
+            gateBHook();
+    };
+    Generation b(m_loop, m_dir.path(), {debItem("gitg")}, bIo);
+    b.backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return gateB.reached.wait_for(0s) == std::future_status::ready; }));
+    EXPECT_EQ(b.recorded, 0); // its first attempt failed on A's lock
+
+    // A goes on: its commit is refused, the transaction rolled back.
+    gateA.open();
+    ASSERT_EQ(aEnded.wait_for(10s), std::future_status::ready);
+    EXPECT_TRUE(recorded().empty()) << "the stopped instance committed its inventory";
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+
+    // B's next attempt goes through.
+    gateB.open();
+    ASSERT_TRUE(spin([&] { return b.recorded == 1; }));
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gitg"});
+    EXPECT_TRUE(b.backends->inventory(BackendKind::PackageKit)->recordError().empty());
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+}
+
+TEST_F(InventoryFixture, TwoSuccessiveInstancesEachRecordTheirOwnInventory)
+{
+    createState(statePath());
+    auto a = std::make_unique<Generation>(m_loop, m_dir.path(),
+                                          std::vector<InstalledItem>{debItem("gimp"), debItem("libfoo1")},
+                                          InventoryIo::Options{});
+    a->backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return a->recorded == 1; }));
+    EXPECT_EQ(offers(recorded()), (std::vector<std::string>{"packagekit:gimp", "packagekit:libfoo1"}));
+    const std::shared_future<void> aEnded = a->ended;
+    a->stopAndDestroy();
+    ASSERT_EQ(aEnded.wait_for(0s), std::future_status::ready); // idle: joined
+    a.reset();
+
+    Generation b(m_loop, m_dir.path(), {debItem("gitg")}, {});
+    b.backends->inventory(BackendKind::PackageKit)->check();
+    ASSERT_TRUE(spin([&] { return b.recorded == 1; }));
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gitg"});
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+}
+
+TEST_F(InventoryFixture, AStoppedWriterTakesNoMoreWork)
+{
+    m_pkInstalled = {debItem("gimp")};
+    start(true, false);
+    m_backends->stopWriting();
+    EXPECT_TRUE(m_backends->io().stopping());
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_pk->installedQueries() == 1; }));
+    idle(50ms);
+    EXPECT_EQ(m_backends->io().writes(), 0); // dropped, never started
+    EXPECT_EQ(m_counts[0].installed, 0);
+    EXPECT_EQ(m_backends->io().stopped().wait_for(5s), std::future_status::ready);
+}
+
 } // namespace
