@@ -1524,9 +1524,14 @@ TEST_F(FlatpakSources, DisablingAndRemovingNeedNoConfirmation)
     EXPECT_TRUE(journal(removed.path).empty());
 }
 
-TEST_F(FlatpakSources, EnablingWaitsForAnExplicitConfirmation)
+TEST_F(FlatpakSources, ReactivatingAConfiguredThirdPartyRemoteWaitsForConfirm)
 {
+    // Permitted: not the addition of a source (D-040), but a plan and an
+    // explicit Confirm (D-042), as confirmed by the owner for H.5.
     start([](fp::FakeStore& s) { script(s, false); });
+    ASSERT_TRUE(spin([&] { return source(kSpare).has_value(); }));
+    EXPECT_EQ(source(kSpare)->at("kind").value<std::string>(), "third-party");
+    const std::size_t remotesBefore = m_store->remotes_[Scope::User].size();
     const Answer a = enableSource(kSpare);
     ASSERT_EQ(a.error, "");
     ASSERT_TRUE(waitState(a.path, "awaiting-confirmation"));
@@ -1535,6 +1540,7 @@ TEST_F(FlatpakSources, EnablingWaitsForAnExplicitConfirmation)
     EXPECT_TRUE(p.at("requires-confirmation").value<bool>(false));
     EXPECT_EQ(strings(p, "reasons"), std::vector<std::string>{"new-source"});
     EXPECT_EQ(p.at("source").value<dbus::VariantMap>().at("id").value<std::string>(), kSpare);
+    EXPECT_EQ(p.at("source").value<dbus::VariantMap>().at("kind").value<std::string>(), "third-party");
     EXPECT_GT(txProperty<std::uint64_t>(a.path, "ConfirmationDeadline"), 0u);
     EXPECT_TRUE(txProperty<bool>(a.path, "Cancellable"));
     // Nothing changes before Confirm.
@@ -1546,6 +1552,7 @@ TEST_F(FlatpakSources, EnablingWaitsForAnExplicitConfirmation)
     EXPECT_FALSE(remote(Scope::User, "spare")->disabled);
     EXPECT_TRUE(strings(plan(a.path), "reasons").empty()); // no confirmation pending any more
     EXPECT_EQ(confirm(a.path), kNotAllowed);
+    EXPECT_EQ(m_store->remotes_[Scope::User].size(), remotesBefore); // re-enabled, nothing added
     ASSERT_TRUE(spin([&] { return source(kSpare)->at("enabled").value<bool>(false); }));
 }
 
@@ -1574,6 +1581,13 @@ TEST_F(FlatpakSources, ARemoteWithoutSignaturesIsNeverEnabled)
     ASSERT_TRUE(waitState(a.path, "failed"));
     EXPECT_EQ(errorCode(a.path), "untrusted"); // D-044
     EXPECT_FALSE(has(states(a.path), "awaiting-confirmation")); // nothing to confirm
+    EXPECT_TRUE(remote(Scope::User, "unsigned")->disabled);
+    EXPECT_EQ(confirm(a.path), kNotAllowed); // the refusal cannot be confirmed away
+    EXPECT_FALSE(source(kUnsigned)->at("can-toggle").value<bool>(true));
+    // Asked again, refused again: never re-enabled.
+    const Answer again = enableSource(kUnsigned);
+    ASSERT_TRUE(waitState(again.path, "failed"));
+    EXPECT_EQ(errorCode(again.path), "untrusted");
     EXPECT_TRUE(remote(Scope::User, "unsigned")->disabled);
     // Removing it stays possible.
     const Answer removed = removeSource(kUnsigned);
