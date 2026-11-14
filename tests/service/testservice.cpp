@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -84,6 +85,19 @@ protected:
         }));
         spin([&] { return fetch->done; });
         return fetch->map;
+    }
+
+    /// Until a catalogue is in service (State ready or degraded): before
+    /// it, actions are refused with NotReady whatever the backend.
+    bool waitReady()
+    {
+        return spin([&] {
+            const auto props = properties();
+            if (!props || !props->contains("State"))
+                return false;
+            const std::string state = props->at("State").value<std::string>();
+            return state == "ready" || state == "degraded";
+        });
     }
 
     std::optional<dbus::Reply> install(const std::string& offer)
@@ -165,14 +179,24 @@ TEST_F(TwoAvailableBackends, ListsBothBackends)
 
 TEST_F(TwoAvailableBackends, SelectsTheBackendEachOfferNames)
 {
-    ASSERT_TRUE(spin([&] { return properties().has_value(); }));
+    ASSERT_TRUE(waitReady());
+    // Both backends answered (an action on one that has not is refused).
+    ASSERT_TRUE(spin([&] {
+        const auto props = properties();
+        if (!props)
+            return false;
+        const auto list = props->at("Backends").value<std::vector<dbus::VariantMap>>();
+        return list.size() == 2 && std::all_of(list.begin(), list.end(), [](const dbus::VariantMap& b) {
+                   return b.at("available").value<bool>(false);
+               });
+    }));
 
     // Two offers of the same application, from two sources: each names its
     // own backend, and the selection must not fall back.
     auto deb = install("packagekit:gimp");
     ASSERT_TRUE(deb) << "Install(packagekit:gimp) was not answered";
     dbus::ObjectPath debPath;
-    ASSERT_TRUE(deb->read(debPath));
+    ASSERT_TRUE(deb->read(debPath)) << (deb->isError() ? deb->error().name + ": " + deb->error().message : "");
     auto debTx = transaction(debPath.path);
     ASSERT_TRUE(debTx);
     EXPECT_EQ(debTx->at("Backend").value<std::string>(), "packagekit");
@@ -224,7 +248,7 @@ TEST_F(OneAvailableOneUnavailable, OneUnavailableBackendDoesNotDegradeTheService
 
 TEST_F(OneAvailableOneUnavailable, AFlatpakOfferIsRefusedWhenFlatpakIsUnavailable)
 {
-    ASSERT_TRUE(spin([&] { return properties().has_value(); }));
+    ASSERT_TRUE(waitReady());
     const auto reply = install("flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable");
     ASSERT_TRUE(reply);
     EXPECT_EQ(reply->isError() ? reply->error().name : std::string("<no error>"),
