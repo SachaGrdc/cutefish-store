@@ -74,17 +74,24 @@ int main(int argc, char** argv)
     disconnected.path = "/org/freedesktop/DBus/Local";
     disconnected.interface = "org.freedesktop.DBus.Local";
     disconnected.member = "Disconnected";
-    auto lost = connection->subscribe(disconnected, [&loop](const base::dbus::Message&) { loop.quit(1); });
     const std::string name = options->busName;
     // Build the backends before moving the options: `options` must still be
     // valid when buildBackends() reads it (the order of evaluation of the
     // arguments below is unspecified, so moving first would be a use-after-move).
     auto backends = buildBackends(*options, loop);
     store::service::StoreService service(loop, *connection, std::move(options).value(), std::move(backends));
+    // StoreService stops its inventory writes before calling onIdle, so
+    // that an instance started once the name is free never meets one of
+    // this instance's writes after its own (SERVICE.md §21.5).
     service.onIdle = [&] {
         connection->releaseName(name);
         loop.quit(0);
     };
+    auto lost = connection->subscribe(disconnected, [&loop, &service](const base::dbus::Message&) {
+        // Another bus may already serve a new instance.
+        service.stopInventoryWrites();
+        loop.quit(1);
+    });
     if (auto ok = service.start(); !ok) {
         std::fprintf(stderr, "cutefish-store-service: %s\n", ok.error().message().c_str());
         return 1;

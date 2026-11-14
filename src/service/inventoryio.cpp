@@ -9,16 +9,24 @@ InventoryIo::InventoryIo(std::filesystem::path state, Options options)
     m_thread = std::thread(threadMain, m_shared);
 }
 
-InventoryIo::~InventoryIo()
+void InventoryIo::stop()
 {
-    bool busy = false;
     {
         std::lock_guard lock(m_shared->mutex);
         m_shared->stopping = true;
         m_shared->queue.clear();
-        busy = m_shared->busy;
     }
     m_shared->wake.notify_all();
+}
+
+InventoryIo::~InventoryIo()
+{
+    stop();
+    bool busy = false;
+    {
+        std::lock_guard lock(m_shared->mutex);
+        busy = m_shared->busy;
+    }
     // Idle: the thread only waits on the condition variable and ends at
     // once. Busy: it may be inside SQLite (up to its busy timeout); it is
     // left to end on its own, holding what it needs (Shared).
@@ -57,6 +65,8 @@ void InventoryIo::threadMain(std::shared_ptr<Shared> shared)
     }
     // The connection belongs to this thread: closed here.
     shared->store.reset();
+    if (shared->options.hooks.threadEnded)
+        shared->options.hooks.threadEnded();
     shared->stopped.set_value();
 }
 

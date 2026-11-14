@@ -35,10 +35,15 @@ StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connec
     : m_loop(loop), m_connection(connection), m_options(std::move(options)),
       m_reads(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite", m_options.readLocales),
       m_refresher(loop, m_options), m_lifecycle(loop, connection, m_options.idleTimeout, [this] {
-          if (onIdle)
-              onIdle();
+          if (!onIdle)
+              return;
+          // The host releases the bus name in onIdle: a new instance may
+          // start at once. This one writes nothing more from now on
+          // (inventoryio.h, "Stopping").
+          stopInventoryWrites();
+          onIdle();
       }),
-      m_backends(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite")
+      m_backends(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite", m_options.inventoryIo)
 {
     for (std::unique_ptr<Backend>& backend : backends) {
         const BackendKind kind = backend->kind();
@@ -70,6 +75,11 @@ StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connec
 }
 
 StoreService::~StoreService() = default;
+
+void StoreService::stopInventoryWrites()
+{
+    m_backends.stopWriting();
+}
 
 UnixSeconds StoreService::now() const
 {

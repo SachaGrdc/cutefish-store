@@ -4,6 +4,8 @@
 // XDG directories (ARCHITECTURE §2); every path can be given on the command
 // line, which is how the D-Bus tests run the service in a sandbox.
 
+#include "inventoryio.h"
+
 #include <cutefish/store/result.h>
 
 #include <chrono>
@@ -40,6 +42,9 @@ struct ServiceOptions
     std::vector<std::string> readLocales;
     /// Description languages given to the indexer (D-013).
     std::vector<std::string> indexLocales = {"fr"};
+    /// The inventory writer's busy timeout and retry delays, and the tests'
+    /// observation points (inventoryio.h); not read from the command line.
+    InventoryIoOptions inventoryIo = {};
     std::string busName = "org.cutefish.Store";
     PackageKitBus packagekit = PackageKitBus::System;
     /// The distribution's DEP-11 catalogues (Debian profile of PackageKit).

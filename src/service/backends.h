@@ -74,6 +74,8 @@ public:
     std::uint32_t updateCount() const;
 
     const InventoryIo& io() const noexcept { return m_io; }
+    /// InventoryIo::stop(): no inventory writes any more (shutdown).
+    void stopWriting() { m_io.stop(); }
 
 private:
     struct Entry

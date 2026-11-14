@@ -51,8 +51,16 @@ public:
     /// Conflict when another instance owns the name.
     Result<void> start();
 
-    /// Called once the service is idle (P-010): the name is released.
+    /// Called once the service is idle (P-010): the host releases the name.
+    /// The inventory writes are stopped just before (stopInventoryWrites).
     std::function<void()> onIdle;
+
+    /// Stops writing the installed state for good (H.2): after it returns,
+    /// no inventory write of this service commits unless it already holds
+    /// the write lock of state.sqlite, so a new instance started afterwards
+    /// never sees an older inventory written over its own. Never waits. For
+    /// the host, before it gives up the bus name or the bus (main.cpp).
+    void stopInventoryWrites();
 
 private:
     void exportObject();

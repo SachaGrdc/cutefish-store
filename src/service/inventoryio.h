@@ -11,6 +11,17 @@
 // and the writes happen in the order they were asked. The catalogue reads
 // that link the inventory run here too.
 //
+// Stopping (H.2, final audit): stop() — called by the destructor, and by the
+// service BEFORE it releases its bus name — makes this writer stop for good:
+// jobs not started are dropped, a job not yet writing gives up, and a write
+// already inside its SQLite transaction is rolled back by the connection's
+// commit guard (StateStore::setCommitGuard), which runs while the write lock
+// of the file is held. So once stop() has returned, either a write of this
+// writer had already passed its guard — it holds the write lock, and any
+// write of a new instance of the service, which can only start after the
+// name is released, comes after it — or it never commits. An old
+// inventory can never be committed over a newer one.
+//
 // What the main thread never does here (H.2 finalisation):
 // - wait for a write: work and results go through a queue and the loop;
 // - wait at destruction: an idle thread is joined (it is only waiting on a
@@ -104,6 +115,18 @@ struct InventoryIoOptions
             std::chrono::seconds(1),  std::chrono::seconds(2),  std::chrono::seconds(4),
             std::chrono::seconds(8),  std::chrono::seconds(16), std::chrono::seconds(30),
             std::chrono::seconds(60), std::chrono::seconds(60), std::chrono::seconds(60)};
+
+    /// Observation points for the tests, called on the I/O thread: before
+    /// each write job, before each commit of its connection (holding the
+    /// write lock), and once the thread has closed its connection and is
+    /// about to end. Empty in the service.
+    struct Hooks
+    {
+        std::function<void()> beforeWrite;
+        std::function<void()> beforeCommit;
+        std::function<void()> threadEnded;
+    };
+    Hooks hooks = {};
 };
 
 class InventoryIo
@@ -112,8 +135,13 @@ public:
     using Options = InventoryIoOptions;
 
     explicit InventoryIo(std::filesystem::path state, Options options = {});
-    /// Never waits for I/O (see above).
+    /// Never waits for I/O (see above). Stops first.
     ~InventoryIo();
+
+    /// Stops writing for good (see above). Never waits; idempotent. Jobs
+    /// asked afterwards are dropped (their results never come).
+    void stop();
+    bool stopping() const noexcept { return m_shared->stopping; }
 
     InventoryIo(const InventoryIo&) = delete;
     InventoryIo& operator=(const InventoryIo&) = delete;
@@ -133,6 +161,11 @@ public:
         return enqueue(
                 [shared, work = std::move(work)]() mutable -> R {
                     ++shared->writes;
+                    if (shared->options.hooks.beforeWrite)
+                        shared->options.hooks.beforeWrite();
+                    // Stopped meanwhile: nothing more is written.
+                    if (shared->stopping)
+                        return Error::cancelled("the inventory writer has stopped");
                     if (!shared->store) {
                         auto s = StateStore::open(shared->path, static_cast<UnixSeconds>(std::time(nullptr)));
                         if (!s)
@@ -140,6 +173,14 @@ public:
                         s->setBusyTimeout(shared->options.busyTimeout);
                         if (auto ok = s->setDurableCommits(false); !ok)
                             return std::move(ok).error();
+                        // The store lives inside Shared: a raw pointer, no
+                        // cycle.
+                        Shared* raw = shared.get();
+                        s->setCommitGuard([raw] {
+                            if (raw->options.hooks.beforeCommit)
+                                raw->options.hooks.beforeCommit();
+                            return !raw->stopping;
+                        });
                         shared->store.emplace(std::move(s).value());
                     }
                     return work(*shared->store);
@@ -168,7 +209,8 @@ private:
         std::mutex mutex;
         std::condition_variable wake;
         std::deque<std::function<void()>> queue;
-        bool stopping = false;
+        /// Set by stop(); read by the I/O thread without the mutex.
+        std::atomic<bool> stopping = false;
         bool busy = false;
         std::atomic<int> writes = 0;
         /// Used on the I/O thread only.

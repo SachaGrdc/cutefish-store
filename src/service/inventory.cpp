@@ -300,6 +300,13 @@ void Inventory::installedWritten(Result<InstalledOutcome> outcome)
         return installedDone();
     }
     const Error& e = outcome.error();
+    // The writer was stopped (the service is shutting down): the write was
+    // abandoned on purpose; nothing to report or try again.
+    if (e.code() == ErrorCode::Cancelled && m_io.stopping()) {
+        m_pending.reset();
+        m_installedRun.again = false;
+        return installedDone();
+    }
     const bool temporary = e.code() == ErrorCode::Conflict;
     const auto& delays = m_io.options().retryDelays;
     const int attempts = m_pending->attempts;
