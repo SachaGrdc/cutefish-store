@@ -746,6 +746,31 @@ TEST_F(StateStoreTest, TwoWritersWaitForEachOther)
     EXPECT_EQ(a.history(1000)->size(), 100u);
 }
 
+TEST_F(StateStoreTest, OpeningWaitsForAnotherConnectionsLock)
+{
+    // Two inventories of the service may open the file at the same time as
+    // another connection holds it (H.2). The very first statements of open()
+    // must wait for the lock like every later one, not fail with
+    // SQLITE_BUSY. The lock is released by the other thread whatever the
+    // timing; the assertion is only that open() waited instead of failing.
+    sqlite3* holder = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder, "BEGIN EXCLUSIVE", nullptr, nullptr, nullptr), SQLITE_OK);
+    std::atomic<bool> opening = false;
+    std::thread release([&] {
+        while (!opening)
+            std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
+    });
+    opening = true;
+    auto store = StateStore::open(path, kT0);
+    release.join();
+    sqlite3_close(holder);
+    ASSERT_TRUE(store) << store.error().message();
+    EXPECT_EQ(rawQuery(path, "PRAGMA journal_mode"), "wal");
+}
+
 // --- Abrupt stops --------------------------------------------------------------
 
 TEST_F(StateStoreTest, UncommittedChangesOfAKilledProcessDisappear)

@@ -480,6 +480,11 @@ Result<StateStore> StateStore::open(const std::filesystem::path& path, UnixSecon
     auto impl = std::make_unique<Impl>();
     impl->db = std::move(db).value();
     Database& h = impl->db;
+    // Before the first statement: another connection of the process (the
+    // inventory writer, a read thread) may hold a lock on the file; without
+    // a busy timeout the checks and the switch to WAL below would fail at
+    // once with SQLITE_BUSY instead of waiting for it.
+    sqlite3_busy_timeout(h.handle(), kBusyTimeoutMs);
 
     // Nothing below writes before the file is known to be ours.
     auto version = h.queryInt("PRAGMA user_version");
