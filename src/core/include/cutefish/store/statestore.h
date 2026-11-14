@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -123,6 +124,13 @@ public:
     /// connection may be lost at a power cut). For a connection that only
     /// writes what can be rebuilt, such as the installed state (a cache).
     Result<void> setDurableCommits(bool durable);
+    /// Asked before each commit of this connection, while it holds the
+    /// write lock of the file: false turns the commit into a rollback, and
+    /// the write fails with Cancelled, having changed nothing. Called on the
+    /// connection's thread. For a writer that must be able to stop writing
+    /// for good (H.2: the inventory writer of a service that is shutting
+    /// down). An empty function removes it.
+    void setCommitGuard(std::function<bool()> mayCommit);
 
     StateStore(StateStore&&) noexcept;
     StateStore& operator=(StateStore&&) noexcept;

@@ -465,6 +465,7 @@ RecoveryAction recoveryAction(const TransactionRecord& record) noexcept
 struct StateStore::Impl
 {
     Database db;
+    std::function<bool()> mayCommit;
 };
 
 StateStore::StateStore(std::unique_ptr<Impl> impl) : d(std::move(impl)) {}
@@ -561,6 +562,21 @@ Result<void> StateStore::replaceInstalled(BackendKind backend, std::span<const S
 void StateStore::setBusyTimeout(std::chrono::milliseconds timeout) noexcept
 {
     sqlite3_busy_timeout(d->db.handle(), static_cast<int>(timeout.count()));
+}
+
+void StateStore::setCommitGuard(std::function<bool()> mayCommit)
+{
+    d->mayCommit = std::move(mayCommit);
+    if (!d->mayCommit) {
+        sqlite3_commit_hook(d->db.handle(), nullptr, nullptr);
+        return;
+    }
+    // Impl does not move (owned through a unique_ptr): its address stays
+    // valid for the connection's lifetime, which it bounds.
+    sqlite3_commit_hook(
+            d->db.handle(),
+            [](void* impl) -> int { return static_cast<Impl*>(impl)->mayCommit() ? 0 : 1; },
+            d.get());
 }
 
 Result<void> StateStore::setDurableCommits(bool durable)

@@ -361,6 +361,34 @@ TEST_F(StateStoreTest, ErrorsTellALockFromADamagedFile)
     EXPECT_EQ(junk.error().code(), ErrorCode::InvalidArgument) << junk.error().message();
 }
 
+TEST_F(StateStoreTest, ACommitGuardTurnsACommitIntoARollback)
+{
+    auto store = open();
+    const std::vector<InstalledItem> first{flatpakItem("A")};
+    ASSERT_TRUE(store.replaceInstalled(BackendKind::Flatpak, Scope::User, first, kT0));
+    bool allow = false;
+    int asked = 0;
+    store.setCommitGuard([&] {
+        ++asked;
+        return allow;
+    });
+    const std::vector<InstalledItem> second{flatpakItem("B")};
+    auto refused = store.replaceInstalled(BackendKind::Flatpak, Scope::User, second, kT0 + 1);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code(), ErrorCode::Cancelled) << refused.error().message();
+    EXPECT_EQ(asked, 1);
+    // Nothing of it was written, and the connection is usable again.
+    EXPECT_EQ(rawQuery(path, "SELECT offer_id FROM installed"), flatpakItem("A").offer().str());
+    EXPECT_EQ(*store.lastReconciled(BackendKind::Flatpak, Scope::User), std::optional<UnixSeconds>(kT0));
+    allow = true;
+    EXPECT_TRUE(store.replaceInstalled(BackendKind::Flatpak, Scope::User, second, kT0 + 2));
+    EXPECT_EQ(rawQuery(path, "SELECT offer_id FROM installed"), flatpakItem("B").offer().str());
+    store.setCommitGuard({});
+    EXPECT_TRUE(store.replaceInstalled(BackendKind::Flatpak, Scope::User, first, kT0 + 3));
+    EXPECT_EQ(asked, 2);
+    EXPECT_EQ(rawQuery(path, "PRAGMA integrity_check"), "ok");
+}
+
 TEST_F(StateStoreTest, ReadersSeeCommittedChanges)
 {
     auto store = open();

@@ -22,7 +22,9 @@ namespace cutefish::store::detail {
 /// - SQLITE_CORRUPT, SQLITE_NOTADB (a damaged file), SQLITE_CONSTRAINT,
 ///   SQLITE_MISMATCH (data that breaks the schema): InvalidArgument,
 ///   permanent until the file or the data change;
-/// - anything else (I/O, full disk, read-only file, misuse): Internal.
+/// - anything else (I/O, full disk, read-only file, misuse): Internal;
+/// - except SQLITE_CONSTRAINT_COMMITHOOK, a commit refused by the
+///   connection's own commit hook: Cancelled.
 ErrorCode errorCodeOf(int sqliteResult) noexcept;
 
 class Database

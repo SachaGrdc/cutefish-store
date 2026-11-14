@@ -4,6 +4,10 @@ namespace cutefish::store::detail {
 
 ErrorCode errorCodeOf(int sqliteResult) noexcept
 {
+    // A commit refused by the connection's commit hook (StateStore::
+    // setCommitGuard): the write was abandoned on purpose, not refused.
+    if (sqliteResult == SQLITE_CONSTRAINT_COMMITHOOK)
+        return ErrorCode::Cancelled;
     switch (sqliteResult & 0xFF) {
     case SQLITE_BUSY:
     case SQLITE_LOCKED:
