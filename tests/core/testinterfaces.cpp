@@ -189,17 +189,19 @@ TEST(BackendInterface, ReturnsSources)
 {
     fakes::PostQueue queue;
     fakes::FakeBackend fake(BackendKind::Flatpak, queue);
-    fake.sourcesAnswer = std::vector<Source>{fixtures::flathubSource(Scope::User), fixtures::flathubSource(Scope::System)};
+    fake.sourcesAnswer = std::vector<BackendSource>{{.source = fixtures::flathubSource(Scope::User)},
+                                                    {.source = fixtures::flathubSource(Scope::System)}};
     Backend& backend = fake;
 
-    std::vector<Source> sources;
-    backend.sources([&](Result<std::vector<Source>> r) {
+    std::vector<BackendSource> sources;
+    backend.sources([&](Result<std::vector<BackendSource>> r) {
         ASSERT_TRUE(r);
         sources = std::move(r).value();
     });
     queue.runAll();
     ASSERT_EQ(sources.size(), 2u);
-    EXPECT_EQ(sources[0].kind(), SourceKind::Flathub);
-    EXPECT_NE(sources[0].id(), sources[1].id());
+    EXPECT_EQ(sources[0].source.kind(), SourceKind::Flathub);
+    EXPECT_NE(sources[0].source.id(), sources[1].source.id());
+    EXPECT_FALSE(sources[0].verifiesSignatures); // unknown unless the backend tells
     EXPECT_EQ(fake.calls, 1);
 }

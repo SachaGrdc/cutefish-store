@@ -79,7 +79,15 @@ public:
         post([done, items = m_installed] { done(items); });
     }
 
-    void sources(Completion<std::vector<Source>> done) override { post([done] { done(std::vector<Source>{}); }); }
+    void sources(Completion<std::vector<BackendSource>> done) override
+    {
+        post([done] { done(std::vector<BackendSource>{}); });
+    }
+
+    void changeSource(const std::string&, const SourceRequest&, Completion<void> done) override
+    {
+        post([done] { done(Error::notSupported("no source changes in this fake")); });
+    }
 
     void catalogSources(Completion<std::vector<SourceMetadata>> done) override
     {

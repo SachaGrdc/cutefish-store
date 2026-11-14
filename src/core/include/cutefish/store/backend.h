@@ -46,6 +46,11 @@ struct BackendCapabilities
     /// check narrows the window between plan and execution without closing
     /// it (D-017). Never presented as an absolute guarantee.
     bool verifiesExecutedPlan = false;
+    /// changeSource() enables, disables and removes the sources of the user
+    /// installation (H.5). Never those of the system installation (D-011),
+    /// and never adds one. PackageKit: false, its repositories are listed
+    /// read-only (D-039).
+    bool userSourceChanges = false;
 };
 
 /// Phase of a running operation (ARCHITECTURE §5.3, property `Phase`).
@@ -128,6 +133,41 @@ struct SourceMetadata
     Source source;
     SourceFiles files;
 };
+
+/// A source as the backend has it configured now (H.5, `ListSources`),
+/// enabled or not, with what the backend can tell about it. Unknown facts
+/// stay unknown: nothing here is guessed.
+struct BackendSource
+{
+    Source source;
+    /// The catalogue sources it feeds, when their ids differ from
+    /// source.id(): a Debian repository feeds one DEP-11 source per
+    /// component. Empty: the catalogue source of the same id, if any.
+    std::vector<SourceId> catalogueSources = {};
+    /// Whether the package manager checks the signatures of what comes from
+    /// it (Flatpak's gpg-verify). Unknown when the backend cannot tell
+    /// (PackageKit does not report it).
+    std::optional<bool> verifiesSignatures = {};
+    /// How many installed items (applications and runtimes) came from it.
+    /// Unknown when the backend cannot tell.
+    std::optional<std::uint32_t> installedItems = {};
+};
+
+/// A change asked for one configured source (H.5). There is no addition:
+/// adding a source is not part of the contract (D-040).
+struct SourceRequest
+{
+    enum class Action : std::uint8_t {
+        Enable,
+        Disable,
+        Remove,
+    };
+    SourceId source;
+    Action action = Action::Disable;
+};
+
+/// "enable", "disable", "remove".
+std::string_view toString(SourceRequest::Action action) noexcept;
 
 /// What changed outside the store (an `apt` or `flatpak` command, another
 /// tool), as far as the backend can tell.
@@ -214,8 +254,9 @@ public:
     /// What this backend has installed (all scopes it manages).
     virtual void queryInstalled(Completion<std::vector<InstalledItem>> done) = 0;
 
-    /// Configured sources (repositories, remotes), read-only.
-    virtual void sources(Completion<std::vector<Source>> done) = 0;
+    /// Configured sources (repositories, remotes), enabled or not, as the
+    /// package manager has them now.
+    virtual void sources(Completion<std::vector<BackendSource>> done) = 0;
 
     /// Configured sources with their metadata files, for the indexer and
     /// for probeSource()/assessSources(). A source without metadata yet is
@@ -263,6 +304,21 @@ public:
     /// Rereads the repositories' metadata (D-015). NotSupported without
     /// capabilities().refresh. Modifying: one at a time with executions.
     virtual void refresh(const std::string& operationId, OperationEvents events, Completion<void> done) = 0;
+
+    /// Enables, disables or removes a configured source (H.5). Modifying: one
+    /// at a time with executions and refresh (P-009); not cancellable. The
+    /// backend checks again what the host checked, against the package
+    /// manager's state when it runs:
+    /// - NotSupported without capabilities().userSourceChanges;
+    /// - NotFound for a source it does not have;
+    /// - NotAllowed for a source of the system installation (D-011), and for
+    ///   removing a source something installed came from (D-041: nothing is
+    ///   uninstalled with it);
+    /// - Backend/Untrusted for enabling a source whose signatures are not
+    ///   checked (D-044).
+    /// Enabling an enabled source, or disabling a disabled one, succeeds and
+    /// changes nothing.
+    virtual void changeSource(const std::string& operationId, const SourceRequest& change, Completion<void> done) = 0;
 
     /// Asks to cancel a running plan, execution, reattach or refresh. Only a
     /// request: success means it was passed on, and the operation's own

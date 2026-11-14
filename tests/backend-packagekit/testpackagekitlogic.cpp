@@ -367,6 +367,28 @@ TEST(DebianProfile, RepositoriesClassifiedByHost)
     EXPECT_FALSE(debian::repositorySource("garbage", "x", true));
 }
 
+TEST(DebianProfile, RepositoriesFeedTheirDep11Sources)
+{
+    auto ids = [](std::string_view repo) {
+        std::vector<std::string> out;
+        for (const SourceId& id : debian::catalogueSourceIds(repo))
+            out.push_back(id.str());
+        return out;
+    };
+    // One DEP-11 source per component, named like the DEP-11 file names
+    // (catalogSources): last element of the path, suite, component.
+    EXPECT_EQ(ids("/etc/apt/sources.list:deb:http://deb.debian.org/debian/:trixie:main,contrib,non-free-firmware"),
+              (std::vector<std::string>{"packagekit:debian-trixie-main", "packagekit:debian-trixie-contrib",
+                                        "packagekit:debian-trixie-non-free-firmware"}));
+    EXPECT_EQ(ids("/etc/apt/sources.list.d/debian.sources:deb:http://deb.debian.org/debian-security:trixie-security:main"),
+              (std::vector<std::string>{"packagekit:debian-security-trixie-security-main"}));
+    // No path: the DEP-11 file is named after the host.
+    EXPECT_EQ(ids("/etc/apt/sources.list:deb:http://security.debian.org/:trixie-security:main"),
+              (std::vector<std::string>{"packagekit:security.debian.org-trixie-security-main"}));
+    EXPECT_TRUE(ids("/etc/apt/sources.list:deb-src:http://deb.debian.org/debian/:trixie:main").empty());
+    EXPECT_TRUE(ids("garbage").empty());
+}
+
 TEST(DebianProfile, ProtectedPackages)
 {
     EXPECT_TRUE(debian::isProtected("cutefish-desktop"));

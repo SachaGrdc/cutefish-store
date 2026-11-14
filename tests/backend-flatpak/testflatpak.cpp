@@ -25,6 +25,11 @@ using namespace std::chrono_literals;
 
 namespace {
 
+FlatpakRef appRef(const char* name)
+{
+    return {RefKind::App, name, "x86_64", "stable"};
+}
+
 // --- Pure logic ---------------------------------------------------------------
 
 TEST(FlatpakTranslate, ParsesApplicationAndRuntimeRefs)
@@ -206,19 +211,146 @@ TEST_F(BackendFixture, ListsSourcesAndCatalogSources)
              .iconsPath = "/cache/flathub/icons"},
             {.name = "third-party", .url = "https://example.org/repo/", .disabled = false, .gpgVerify = true,
              .metadataPath = {}, .iconsPath = {}}};
-    auto sources = await<std::vector<Source>>(
-            [this](Completion<std::vector<Source>> done) { backend.sources(std::move(done)); });
+    fake->installed_[Scope::User] = {{appRef("org.gimp.GIMP"), "flathub"},
+                                     {{RefKind::Runtime, "org.gnome.Platform", "x86_64", "48"}, "flathub"}};
+    auto sources = await<std::vector<BackendSource>>(
+            [this](Completion<std::vector<BackendSource>> done) { backend.sources(std::move(done)); });
     ASSERT_TRUE(sources);
     ASSERT_EQ(sources->size(), 2u);
-    EXPECT_EQ(sources->at(0).kind(), SourceKind::Flathub);
-    EXPECT_EQ(sources->at(0).id().str(), "flatpak:user:flathub");
-    EXPECT_EQ(sources->at(1).kind(), SourceKind::ThirdParty);
+    EXPECT_EQ(sources->at(0).source.kind(), SourceKind::Flathub);
+    EXPECT_EQ(sources->at(0).source.id().str(), "flatpak:user:flathub");
+    EXPECT_EQ(sources->at(0).verifiesSignatures, std::optional<bool>(true));
+    EXPECT_EQ(sources->at(0).installedItems, std::optional<std::uint32_t>(2)); // the runtime counts
+    EXPECT_TRUE(sources->at(0).catalogueSources.empty());
+    EXPECT_EQ(sources->at(1).source.kind(), SourceKind::ThirdParty);
+    EXPECT_EQ(sources->at(1).installedItems, std::optional<std::uint32_t>(0));
 
     auto catalog = await<std::vector<SourceMetadata>>(
             [this](Completion<std::vector<SourceMetadata>> done) { backend.catalogSources(std::move(done)); });
     ASSERT_TRUE(catalog);
     ASSERT_EQ(catalog->size(), 1u); // only the remote with metadata
     EXPECT_EQ(catalog->at(0).files.metadata, "/cache/flathub/appstream.xml.gz");
+}
+
+// --- Source changes (H.5) -------------------------------------------------------
+
+namespace {
+
+SourceId sourceId(const char* id)
+{
+    return SourceId::parse(id).value();
+}
+
+} // namespace
+
+TEST(FlatpakTranslate, SourceIdsNameARemoteOfAnInstallation)
+{
+    auto user = remoteOfSource(sourceId("flatpak:user:flathub"));
+    ASSERT_TRUE(user);
+    EXPECT_EQ(user->first, Scope::User);
+    EXPECT_EQ(user->second, "flathub");
+    auto system = remoteOfSource(sourceId("flatpak:system:fedora"));
+    ASSERT_TRUE(system);
+    EXPECT_EQ(system->first, Scope::System);
+    for (const char* bad : {"packagekit:debian-trixie-main", "flatpak:user", "flatpak:user:", "flatpak:nowhere:x",
+                            "flatpak:user:a:b"})
+        EXPECT_FALSE(remoteOfSource(sourceId(bad))) << bad;
+}
+
+struct SourceFixture : BackendFixture
+{
+    SourceFixture()
+    {
+        fake->remotes_[Scope::User] = {
+                {.name = "flathub", .url = "https://dl.flathub.org/repo/", .disabled = false, .gpgVerify = true, .metadataPath = {}, .iconsPath = {}},
+                {.name = "unsigned", .url = "https://example.org/repo/", .disabled = true, .gpgVerify = false, .metadataPath = {}, .iconsPath = {}},
+                {.name = "spare", .url = "https://example.net/repo/", .disabled = true, .gpgVerify = true, .metadataPath = {}, .iconsPath = {}}};
+        fake->remotes_[Scope::System] = {
+                {.name = "flathub", .url = "https://dl.flathub.org/repo/", .disabled = false, .gpgVerify = true, .metadataPath = {}, .iconsPath = {}}};
+        fake->installed_[Scope::User] = {{appRef("org.gimp.GIMP"), "flathub"}};
+    }
+
+    Result<void> change(const char* id, SourceRequest::Action action)
+    {
+        return await<void>([&](Completion<void> done) {
+            backend.changeSource("op", {.source = sourceId(id), .action = action}, std::move(done));
+        });
+    }
+
+    const RemoteInfo* remote(Scope scope, const std::string& name) const
+    {
+        for (const RemoteInfo& r : fake->remotes_[scope])
+            if (r.name == name)
+                return &r;
+        return nullptr;
+    }
+};
+
+TEST_F(SourceFixture, EnablesAndDisablesAUserRemote)
+{
+    EXPECT_TRUE(backend.capabilities().userSourceChanges);
+    ASSERT_TRUE(change("flatpak:user:spare", SourceRequest::Action::Enable));
+    EXPECT_FALSE(remote(Scope::User, "spare")->disabled);
+    // Already enabled: success, nothing changes.
+    ASSERT_TRUE(change("flatpak:user:spare", SourceRequest::Action::Enable));
+    ASSERT_TRUE(change("flatpak:user:spare", SourceRequest::Action::Disable));
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+    ASSERT_TRUE(change("flatpak:user:spare", SourceRequest::Action::Disable));
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+    // Disabling a remote something came from is allowed: nothing is removed.
+    ASSERT_TRUE(change("flatpak:user:flathub", SourceRequest::Action::Disable));
+    EXPECT_TRUE(remote(Scope::User, "flathub")->disabled);
+    EXPECT_EQ(fake->installed_[Scope::User].size(), 1u);
+}
+
+TEST_F(SourceFixture, NeverEnablesARemoteWithoutSignatures)
+{
+    auto r = change("flatpak:user:unsigned", SourceRequest::Action::Enable);
+    ASSERT_FALSE(r);
+    EXPECT_EQ(r.error().code(), ErrorCode::Backend);
+    EXPECT_EQ(r.error().backendFailure(), BackendFailure::Untrusted);
+    EXPECT_TRUE(remote(Scope::User, "unsigned")->disabled);
+    // Disabling or removing it stays possible.
+    EXPECT_TRUE(change("flatpak:user:unsigned", SourceRequest::Action::Remove));
+    EXPECT_EQ(remote(Scope::User, "unsigned"), nullptr);
+}
+
+TEST_F(SourceFixture, RemovesOnlyAnUnusedUserRemote)
+{
+    auto used = change("flatpak:user:flathub", SourceRequest::Action::Remove);
+    ASSERT_FALSE(used);
+    EXPECT_EQ(used.error().code(), ErrorCode::NotAllowed);
+    ASSERT_NE(remote(Scope::User, "flathub"), nullptr); // nothing removed, nothing uninstalled
+    EXPECT_EQ(fake->installed_[Scope::User].size(), 1u);
+
+    ASSERT_TRUE(change("flatpak:user:spare", SourceRequest::Action::Remove));
+    EXPECT_EQ(remote(Scope::User, "spare"), nullptr);
+}
+
+TEST_F(SourceFixture, NeverChangesASystemRemote)
+{
+    for (const auto action : {SourceRequest::Action::Enable, SourceRequest::Action::Disable, SourceRequest::Action::Remove}) {
+        auto r = change("flatpak:system:flathub", action);
+        ASSERT_FALSE(r);
+        EXPECT_EQ(r.error().code(), ErrorCode::NotAllowed);
+    }
+    ASSERT_NE(remote(Scope::System, "flathub"), nullptr);
+    EXPECT_FALSE(remote(Scope::System, "flathub")->disabled);
+}
+
+TEST_F(SourceFixture, RefusesAnUnknownOrForeignSource)
+{
+    auto unknown = change("flatpak:user:nowhere", SourceRequest::Action::Disable);
+    ASSERT_FALSE(unknown);
+    EXPECT_EQ(unknown.error().code(), ErrorCode::NotFound);
+    auto foreign = change("packagekit:debian-trixie-main", SourceRequest::Action::Disable);
+    ASSERT_FALSE(foreign);
+    EXPECT_EQ(foreign.error().code(), ErrorCode::InvalidArgument);
+    // Without a user installation, the backend cannot change its remotes.
+    fake->scopes_ = {Scope::System};
+    auto gone = change("flatpak:user:spare", SourceRequest::Action::Enable);
+    ASSERT_FALSE(gone);
+    EXPECT_EQ(gone.error().backendFailure(), BackendFailure::Unavailable);
 }
 
 TEST_F(BackendFixture, PlansAnInstallWithItsRuntime)

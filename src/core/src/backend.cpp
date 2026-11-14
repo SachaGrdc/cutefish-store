@@ -15,6 +15,16 @@ std::string_view toString(OperationPhase phase) noexcept
     return "finishing";
 }
 
+std::string_view toString(SourceRequest::Action action) noexcept
+{
+    switch (action) {
+    case SourceRequest::Action::Enable: return "enable";
+    case SourceRequest::Action::Disable: return "disable";
+    case SourceRequest::Action::Remove: return "remove";
+    }
+    return "disable";
+}
+
 std::string_view toString(ExternalActivity::Kind kind) noexcept
 {
     switch (kind) {

@@ -175,12 +175,17 @@ TEST_F(PkBackendTest, SourcesAndCatalogueSources)
                    {"/etc/apt/sources.list.d/cutefish.list:deb:https://download.cutefish.org/debian/:trixie-nightly:main",
                     "Cutefish", false}};
     fake->answer("GetRepoList", repos);
-    auto r = wait<std::vector<Source>>([&](auto d) { backend->sources(std::move(d)); });
+    auto r = wait<std::vector<BackendSource>>([&](auto d) { backend->sources(std::move(d)); });
     ASSERT_TRUE(r && *r);
     ASSERT_EQ((*r)->size(), 2u); // deb-src left out
-    EXPECT_EQ((**r)[0].kind(), SourceKind::Distribution);
-    EXPECT_EQ((**r)[1].kind(), SourceKind::ThirdParty);
-    EXPECT_FALSE((**r)[1].enabled());
+    EXPECT_EQ((**r)[0].source.kind(), SourceKind::Distribution);
+    EXPECT_EQ((**r)[1].source.kind(), SourceKind::ThirdParty);
+    EXPECT_FALSE((**r)[1].source.enabled()); // a disabled repository is listed
+    // The DEP-11 source each repository feeds; nothing PackageKit cannot tell.
+    ASSERT_EQ((**r)[0].catalogueSources.size(), 1u);
+    EXPECT_EQ((**r)[0].catalogueSources[0].str(), "packagekit:debian-trixie-main");
+    EXPECT_FALSE((**r)[0].verifiesSignatures);
+    EXPECT_FALSE((**r)[0].installedItems);
 
     std::filesystem::create_directories(bus.dir() / "swcatalog" / "yaml");
     std::ofstream(bus.dir() / "swcatalog" / "yaml" / "deb.debian.org_debian_dists_trixie_main_dep11_Components-amd64.yml.gz")
@@ -189,6 +194,22 @@ TEST_F(PkBackendTest, SourcesAndCatalogueSources)
     ASSERT_TRUE(c && *c);
     ASSERT_EQ((*c)->size(), 1u);
     EXPECT_EQ((**c)[0].source.id().str(), "packagekit:debian-trixie-main");
+}
+
+TEST_F(PkBackendTest, RefusesEveryRepositoryChange)
+{
+    // D-039: the distribution's repositories are read-only. Nothing is sent
+    // to packagekitd (no RepoEnable, no RepoRemove), whatever the change.
+    EXPECT_FALSE(backend->capabilities().userSourceChanges);
+    const std::size_t before = fake->calls().size();
+    const SourceId repo = SourceId::parse("packagekit:/etc/apt/sources.list:deb:http://deb.debian.org/debian/:trixie:main").value();
+    for (const auto action : {SourceRequest::Action::Enable, SourceRequest::Action::Disable, SourceRequest::Action::Remove}) {
+        auto r = wait<void>([&](auto d) { backend->changeSource("op", {.source = repo, .action = action}, std::move(d)); });
+        ASSERT_TRUE(r);
+        ASSERT_FALSE(*r);
+        EXPECT_EQ(r->error().code(), ErrorCode::NotSupported);
+    }
+    EXPECT_EQ(fake->calls().size(), before);
 }
 
 TEST_F(PkBackendTest, UpdatesWithoutIdenticalVersions)

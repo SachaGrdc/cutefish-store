@@ -110,13 +110,18 @@ TEST_F(RealPackageKit, InstalledPackages)
 
 TEST_F(RealPackageKit, RepositoriesAndCatalogueSources)
 {
-    auto r = wait<std::vector<Source>>([&](auto d) { backend->sources(std::move(d)); });
+    auto r = wait<std::vector<BackendSource>>([&](auto d) { backend->sources(std::move(d)); });
     ASSERT_TRUE(r && *r) << r->error().message();
     EXPECT_FALSE((*r)->empty());
-    for (const Source& s : **r)
-        std::cout << "  repository " << s.id().str() << " " << toString(s.kind()) << (s.enabled() ? "" : " disabled")
-                  << "\n";
-    EXPECT_TRUE(std::any_of((*r)->begin(), (*r)->end(), [](const Source& s) { return s.kind() == SourceKind::Distribution; }));
+    for (const BackendSource& b : **r) {
+        const Source& s = b.source;
+        std::cout << "  repository " << s.id().str() << " " << toString(s.kind()) << (s.enabled() ? "" : " disabled");
+        for (const SourceId& c : b.catalogueSources)
+            std::cout << " feeds " << c.str();
+        std::cout << "\n";
+    }
+    EXPECT_TRUE(std::any_of((*r)->begin(), (*r)->end(),
+                            [](const BackendSource& b) { return b.source.kind() == SourceKind::Distribution; }));
 
     auto c = wait<std::vector<SourceMetadata>>([&](auto d) { backend->catalogSources(std::move(d)); });
     ASSERT_TRUE(c && *c);

@@ -34,6 +34,13 @@ SourceKind remoteKind(std::string_view name, std::string_view url);
 /// origin is the remote name, the label empty (the interface shows the name).
 Result<Source> sourceForRemote(Scope scope, const RemoteInfo& remote);
 
+/// The installation and the remote name a source id `flatpak:<scope>:<name>`
+/// designates (the inverse of sourceForRemote). InvalidArgument otherwise.
+Result<std::pair<Scope, std::string>> remoteOfSource(const SourceId& source);
+
+/// How many of these installed refs came from the remote `name`.
+std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string_view name);
+
 /// A backend failure mapped from a Flatpak or GIO error (ARCHITECTURE §7.3
 /// "Erreurs"). `domain` is `flatpak`, `g-io` or `g-dbus`.
 Error mapFlatpakError(std::string_view domain, int code, std::string_view message);

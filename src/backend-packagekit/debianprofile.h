@@ -44,9 +44,18 @@ std::optional<AptRepository> parseRepositoryId(std::string_view id);
 /// a third party.
 SourceKind classifyHost(std::string_view host);
 
-/// The source of an enabled `deb` repository; std::nullopt for `deb-src`,
-/// a disabled repository or an id the profile cannot read.
+/// The source of a `deb` repository, enabled or not; std::nullopt for
+/// `deb-src` or an id the profile cannot read.
 std::optional<Source> repositorySource(std::string_view repoId, std::string_view description, bool enabled);
+
+/// The ids of the DEP-11 catalogue sources (catalogSources() below) a `deb`
+/// repository feeds: one per component, `packagekit:<archive>-<suite>-
+/// <component>`, where the archive is the last element of the URI's path,
+/// or its host when the path is empty (as in the DEP-11 file names). Empty
+/// for an id the profile cannot read or a `deb-src` repository. Two
+/// repositories of the same archive, suite and component on different hosts
+/// feed the same ids: DEP-11 file names do not keep the host apart.
+std::vector<SourceId> catalogueSourceIds(std::string_view repoId);
 
 /// The packages whose removal the store refuses, even as a consequence of
 /// another removal (ARCHITECTURE §7.2): the desktop meta-package and the

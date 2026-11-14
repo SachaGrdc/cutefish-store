@@ -86,6 +86,35 @@ std::optional<Source> repositorySource(std::string_view repoId, std::string_view
     return std::move(source).value();
 }
 
+std::vector<SourceId> catalogueSourceIds(std::string_view repoId)
+{
+    const auto repo = parseRepositoryId(repoId);
+    if (!repo || repo->type != "deb")
+        return {};
+    // The path of the URI, without its scheme and host.
+    const std::size_t scheme = repo->uri.find("://");
+    const std::size_t pathStart = repo->uri.find('/', scheme + 3);
+    std::string_view path = pathStart == std::string::npos ? std::string_view() : std::string_view(repo->uri).substr(pathStart);
+    while (!path.empty() && path.back() == '/')
+        path.remove_suffix(1);
+    const std::size_t last = path.rfind('/');
+    const std::string archive(last == std::string_view::npos || path.empty() ? std::string_view(repo->host)
+                                                                              : path.substr(last + 1));
+    std::vector<SourceId> out;
+    std::string_view components = repo->components;
+    while (!components.empty()) {
+        const std::size_t comma = components.find(',');
+        const std::string_view component = components.substr(0, comma);
+        if (!component.empty())
+            if (auto id = SourceId::parse("packagekit:" + archive + "-" + repo->suite + "-" + std::string(component)))
+                out.push_back(std::move(id).value());
+        if (comma == std::string_view::npos)
+            break;
+        components.remove_prefix(comma + 1);
+    }
+    return out;
+}
+
 bool isProtected(std::string_view packageName)
 {
     // dpkg may qualify a foreign architecture ("name:i386").

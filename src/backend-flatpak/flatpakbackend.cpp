@@ -100,7 +100,8 @@ BackendCapabilities FlatpakBackend::capabilities() const noexcept
             .refresh = false, // appstream update comes with step I
             .cancelAnytime = true,
             .reattach = false, // Flatpak runs in-service: nothing to reattach
-            .verifiesExecutedPlan = true};
+            .verifiesExecutedPlan = true,
+            .userSourceChanges = true};
 }
 
 void FlatpakBackend::availability(Completion<void> done)
@@ -140,21 +141,79 @@ void FlatpakBackend::queryInstalled(Completion<std::vector<InstalledItem>> done)
     }, std::move(done));
 }
 
-void FlatpakBackend::sources(Completion<std::vector<Source>> done)
+void FlatpakBackend::sources(Completion<std::vector<BackendSource>> done)
 {
-    run<std::vector<Source>>([this]() -> Result<std::vector<Source>> {
-        std::vector<Source> out;
+    run<std::vector<BackendSource>>([this]() -> Result<std::vector<BackendSource>> {
+        std::vector<BackendSource> out;
         for (const Scope scope : m_store->scopes()) {
             auto remotes = m_store->remotes(scope);
             if (!remotes)
                 return std::move(remotes).error();
+            auto installed = m_store->installed(scope);
+            if (!installed)
+                return std::move(installed).error();
             for (const RemoteInfo& remote : *remotes) {
                 auto source = sourceForRemote(scope, remote);
-                if (source)
-                    out.push_back(std::move(source).value());
+                if (!source)
+                    continue;
+                out.push_back({.source = std::move(source).value(),
+                               .catalogueSources = {},
+                               .verifiesSignatures = remote.gpgVerify,
+                               .installedItems = installedFrom(*installed, remote.name)});
             }
         }
         return out;
+    }, std::move(done));
+}
+
+void FlatpakBackend::changeSource(const std::string&, const SourceRequest& change, Completion<void> done)
+{
+    // On the worker, like the transactions: the remote is changed between two
+    // of them, never during one (P-009), and the checks below see the
+    // installation as it is when the change is made.
+    run<void>([this, change]() -> Result<void> {
+        auto address = remoteOfSource(change.source);
+        if (!address)
+            return std::move(address).error();
+        const auto& [scope, name] = *address;
+        if (scope != Scope::User)
+            return Error::notAllowed("the remotes of the system installation are read-only (D-011)");
+        const std::vector<Scope> scopes = m_store->scopes();
+        if (std::find(scopes.begin(), scopes.end(), scope) == scopes.end())
+            return Error::backend(BackendFailure::Unavailable, "the user installation is not available");
+        auto remotes = m_store->remotes(scope);
+        if (!remotes)
+            return std::move(remotes).error();
+        const auto it = std::find_if(remotes->begin(), remotes->end(),
+                                     [&](const RemoteInfo& r) { return r.name == name; });
+        if (it == remotes->end())
+            return Error::notFound("no remote " + name + " in the user installation");
+        switch (change.action) {
+        case SourceRequest::Action::Enable:
+            // D-044: a remote whose signatures are not checked is never used.
+            if (!it->gpgVerify)
+                return Error::backend(BackendFailure::Untrusted,
+                                      "untrusted: the remote " + name + " does not verify signatures");
+            if (!it->disabled)
+                return Result<void>::success();
+            return m_store->setRemoteDisabled(scope, name, false);
+        case SourceRequest::Action::Disable:
+            if (it->disabled)
+                return Result<void>::success();
+            return m_store->setRemoteDisabled(scope, name, true);
+        case SourceRequest::Action::Remove: {
+            // D-041: only a remote nothing installed came from; nothing is
+            // uninstalled with it.
+            auto installed = m_store->installed(scope);
+            if (!installed)
+                return std::move(installed).error();
+            if (const std::uint32_t n = installedFrom(*installed, name); n > 0)
+                return Error::notAllowed("the remote " + name + " is used by " + std::to_string(n)
+                                         + " installed item(s)");
+            return m_store->removeRemote(scope, name);
+        }
+        }
+        return Error::internal("unknown source change");
     }, std::move(done));
 }
 

@@ -252,7 +252,8 @@ public:
     // --- Script -----------------------------------------------------------
     Result<void> availabilityAnswer = Result<void>::success();
     Result<std::vector<InstalledItem>> installedAnswer = std::vector<InstalledItem>{};
-    Result<std::vector<Source>> sourcesAnswer = std::vector<Source>{};
+    Result<std::vector<BackendSource>> sourcesAnswer = std::vector<BackendSource>{};
+    Result<void> changeSourceAnswer = Result<void>::success();
     Result<std::vector<SourceMetadata>> catalogSourcesAnswer = std::vector<SourceMetadata>{};
     Result<std::vector<AvailableUpdate>> updatesAnswer = std::vector<AvailableUpdate>{};
     Result<std::vector<std::string>> permissionsAnswer = std::vector<std::string>{};
@@ -273,6 +274,8 @@ public:
     int calls = 0;
     /// Plans the fake actually executed (after `started`).
     std::vector<Plan> executed;
+    /// Source changes the fake accepted.
+    std::vector<SourceRequest> sourceChanges;
 
     void setCapabilities(BackendCapabilities c) { m_capabilities = c; }
     /// A change made outside the store, delivered through the queue.
@@ -291,7 +294,7 @@ public:
 
     void availability(Completion<void> done) override { deliver(std::move(done), availabilityAnswer); }
     void queryInstalled(Completion<std::vector<InstalledItem>> done) override { deliver(std::move(done), installedAnswer); }
-    void sources(Completion<std::vector<Source>> done) override { deliver(std::move(done), sourcesAnswer); }
+    void sources(Completion<std::vector<BackendSource>> done) override { deliver(std::move(done), sourcesAnswer); }
     void catalogSources(Completion<std::vector<SourceMetadata>> done) override
     {
         deliver(std::move(done), catalogSourcesAnswer);
@@ -384,6 +387,17 @@ public:
         m_queue.post([this, op, events = std::move(events), done = std::move(done)]() mutable {
             runSteps(op, std::move(events), std::move(done));
         });
+    }
+
+    void changeSource(const std::string&, const SourceRequest& change, Completion<void> done) override
+    {
+        ++calls;
+        if (!m_capabilities.userSourceChanges)
+            return deliver(std::move(done), Result<void>(Error::notSupported("no source changes")));
+        if (busy())
+            return deliver(std::move(done), Result<void>(Error::conflict("busy: " + m_modifying)));
+        sourceChanges.push_back(change);
+        deliver(std::move(done), changeSourceAnswer);
     }
 
     Result<void> cancel(const std::string& id) override

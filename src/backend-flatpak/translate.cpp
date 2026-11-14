@@ -102,6 +102,29 @@ Result<Source> sourceForRemote(Scope scope, const RemoteInfo& remote)
                            .priority = remoteKind(remote.name, remote.url) == SourceKind::Flathub ? 20 : 10});
 }
 
+Result<std::pair<Scope, std::string>> remoteOfSource(const SourceId& source)
+{
+    const std::string_view id = source.str();
+    constexpr std::string_view prefix = "flatpak:";
+    if (!id.starts_with(prefix))
+        return Error::invalidArgument("not a Flatpak source: " + std::string(id));
+    const std::string_view rest = id.substr(prefix.size());
+    const std::size_t colon = rest.find(':');
+    if (colon == std::string_view::npos)
+        return Error::invalidArgument("not a Flatpak source: " + std::string(id));
+    const auto scope = parseScope(rest.substr(0, colon));
+    const std::string_view name = rest.substr(colon + 1);
+    if (!scope || name.empty() || name.find(':') != std::string_view::npos)
+        return Error::invalidArgument("not a Flatpak source: " + std::string(id));
+    return std::pair{*scope, std::string(name)};
+}
+
+std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string_view name)
+{
+    return static_cast<std::uint32_t>(
+            std::count_if(installed.begin(), installed.end(), [&](const InstalledRef& r) { return r.origin == name; }));
+}
+
 Error mapFlatpakError(std::string_view domain, int code, std::string_view message)
 {
     if (domain == "flatpak") {

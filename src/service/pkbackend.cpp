@@ -97,7 +97,8 @@ BackendCapabilities PackageKitBackend::capabilities() const noexcept
             .refresh = true,
             .cancelAnytime = false,
             .reattach = true,
-            .verifiesExecutedPlan = false};
+            .verifiesExecutedPlan = false,
+            .userSourceChanges = false}; // repositories are read-only (D-039)
 }
 
 void PackageKitBackend::toMain(std::function<void()> task)
@@ -178,10 +179,10 @@ void PackageKitBackend::queryInstalled(Completion<std::vector<InstalledItem>> do
             [this, shared](Error e) { later(std::move(*shared), R(std::move(e))); });
 }
 
-void PackageKitBackend::sources(Completion<std::vector<Source>> done)
+void PackageKitBackend::sources(Completion<std::vector<BackendSource>> done)
 {
-    using R = Result<std::vector<Source>>;
-    auto shared = std::make_shared<Completion<std::vector<Source>>>(std::move(done));
+    using R = Result<std::vector<BackendSource>>;
+    auto shared = std::make_shared<Completion<std::vector<BackendSource>>>(std::move(done));
     withProfile(
             [this, shared](const Profile&) {
                 PkCall c = call("GetRepoList", [](dbus::Message& m) { m.append(filter::kNone); }, {},
@@ -189,10 +190,19 @@ void PackageKitBackend::sources(Completion<std::vector<Source>> done)
                 c.done = [this, shared](PkResult r) {
                     if (auto ok = checkResult(r); !ok)
                         return later(std::move(*shared), R(std::move(ok).error()));
-                    std::vector<Source> out;
-                    for (const PkRepo& repo : r.repos)
-                        if (auto s = debian::repositorySource(repo.id, repo.description, repo.enabled))
-                            out.push_back(std::move(*s));
+                    std::vector<BackendSource> out;
+                    for (const PkRepo& repo : r.repos) {
+                        auto s = debian::repositorySource(repo.id, repo.description, repo.enabled);
+                        if (!s)
+                            continue;
+                        // PackageKit tells neither whether APT checks a
+                        // repository's signatures nor what was installed
+                        // from it: both stay unknown.
+                        out.push_back({.source = std::move(*s),
+                                       .catalogueSources = debian::catalogueSourceIds(repo.id),
+                                       .verifiesSignatures = std::nullopt,
+                                       .installedItems = std::nullopt});
+                    }
                     later(std::move(*shared), R(std::move(out)));
                 };
                 m_transport->submit(std::move(c));
@@ -237,6 +247,16 @@ void PackageKitBackend::queryUpdates(Completion<std::vector<AvailableUpdate>> do
                 m_transport->submit(std::move(installed));
             },
             [this, shared](Error e) { later(std::move(*shared), R(std::move(e))); });
+}
+
+void PackageKitBackend::changeSource(const std::string&, const SourceRequest&, Completion<void> done)
+{
+    // D-039: the store lists the repositories of the distribution and never
+    // changes them. PackageKit could (RepoEnable, RepoRemove, polkit
+    // system-sources-configure), but cannot add one on Debian (no RepoSetData
+    // in the APT backend), and the system's repositories belong to the
+    // system's tools.
+    later(std::move(done), Result<void>(Error::notSupported("the store does not change the distribution's repositories")));
 }
 
 void PackageKitBackend::permissions(const OfferId&, Completion<std::vector<std::string>> done)

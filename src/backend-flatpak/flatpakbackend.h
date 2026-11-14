@@ -43,7 +43,7 @@ public:
 
     void availability(Completion<void> done) override;
     void queryInstalled(Completion<std::vector<InstalledItem>> done) override;
-    void sources(Completion<std::vector<Source>> done) override;
+    void sources(Completion<std::vector<BackendSource>> done) override;
     void catalogSources(Completion<std::vector<SourceMetadata>> done) override;
     void queryUpdates(Completion<std::vector<AvailableUpdate>> done) override;
     void permissions(const OfferId& offer, Completion<std::vector<std::string>> done) override;
@@ -53,6 +53,7 @@ public:
     void reattach(const std::string& operationId, const std::string& backendRef, OperationEvents events,
                   Completion<ExecutionResult> done) override;
     void refresh(const std::string& operationId, OperationEvents events, Completion<void> done) override;
+    void changeSource(const std::string& operationId, const SourceRequest& change, Completion<void> done) override;
     Result<void> cancel(const std::string& operationId) override;
     void setChangeListener(std::function<void(const BackendChanges&)> listener) override;
 
