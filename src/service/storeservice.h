@@ -72,8 +72,6 @@ private:
     Result<Inventory*> actionInventory(const OfferId& offer) const;
     /// The backend that refreshes the repositories, if any usable one does.
     Backend* refreshBackend() const;
-    /// The sum of every backend's application updates (H.2 refines this).
-    std::uint32_t updateCount() const;
     void exportActions();
     void refreshDone(Result<RefreshOutcome> result, RefreshTransaction* transaction);
     std::string newTransaction();
@@ -92,13 +90,17 @@ private:
     Lifecycle m_lifecycle;
     std::unique_ptr<base::dbus::Object> m_object;
     /// One backend and one inventory per BackendKind (H.1). Destroyed after
-    /// the manager and the object, which use them.
+    /// the manager, which uses them, and before the object: the inventories
+    /// stop listening and drop their pending results first, so none of
+    /// their callbacks (which emit on the object) runs during destruction.
     Backends m_backends;
     std::unique_ptr<TransactionManager> m_manager;
     std::vector<TransactionRecord> m_toReattach;
 
     std::string m_stateName = "starting";
     std::uint64_t m_generation = 0;
+    /// UpdateCount as last emitted (0 until an update is known).
+    std::uint32_t m_updateCount = 0;
     std::optional<UnixSeconds> m_lastRefresh;
     bool m_refreshing = false;
     bool m_initialImport = false;

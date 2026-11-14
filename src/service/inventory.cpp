@@ -1,12 +1,14 @@
 #include "inventory.h"
 
 #include <cutefish/store/applicationlinks.h>
+#include <cutefish/store/offer.h>
 #include <cutefish/store/sqlitecatalog.h>
 #include <cutefish/store/statestore.h>
 
 #include <base/logging.h>
 
 #include <algorithm>
+#include <iterator>
 #include <ctime>
 #include <map>
 #include <set>
@@ -18,6 +20,10 @@ namespace cutefish::store::service {
 namespace {
 
 base::LogCategory cfInventory("cutefish.store.inventory");
+
+/// Attempts to record one inventory before giving up until the next
+/// reconciliation (each may wait up to the busy timeout of state.sqlite).
+constexpr int kWriteAttempts = 3;
 
 UnixSeconds now()
 {
@@ -72,17 +78,65 @@ struct InstalledOutcome
     std::vector<std::string> apps;
 };
 
+auto key(const InstalledItem& i)
+{
+    return std::tuple(i.offer().str(), text(i.app()), text(i.version()), i.origin(), i.scope());
+}
+
+/// The backend an offer id names, if it is an offer id the core builds.
+std::optional<BackendKind> backendOf(const OfferId& offer)
+{
+    auto address = decodeOfferId(offer);
+    if (!address)
+        return std::nullopt;
+    return address->backend;
+}
+
 } // namespace
 
-/// The worker thread's connection to state.sqlite, opened at its first use.
-struct Inventory::Disk
+std::vector<InstalledItem> normalizeInstalled(BackendKind kind, std::vector<InstalledItem> items)
 {
-    std::optional<StateStore> store;
-};
+    std::vector<InstalledItem> out;
+    out.reserve(items.size());
+    for (InstalledItem& i : items) {
+        if (i.backend() != kind || backendOf(i.offer()) != kind) {
+            CF_WARNING(cfInventory) << toString(kind) << ": installed item of another backend left out: "
+                                    << i.offer().str();
+            continue;
+        }
+        out.push_back(std::move(i));
+    }
+    std::sort(out.begin(), out.end(), [](const InstalledItem& a, const InstalledItem& b) { return key(a) < key(b); });
+    const auto end = std::unique(out.begin(), out.end(),
+                                 [](const InstalledItem& a, const InstalledItem& b) { return a.offer() == b.offer(); });
+    if (end != out.end()) {
+        CF_INFO(cfInventory) << toString(kind) << ": " << std::distance(end, out.end())
+                             << " installed offer(s) listed twice, kept once";
+    }
+    out.erase(end, out.end());
+    return out;
+}
 
-Inventory::Inventory(Backend& backend, std::filesystem::path catalog, std::filesystem::path state)
-    : m_backend(backend), m_catalogPath(std::move(catalog)), m_statePath(std::move(state)),
-      m_disk(std::make_shared<Disk>())
+std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<AvailableUpdate> updates)
+{
+    std::vector<AvailableUpdate> out;
+    out.reserve(updates.size());
+    for (AvailableUpdate& u : updates) {
+        if (backendOf(u.offer) != kind) {
+            CF_WARNING(cfInventory) << toString(kind) << ": update of another backend left out: " << u.offer.str();
+            continue;
+        }
+        out.push_back(std::move(u));
+    }
+    std::sort(out.begin(), out.end(), [](const AvailableUpdate& a, const AvailableUpdate& b) { return key(a) < key(b); });
+    const auto end = std::unique(out.begin(), out.end(),
+                                 [](const AvailableUpdate& a, const AvailableUpdate& b) { return a.offer == b.offer; });
+    out.erase(end, out.end());
+    return out;
+}
+
+Inventory::Inventory(Backend& backend, std::filesystem::path catalog, InventoryIo& io)
+    : m_backend(backend), m_catalogPath(std::move(catalog)), m_io(io)
 {
     m_backend.setChangeListener([this](const BackendChanges& changes) {
         // A daemon that came back, or a change made outside the store.
@@ -173,34 +227,48 @@ void Inventory::reconcileInstalled()
             scopes.insert(Scope::System);
         if (caps.userScope)
             scopes.insert(Scope::User);
-        for (const InstalledItem& i : *items)
+        std::vector<InstalledItem> list = normalizeInstalled(kind, std::move(items).value());
+        for (const InstalledItem& i : list)
             scopes.insert(i.scope());
-        m_installedJob = m_io.run(
-                [disk = m_disk, catalog = m_catalogPath, state = m_statePath, generation = m_generation, kind,
-                 scopes, items = std::move(items).value()]() mutable -> Result<InstalledOutcome> {
-                    if (!disk->store) {
-                        auto s = StateStore::open(state, now());
-                        if (!s)
-                            return std::move(s).error();
-                        disk->store.emplace(std::move(s).value());
-                    }
+        m_installedJob = m_io.write(
+                [catalog = m_catalogPath, generation = m_generation, kind, scopes,
+                 items = std::move(list)](StateStore& store) mutable -> Result<InstalledOutcome> {
                     std::vector<OfferId> offers;
                     for (const InstalledItem& i : items)
                         offers.push_back(i.offer());
                     const auto links = linksFor(catalog, generation, offers);
                     std::vector<InstalledItem> linked = linkInstalled(std::move(items), links);
 
-                    auto previous = disk->store->items(kind);
+                    auto previous = store.items(kind);
                     if (!previous)
                         return std::move(previous).error();
                     const UnixSeconds t = now();
-                    for (Scope scope : scopes) {
-                        std::vector<InstalledItem> part;
-                        for (const InstalledItem& i : linked)
-                            if (i.scope() == scope)
-                                part.push_back(i);
-                        if (auto ok = disk->store->replaceInstalled(kind, scope, part, t); !ok)
+                    auto write = [&]() -> Result<void> {
+                        for (Scope scope : scopes) {
+                            std::vector<InstalledItem> part;
+                            for (const InstalledItem& i : linked)
+                                if (i.scope() == scope)
+                                    part.push_back(i);
+                            if (auto ok = store.replaceInstalled(kind, scope, part, t); !ok)
+                                return ok;
+                        }
+                        return {};
+                    };
+                    // Each replaceInstalled is atomic and idempotent. One
+                    // that fails (most likely the busy timeout: SQLite's
+                    // busy handler polls, it is no queue, and a busy writer
+                    // on another connection can make it wait past the
+                    // timeout) is tried again rather than lost until the
+                    // next change: bounded, on this thread, never the main
+                    // one.
+                    for (int attempt = 1;; ++attempt) {
+                        auto ok = write();
+                        if (ok)
+                            break;
+                        if (attempt == kWriteAttempts)
                             return std::move(ok).error();
+                        CF_WARNING(cfInventory) << toString(kind) << ": installed state not recorded (attempt "
+                                                << attempt << "), trying again: " << ok.error().message();
                     }
 
                     // What changed, by offer: the applications to tell about.
@@ -260,16 +328,24 @@ void Inventory::reconcileUpdates()
             return updatesDone();
         }
         m_updatesJob = m_io.run(
-                [catalog = m_catalogPath, generation = m_generation,
+                [catalog = m_catalogPath, generation = m_generation, kind = m_backend.kind(),
                  updates = std::move(updates).value()]() mutable -> std::vector<AvailableUpdate> {
+                    updates = normalizeUpdates(kind, std::move(updates));
                     std::vector<OfferId> offers;
                     for (const AvailableUpdate& u : updates)
                         offers.push_back(u.offer);
                     const auto links = linksFor(catalog, generation, offers);
                     // D-010: what the backend sees, filtered by the catalogue.
+                    // The filter keeps the order: still one entry per offer,
+                    // sorted by offer id.
                     return applicationUpdates(std::move(updates), links);
                 },
                 [this](std::vector<AvailableUpdate> list) {
+                    // The backend became unusable while the list was being
+                    // read: its updates cannot be acted on (check() cleared
+                    // them), a late answer must not bring them back.
+                    if (m_available != true)
+                        list.clear();
                     const bool changed = !same(list, m_updates);
                     m_updates = std::move(list);
                     if (changed && onUpdatesChanged)

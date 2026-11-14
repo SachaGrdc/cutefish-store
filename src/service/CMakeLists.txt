@@ -17,6 +17,7 @@ add_library(store-service STATIC
     backends.h
     inventory.cpp
     inventory.h
+    inventoryio.h
     lifecycle.cpp
     lifecycle.h
     marshal.cpp

@@ -22,7 +22,7 @@ namespace {
 
 TEST(Backends, IsEmptyUntilBackendsAreAdded)
 {
-    Backends backends;
+    Backends backends("catalog.sqlite", "state.sqlite");
     EXPECT_TRUE(backends.empty());
     EXPECT_TRUE(backends.kinds().empty());
 }
@@ -30,9 +30,9 @@ TEST(Backends, IsEmptyUntilBackendsAreAdded)
 TEST(Backends, RegistersAndLooksUpByKind)
 {
     base::EventLoop loop;
-    Backends backends;
-    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit), "catalog.sqlite", "state.sqlite");
-    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::Flatpak), "catalog.sqlite", "state.sqlite");
+    Backends backends("catalog.sqlite", "state.sqlite");
+    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit));
+    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::Flatpak));
 
     EXPECT_FALSE(backends.empty());
     EXPECT_EQ(backends.kinds(), (std::vector<BackendKind>{BackendKind::PackageKit, BackendKind::Flatpak}));
@@ -45,8 +45,8 @@ TEST(Backends, RegistersAndLooksUpByKind)
 TEST(Backends, ReturnsNullForAnAbsentBackend)
 {
     base::EventLoop loop;
-    Backends backends;
-    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit), "catalog.sqlite", "state.sqlite");
+    Backends backends("catalog.sqlite", "state.sqlite");
+    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit));
     EXPECT_EQ(backends.backend(BackendKind::Flatpak), nullptr);
     EXPECT_EQ(backends.inventory(BackendKind::Flatpak), nullptr);
 }
@@ -54,8 +54,8 @@ TEST(Backends, ReturnsNullForAnAbsentBackend)
 TEST(Backends, IsNotUnavailableBeforeAnInventoryAnswers)
 {
     base::EventLoop loop;
-    Backends backends;
-    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit), "catalog.sqlite", "state.sqlite");
+    Backends backends("catalog.sqlite", "state.sqlite");
+    backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit));
     // No check() has run: availability is unknown, not "unavailable".
     EXPECT_FALSE(backends.allUnavailable());
 }
@@ -64,9 +64,9 @@ TEST(Backends, DestroysBackendsAndInventories)
 {
     base::EventLoop loop;
     {
-        Backends backends;
-        backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit), "catalog.sqlite", "state.sqlite");
-        backends.add(std::make_unique<FakeBackend>(loop, BackendKind::Flatpak), "catalog.sqlite", "state.sqlite");
+        Backends backends("catalog.sqlite", "state.sqlite");
+        backends.add(std::make_unique<FakeBackend>(loop, BackendKind::PackageKit));
+        backends.add(std::make_unique<FakeBackend>(loop, BackendKind::Flatpak));
     }
     // The scope ended: the registry and everything it owns were destroyed.
     SUCCEED();

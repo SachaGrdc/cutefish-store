@@ -11,8 +11,15 @@
 // change made outside the store, and when a new catalogue is in service
 // (the links change). Two requests during one give one more run, not two.
 // The backend answers on the main loop; the catalogue read and the write
-// of state.sqlite run on a worker thread of their own (a connection of
-// their own, SQLite's busy timeout between it and the main one).
+// of state.sqlite run on the I/O thread every inventory of the service
+// shares (inventoryio.h, H.2).
+//
+// What is recorded and listed is normalised first (H.2): an item or an
+// update whose offer belongs to another backend is left out, and an offer
+// listed twice is kept once, so that one bad entry never makes the whole
+// inventory fail to be recorded, and nothing is counted twice.
+
+#include "inventoryio.h"
 
 #include <cutefish/store/backend.h>
 #include <cutefish/store/result.h>
@@ -30,10 +37,22 @@
 
 namespace cutefish::store::service {
 
+/// The installed items of `kind` as recorded (H.2): items of another
+/// backend are left out; an offer listed twice is kept once (the first by
+/// its contents, so the choice does not depend on the backend's order).
+/// Sorted by offer id.
+std::vector<InstalledItem> normalizeInstalled(BackendKind kind, std::vector<InstalledItem> items);
+
+/// The updates of `kind` as listed (H.2): an update whose offer is not an
+/// offer of `kind` is left out; an offer listed twice is one update (the
+/// first by its contents). Sorted by offer id: one entry per offer.
+std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<AvailableUpdate> updates);
+
 class Inventory
 {
 public:
-    Inventory(Backend& backend, std::filesystem::path catalog, std::filesystem::path state);
+    /// `io` outlives the inventory.
+    Inventory(Backend& backend, std::filesystem::path catalog, InventoryIo& io);
     ~Inventory();
 
     Inventory(const Inventory&) = delete;
@@ -58,7 +77,8 @@ public:
     std::optional<bool> available() const noexcept { return m_available; }
     /// Why the backend is not usable (empty when it is).
     const std::string& reason() const noexcept { return m_reason; }
-    /// The updates of applications, D-010; empty until known.
+    /// The updates of applications, D-010, normalised (normalizeUpdates);
+    /// empty until known and while the backend is not usable.
     const std::vector<AvailableUpdate>& updates() const noexcept { return m_updates; }
 
 private:
@@ -67,8 +87,6 @@ private:
         bool running = false;
         bool again = false;
     };
-    struct Disk;
-
     void setAvailable(bool available, std::string reason);
     void reconcileInstalled();
     void reconcileUpdates();
@@ -77,7 +95,7 @@ private:
 
     Backend& m_backend;
     std::filesystem::path m_catalogPath;
-    std::filesystem::path m_statePath;
+    InventoryIo& m_io;
     std::uint64_t m_generation = 0;
     std::optional<bool> m_available;
     std::string m_reason;
@@ -85,10 +103,8 @@ private:
     std::vector<AvailableUpdate> m_updates;
     Run m_installedRun;
     Run m_updatesRun;
-    /// Owned by the worker thread once created there.
-    std::shared_ptr<Disk> m_disk;
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
-    base::ThreadPool m_io{1};
+    // Destroyed first: a result still on its way is dropped.
     base::Job m_installedJob;
     base::Job m_updatesJob;
 };

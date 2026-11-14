@@ -37,11 +37,15 @@ StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connec
       m_refresher(loop, m_options), m_lifecycle(loop, connection, m_options.idleTimeout, [this] {
           if (onIdle)
               onIdle();
-      })
+      }),
+      m_backends(m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite")
 {
     for (std::unique_ptr<Backend>& backend : backends) {
         const BackendKind kind = backend->kind();
-        m_backends.add(std::move(backend), m_options.dataDir / "catalog.sqlite", m_options.dataDir / "state.sqlite");
+        if (!m_backends.add(std::move(backend))) {
+            CF_WARNING(cfStore) << "a second " << toString(kind) << " backend is ignored";
+            continue;
+        }
         Inventory& inventory = *m_backends.inventory(kind);
         inventory.onAvailabilityChanged = [this] {
             m_object->emitPropertiesChanged({"Backends"});
@@ -51,19 +55,18 @@ StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connec
         inventory.onInstalledChanged = [this](const std::vector<std::string>& apps) {
             m_object->emitSignal("InstalledChanged", apps);
         };
+        // One backend's list changed (its inventory compares): the
+        // aggregated list changed. The property is re-emitted only when the
+        // total it carries changed.
         inventory.onUpdatesChanged = [this] {
-            m_object->emitPropertiesChanged({"UpdateCount"});
-            m_object->emitSignal("UpdatesChanged", static_cast<std::uint32_t>(updateCount()));
+            const std::uint32_t count = m_backends.updateCount();
+            if (count != m_updateCount) {
+                m_updateCount = count;
+                m_object->emitPropertiesChanged({"UpdateCount"});
+            }
+            m_object->emitSignal("UpdatesChanged", count);
         };
     }
-}
-
-std::uint32_t StoreService::updateCount() const
-{
-    std::uint32_t count = 0;
-    for (const BackendKind kind : m_backends.kinds())
-        count += static_cast<std::uint32_t>(m_backends.inventory(kind)->updates().size());
-    return count;
 }
 
 StoreService::~StoreService() = default;
@@ -421,7 +424,7 @@ void StoreService::exportObject()
     o.addProperty("Refreshing", [this] { return m_refreshing; });
     o.addProperty("LastRefresh", [this] { return static_cast<std::uint64_t>(m_lastRefresh.value_or(0)); });
     if (!m_backends.empty())
-        o.addProperty("UpdateCount", [this] { return updateCount(); });
+        o.addProperty("UpdateCount", [this] { return m_backends.updateCount(); });
 
     // --- Signals (§4.7) ------------------------------------------------------
     o.addSignal("CatalogChanged", "t", {"generation"});
@@ -649,10 +652,11 @@ void StoreService::exportObject()
                 "GetUpdates", "", "aa{sv}",
                 [this](MethodCall& call) {
                     admit(call, false);
+                    // Backends::updates(): sorted by offer id, one entry per
+                    // offer, what UpdateCount counts (H.2).
                     std::vector<VariantMap> out;
-                    for (const BackendKind kind : m_backends.kinds())
-                        for (const AvailableUpdate& u : m_backends.inventory(kind)->updates())
-                            out.push_back(toMap(u, kind));
+                    for (const BackendUpdate& u : m_backends.updates())
+                        out.push_back(toMap(*u.update, u.backend));
                     call.reply(out);
                 },
                 {{}, {"updates"}});

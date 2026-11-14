@@ -6,14 +6,19 @@
 // whether all configured backends are unusable (D-E: the service stays ready
 // as long as one backend works, and degrades only when all of them are).
 //
-// Each Inventory writes its own (backend, scope) rows of state.sqlite, on its
-// own I/O thread and connection, so two backends can reconcile concurrently
-// (SQLite's busy timeout arbitrates the shared file).
+// The inventories share one I/O thread and one connection to state.sqlite
+// (inventoryio.h, H.2): each writes its own (backend, scope) rows, one write
+// after the other.
+//
+// The aggregation of H.2: updates() is what GetUpdates lists and what
+// UpdateCount counts, so the two always agree.
 
 #include "inventory.h"
+#include "inventoryio.h"
 
 #include <cutefish/store/backend.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -22,13 +27,30 @@
 
 namespace cutefish::store::service {
 
+/// One entry of the aggregated updates: the update and the backend that
+/// offers it.
+struct BackendUpdate
+{
+    BackendKind backend;
+    const AvailableUpdate* update;
+};
+
 class Backends
 {
 public:
+    /// `catalog` and `state`: the files every inventory links with and
+    /// records into.
+    Backends(std::filesystem::path catalog, std::filesystem::path state);
+    ~Backends();
+
+    Backends(const Backends&) = delete;
+    Backends& operator=(const Backends&) = delete;
+
     /// Creates the Inventory for `backend` and owns both. The caller wires
     /// the Inventory's callbacks (onAvailabilityChanged, onInstalledChanged,
-    /// onUpdatesChanged) afterwards.
-    void add(std::unique_ptr<Backend> backend, std::filesystem::path catalog, std::filesystem::path state);
+    /// onUpdatesChanged) afterwards. One backend per kind: a second one of
+    /// the same kind is refused (false).
+    bool add(std::unique_ptr<Backend> backend);
 
     Backend* backend(BackendKind kind) const;
     Inventory* inventory(BackendKind kind) const;
@@ -40,6 +62,16 @@ public:
     /// usable (D-E). False while an inventory has not answered yet.
     bool allUnavailable() const;
 
+    /// The updates of every backend (H.2), sorted by offer id, one entry per
+    /// offer. An offer id names its backend, so two backends never list the
+    /// same offer: two updates of one application from two backends, two
+    /// scopes or two remotes are two entries. A backend that is not usable
+    /// has none (its inventory cleared them). Valid until the next change of
+    /// an inventory.
+    std::vector<BackendUpdate> updates() const;
+    /// updates().size(): the UpdateCount property.
+    std::uint32_t updateCount() const;
+
 private:
     struct Entry
     {
@@ -49,6 +81,9 @@ private:
         std::unique_ptr<Inventory> inventory;
     };
 
+    std::filesystem::path m_catalog;
+    // Outlives every inventory: declared before them, destroyed after.
+    InventoryIo m_io;
     std::map<BackendKind, Entry> m_entries;
 };
 
