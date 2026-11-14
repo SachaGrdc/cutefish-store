@@ -135,6 +135,7 @@ TEST(ServicePackageKit, ABackendIsListedAndItsMethodsExported)
     EXPECT_EQ(entry.at("scopes").value<std::vector<std::string>>(), std::vector<std::string>{"system"});
     EXPECT_EQ(entry.at("formats").value<std::vector<std::string>>(), std::vector<std::string>{"deb"});
     EXPECT_EQ(entry.at("reason").value<std::string>(), "");
+    EXPECT_TRUE(entry.at("source-operations").value<std::vector<std::string>>().empty()); // D-039
 
     dbus::Proxy introspectable(p.b.client.get(), kName, kPath, "org.freedesktop.DBus.Introspectable");
     std::string xml;
@@ -142,8 +143,10 @@ TEST(ServicePackageKit, ABackendIsListedAndItsMethodsExported)
     for (const char* member : {"\"GetUpdates\"", "\"UpdateCount\"", "\"UpdatesChanged\"", "\"InstalledChanged\"",
                                "\"Install\"", "\"Remove\"", "\"Update\"", "\"UpdateAll\""})
         EXPECT_NE(xml.find(member), std::string::npos) << member;
-    // Still nothing that cannot work (D-022): no source toggling, no permissions.
-    for (const char* member : {"\"GetPermissions\"", "\"EnableSource\"", "\"DisableSource\""})
+    // Still nothing that cannot work (D-022): PackageKit changes no source
+    // (D-039), no permissions, no addition (D-040).
+    for (const char* member : {"\"GetPermissions\"", "\"EnableSource\"", "\"DisableSource\"", "\"RemoveSource\"",
+                               "\"AddSource\""})
         EXPECT_EQ(xml.find(member), std::string::npos) << member;
     EXPECT_EQ(p.b.property<std::string>("State"), std::optional<std::string>("ready"));
 }

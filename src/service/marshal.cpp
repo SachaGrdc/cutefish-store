@@ -238,6 +238,10 @@ dbus::VariantMap backendMap(BackendKind kind, const BackendCapabilities& caps, s
     // What the package manager runs for other programs (H.2): `changing`
     // means the store's actions on this backend wait for it to end.
     m.emplace("activity", std::string(toString(activity.kind)));
+    // What may be done to its sources (H.5): those of the user installation.
+    m.emplace("source-operations", caps.userSourceChanges
+                                           ? std::vector<std::string>{"enable", "disable", "remove"}
+                                           : std::vector<std::string>{});
     if (activity.kind != ExternalActivity::Kind::None)
         m.emplace("activity-role", activity.role);
     return m;
@@ -254,8 +258,8 @@ dbus::VariantMap toMap(const RecordedSource& r, std::optional<UnixSeconds> lastR
                        {"scope", std::string(toString(s.scope()))},
                        {"kind", std::string(toString(s.kind()))},
                        {"enabled", s.enabled()},
-                       // Read-only in v0.1: EnableSource and DisableSource
-                       // come with the backends.
+                       // As the catalogue knows it: changed only through the
+                       // backend that reports it (sourcelist.h, H.5).
                        {"can-toggle", false},
                        {"suggested", false},
                        {"offers", static_cast<std::uint32_t>(r.offers)}};

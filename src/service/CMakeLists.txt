@@ -28,6 +28,10 @@ add_library(store-service STATIC
     readpool.cpp
     readpool.h
     refresher.cpp
+    sourcechanges.cpp
+    sourcechanges.h
+    sourcelist.cpp
+    sourcelist.h
     refresher.h
     refreshtransaction.cpp
     refreshtransaction.h

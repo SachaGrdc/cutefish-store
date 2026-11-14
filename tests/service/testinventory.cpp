@@ -207,6 +207,7 @@ protected:
                 c.lastApps = apps;
             };
             inventory->onUpdatesChanged = [&c] { ++c.updates; };
+            inventory->onSourcesChanged = [&c] { ++c.sources; };
             inventory->setGeneration(1);
         }
     }
@@ -276,6 +277,7 @@ protected:
         int availability = 0;
         int installed = 0;
         int updates = 0;
+        int sources = 0;
         std::vector<std::string> lastApps;
     };
 
@@ -488,15 +490,105 @@ TEST_F(InventoryFixture, ALateUpdateListDoesNotComeBackOnceTheBackendIsUnavailab
     checkAll();
     m_fp->release(); // availability: usable
     m_fp->hold();
-    ASSERT_TRUE(spin([&] { return m_fp->heldAnswers() == 2; })); // installed and updates held
+    // Installed, updates and sources (H.5) held.
+    ASSERT_TRUE(spin([&] { return m_fp->heldAnswers() == 3; }));
     // The backend goes away while its update list is still on its way.
     m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
     m_backends->inventory(BackendKind::Flatpak)->check();
-    ASSERT_EQ(m_fp->heldAnswers(), 3u); // ...and the new availability
+    ASSERT_EQ(m_fp->heldAnswers(), 4u); // ...and the new availability
     m_fp->release();
     ASSERT_TRUE(spin([&] { return m_backends->inventory(BackendKind::Flatpak)->available() == false; }));
     idle(50ms);
     EXPECT_EQ(m_backends->updateCount(), 0u);
+}
+
+// --- Sources (H.5) ----------------------------------------------------------------------
+
+namespace {
+
+BackendSource flatpakRemote(const char* name, bool enabled, BackendKind backend = BackendKind::Flatpak)
+{
+    const std::string id = std::string(backend == BackendKind::Flatpak ? "flatpak:user:" : "packagekit:") + name;
+    return {.source = Source::create({.id = SourceId::parse(id).value(),
+                                      .backend = backend,
+                                      .scope = backend == BackendKind::Flatpak ? Scope::User : Scope::System,
+                                      .kind = SourceKind::ThirdParty,
+                                      .origin = name,
+                                      .label = {},
+                                      .url = "https://example.org/",
+                                      .enabled = enabled,
+                                      .priority = 10})
+                      .value(),
+            .catalogueSources = {},
+            .verifiesSignatures = true,
+            .installedItems = 0};
+}
+
+std::vector<std::string> sourceIds(const std::vector<BackendSource>& sources)
+{
+    std::vector<std::string> out;
+    for (const BackendSource& s : sources)
+        out.push_back(s.source.id().str());
+    return out;
+}
+
+} // namespace
+
+TEST_F(InventoryFixture, KeepsTheSourcesOfAUsableBackend)
+{
+    start(false, true);
+    // Sorted, a source of another backend left out, an id listed twice kept once.
+    m_fp->setSources({flatpakRemote("zeta", true), flatpakRemote("alpha", false),
+                      flatpakRemote("debian", true, BackendKind::PackageKit), flatpakRemote("alpha", true)});
+    Inventory& inventory = *m_backends->inventory(BackendKind::Flatpak);
+    inventory.check();
+    ASSERT_TRUE(spin([&] { return m_counts[1].sources == 1; }));
+    EXPECT_EQ(sourceIds(inventory.sources()), (std::vector<std::string>{"flatpak:user:alpha", "flatpak:user:zeta"}));
+    EXPECT_FALSE(inventory.sources()[0].source.enabled()); // the first listed is kept
+
+    // The same list again: nothing to tell.
+    const int queries = m_fp->sourcesQueries();
+    inventory.reconcileSources();
+    ASSERT_TRUE(spin([&] { return m_fp->sourcesQueries() > queries; }));
+    idle(30ms);
+    EXPECT_EQ(m_counts[1].sources, 1);
+
+    // A change outside the store (a `flatpak remote-modify`) is read at once.
+    m_fp->setSources({flatpakRemote("alpha", true), flatpakRemote("zeta", true)});
+    m_fp->emitChange({.sources = true});
+    ASSERT_TRUE(spin([&] { return m_counts[1].sources == 2; }));
+    EXPECT_TRUE(inventory.sources()[0].source.enabled());
+
+    // An unusable backend lists none: they cannot be changed through it.
+    m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
+    inventory.check();
+    ASSERT_TRUE(spin([&] { return m_counts[1].sources == 3; }));
+    EXPECT_TRUE(inventory.sources().empty());
+    // ...and does not read them while it stays so.
+    const int before = m_fp->sourcesQueries();
+    inventory.reconcileSources();
+    idle(30ms);
+    EXPECT_EQ(m_fp->sourcesQueries(), before);
+}
+
+TEST_F(InventoryFixture, TheSourcesOfABackendThatBecameUnusableAreDropped)
+{
+    // The answers come back in the order they were asked: the source list,
+    // then the backend's unavailability. What stays is no source.
+    start(false, true);
+    m_fp->setSources({flatpakRemote("flathub", true)});
+    m_fp->hold();
+    checkAll();
+    m_fp->release(); // availability: usable
+    m_fp->hold();
+    ASSERT_TRUE(spin([&] { return m_fp->heldAnswers() == 3; })); // installed, updates, sources
+    m_fp->setAvailability(Error::backend(BackendFailure::Unavailable, "no flatpak"));
+    m_backends->inventory(BackendKind::Flatpak)->check();
+    m_fp->release();
+    ASSERT_TRUE(spin([&] { return m_backends->inventory(BackendKind::Flatpak)->available() == false; }));
+    idle(50ms);
+    EXPECT_TRUE(m_backends->inventory(BackendKind::Flatpak)->sources().empty());
+    EXPECT_EQ(m_counts[1].sources, 2); // listed, then dropped
 }
 
 // --- Notifications --------------------------------------------------------------------

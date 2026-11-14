@@ -49,6 +49,14 @@ std::vector<InstalledItem> normalizeInstalled(BackendKind kind, std::vector<Inst
 /// first by its contents). Sorted by offer id: one entry per offer.
 std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<AvailableUpdate> updates);
 
+/// The configured sources of `kind` as listed (H.5): a source of another
+/// backend is left out; an id listed twice is kept once (the first in the
+/// backend's order). Sorted by id.
+std::vector<BackendSource> normalizeSources(BackendKind kind, std::vector<BackendSource> sources);
+
+/// Two lists of sources tell the same (every field compared).
+bool sameSources(const std::vector<BackendSource>& a, const std::vector<BackendSource>& b);
+
 /// What one recorded inventory changed (internal to the inventory).
 struct InstalledOutcome
 {
@@ -74,12 +82,17 @@ public:
     /// without an application changed.
     std::function<void(const std::vector<std::string>& appIds)> onInstalledChanged;
     std::function<void()> onUpdatesChanged;
+    /// The configured sources changed (H.5): what sources() lists.
+    std::function<void()> onSourcesChanged;
 
     /// Asks the backend whether it is usable; when it is, reconciles the
     /// installed state and the updates. At startup, and at each Refresh.
     void check();
     /// A catalogue generation in service (0: none): links again.
     void setGeneration(std::uint64_t generation);
+    /// Asks the backend for its configured sources again (H.5): after a
+    /// change the service made, or one made outside the store.
+    void reconcileSources();
 
     Backend& backend() noexcept { return m_backend; }
     /// Unknown until the backend has answered once.
@@ -89,6 +102,11 @@ public:
     /// The updates of applications, D-010, normalised (normalizeUpdates);
     /// empty until known and while the backend is not usable.
     const std::vector<AvailableUpdate>& updates() const noexcept { return m_updates; }
+    /// The configured sources of this backend as it last reported them
+    /// (H.5), sorted by id, sources of another backend left out; empty until
+    /// known and while the backend is not usable. Kept in memory only, like
+    /// the updates: the backend is asked again when they may have changed.
+    const std::vector<BackendSource>& sources() const noexcept { return m_sources; }
     /// Why the last inventory read from the backend could not be recorded
     /// in state.sqlite, once every attempt failed (a permanent error, or a
     /// lock held past every new attempt); empty when the last one was
@@ -107,6 +125,8 @@ private:
     void reconcileUpdates();
     void installedDone();
     void updatesDone();
+    void sourcesDone();
+    void setSources(std::vector<BackendSource> sources);
     void writeInstalled();
     void installedWritten(Result<InstalledOutcome> outcome);
     void retryWrite();
@@ -129,8 +149,10 @@ private:
     std::string m_reason;
     bool m_checking = false;
     std::vector<AvailableUpdate> m_updates;
+    std::vector<BackendSource> m_sources;
     Run m_installedRun;
     Run m_updatesRun;
+    Run m_sourcesRun;
     std::optional<Pending> m_pending;
     std::string m_recordError;
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);

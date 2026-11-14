@@ -6,8 +6,10 @@
 // properties of §4.2 and the signals of §4.7 except the image ones. With a
 // backend: GetUpdates, UpdateCount, UpdatesChanged, and the actions
 // Install, Remove, Update and UpdateAll, run by the TransactionManager
-// (step F2). EnableSource, DisableSource and GetPermissions are not
-// exported (D-022: no method that cannot work).
+// (step F2). With a backend that changes its sources (Flatpak): the
+// actions EnableSource, DisableSource and RemoveSource (H.5, SERVICE.md
+// §25), run by SourceChanges. AddSource and GetPermissions are not exported
+// (D-022: no method that cannot work; D-040).
 //
 // The service holds a Backend (backend.h) without knowing which one: main
 // creates it. Its installed state and updates are kept by an Inventory.
@@ -20,6 +22,7 @@
 #include "readpool.h"
 #include "refresher.h"
 #include "refreshtransaction.h"
+#include "sourcechanges.h"
 
 #include <cutefish/store/backend.h>
 #include <cutefish/store/result.h>
@@ -81,6 +84,12 @@ private:
     /// The backend that refreshes the repositories, if any usable one does.
     Backend* refreshBackend() const;
     void exportActions();
+    void exportSourceActions();
+    /// EnableSource, DisableSource, RemoveSource (H.5).
+    void sourceAction(base::dbus::MethodCall& call, SourceRequest::Action action);
+    /// Rereads the local metadata once the current refresh, if any, is over
+    /// (D-028, without network): after a source changed.
+    void requestReindex();
     void refreshDone(Result<RefreshOutcome> result, RefreshTransaction* transaction);
     std::string newTransaction();
     void retire(const std::string& path);
@@ -103,6 +112,9 @@ private:
     /// their callbacks (which emit on the object) runs during destruction.
     Backends m_backends;
     std::unique_ptr<TransactionManager> m_manager;
+    /// Source transactions (H.5); only with a backend that changes sources.
+    /// Destroyed before the manager, whose lanes may still hold its work.
+    std::unique_ptr<SourceChanges> m_sourceChanges;
     std::vector<TransactionRecord> m_toReattach;
 
     std::string m_stateName = "starting";
@@ -112,6 +124,8 @@ private:
     std::optional<UnixSeconds> m_lastRefresh;
     bool m_refreshing = false;
     bool m_initialImport = false;
+    /// A source changed during a refresh: reindex once it is over.
+    bool m_reindexPending = false;
 
     std::uint64_t m_nextTransaction = 1;
     std::map<std::string, std::unique_ptr<RefreshTransaction>> m_transactions; // by path

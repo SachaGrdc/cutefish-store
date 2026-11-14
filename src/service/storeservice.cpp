@@ -1,6 +1,7 @@
 #include "storeservice.h"
 
 #include "marshal.h"
+#include "sourcelist.h"
 
 #include <cutefish/store/sqlitecatalog.h>
 
@@ -71,6 +72,8 @@ StoreService::StoreService(base::EventLoop& loop, base::dbus::Connection& connec
             }
             m_object->emitSignal("UpdatesChanged", count);
         };
+        // What ListSources lists changed (H.5).
+        inventory.onSourcesChanged = [this] { m_object->emitSignal("SourcesChanged"); };
     }
 }
 
@@ -125,6 +128,33 @@ Result<void> StoreService::start()
         };
         m_manager->onActivityBegin = [this] { m_lifecycle.beginActivity(); };
         m_manager->onActivityEnd = [this] { m_lifecycle.endActivity(); };
+
+        // Source changes (H.5): only when a backend can make them (D-022).
+        bool changesSources = false;
+        for (const BackendKind kind : m_backends.kinds())
+            changesSources = changesSources || m_backends.backend(kind)->capabilities().userSourceChanges;
+        if (changesSources) {
+            m_sourceChanges = std::make_unique<SourceChanges>(
+                    m_loop, m_connection,
+                    SourceChanges::Options{.confirmationTimeout = m_options.confirmationTimeout,
+                                           .retention = m_options.transactionRetention});
+            m_sourceChanges->newPath = [this] { return newTransaction(); };
+            m_sourceChanges->onAdded = m_manager->onAdded;
+            m_sourceChanges->onRemoved = m_manager->onRemoved;
+            // One modification at a time per backend (P-009): the same lane
+            // as its transactions and refreshes (D-034).
+            m_sourceChanges->exclusive = [this](BackendKind kind, std::function<void(std::function<void()>)> work) {
+                m_manager->exclusive(kind, std::move(work));
+            };
+            m_sourceChanges->onSourcesMayHaveChanged = [this](BackendKind kind) {
+                if (Inventory* inventory = m_backends.inventory(kind))
+                    inventory->reconcileSources();
+                // An enabled or disabled remote feeds the catalogue or not.
+                requestReindex();
+            };
+            m_sourceChanges->onActivityBegin = [this] { m_lifecycle.beginActivity(); };
+            m_sourceChanges->onActivityEnd = [this] { m_lifecycle.endActivity(); };
+        }
     }
     if (auto last = m_state->lastRefresh())
         m_lastRefresh = *last;
@@ -383,7 +413,24 @@ void StoreService::refreshDone(Result<RefreshOutcome> result, RefreshTransaction
     // refreshed cache gives other updates.
     for (const BackendKind kind : m_backends.kinds())
         m_backends.inventory(kind)->check();
+    if (std::exchange(m_reindexPending, false)) {
+        m_loop.post([this] {
+            if (!m_refreshing)
+                startRefresh(false, false, nullptr);
+            else
+                m_reindexPending = true;
+        });
+    }
     m_lifecycle.endActivity();
+}
+
+void StoreService::requestReindex()
+{
+    if (m_refreshing) {
+        m_reindexPending = true;
+        return;
+    }
+    startRefresh(false, false, nullptr);
 }
 
 void StoreService::retire(const std::string& path)
@@ -678,8 +725,16 @@ void StoreService::exportObject()
             [this](MethodCall& call) {
                 if (!admit(call, true))
                     return;
+                // What the backends have configured now (H.5), completed by
+                // the catalogue: merged on the pool, with the catalogue read.
+                std::vector<BackendSources> configured;
+                for (const BackendKind kind : m_backends.kinds())
+                    configured.push_back({.kind = kind,
+                                          .userSourceChanges =
+                                                  m_backends.backend(kind)->capabilities().userSourceChanges,
+                                          .sources = m_backends.inventory(kind)->sources()});
                 m_reads.read<Result<std::vector<VariantMap>>>(
-                        [](Readers& r) -> Result<std::vector<VariantMap>> {
+                        [configured = std::move(configured)](Readers& r) -> Result<std::vector<VariantMap>> {
                             auto c = r.catalog();
                             if (!c)
                                 return std::move(c).error();
@@ -687,15 +742,15 @@ void StoreService::exportObject()
                             if (!sources)
                                 return std::move(sources).error();
                             auto journal = r.journal();
-                            std::vector<VariantMap> out;
-                            for (const RecordedSource& s : *sources) {
+                            std::vector<CatalogueSource> catalogue;
+                            for (RecordedSource& s : *sources) {
                                 std::optional<UnixSeconds> last;
                                 if (journal)
                                     if (auto l = (*journal)->lastRefresh(s.source.id()))
                                         last = *l;
-                                out.push_back(toMap(s, last));
+                                catalogue.push_back({.recorded = std::move(s), .lastRefresh = last});
                             }
-                            return out;
+                            return sourceList(configured, catalogue);
                         },
                         [call](Result<std::vector<VariantMap>> out) mutable {
                             if (!out)
@@ -714,6 +769,9 @@ void StoreService::exportObject()
                     paths.push_back({path});
                 if (m_manager)
                     for (const std::string& path : m_manager->paths())
+                        paths.push_back({path});
+                if (m_sourceChanges)
+                    for (const std::string& path : m_sourceChanges->paths())
                         paths.push_back({path});
                 call.reply(paths);
             },
@@ -770,8 +828,9 @@ void StoreService::exportObject()
                 // One refresh at a time: a request during one joins it (D-015).
                 if (!m_currentRefresh.empty())
                     return call.reply(ObjectPath{m_currentRefresh});
-                if (m_refreshing) // the initial import, without an object
-                    return call.replyError(errors::kBusy, "the initial import is running");
+                if (m_refreshing) // the initial import, or a reindex after a source changed
+                    return call.replyError(errors::kBusy, m_initialImport ? "the initial import is running"
+                                                                          : "the local metadata is being reindexed");
                 const std::string path = newTransaction();
                 auto t = std::make_unique<RefreshTransaction>(
                         &m_connection, path, base::Uuid::generate().toString(), now(),
@@ -787,6 +846,8 @@ void StoreService::exportObject()
 
     if (m_manager)
         exportActions();
+    if (m_sourceChanges)
+        exportSourceActions();
 
     o.publish();
 }
@@ -983,6 +1044,68 @@ void StoreService::exportActions()
                 answer(call, m_manager->startUpdateAll(std::move(targets)));
             },
             {{"options"}, {"transaction"}});
+}
+
+void StoreService::exportSourceActions()
+{
+    using namespace base::dbus;
+    Object& o = *m_object;
+    // ARCHITECTURE §5.2: `s source_id` → `o transaction`. Enabling waits for
+    // Confirm (D-042); disabling and removing an unused source do not.
+    o.addMethod(
+            "EnableSource", "s", "o",
+            [this](MethodCall& call) { sourceAction(call, SourceRequest::Action::Enable); },
+            {{"source_id"}, {"transaction"}});
+    o.addMethod(
+            "DisableSource", "s", "o",
+            [this](MethodCall& call) { sourceAction(call, SourceRequest::Action::Disable); },
+            {{"source_id"}, {"transaction"}});
+    o.addMethod(
+            "RemoveSource", "s", "o",
+            [this](MethodCall& call) { sourceAction(call, SourceRequest::Action::Remove); },
+            {{"source_id"}, {"transaction"}});
+}
+
+void StoreService::sourceAction(base::dbus::MethodCall& call, SourceRequest::Action action)
+{
+    if (!admit(call, false))
+        return;
+    std::string raw;
+    call.read(raw);
+    auto id = SourceId::parse(raw);
+    if (!id)
+        return replyError(call, id);
+    // The source as its backend last listed it: never one the backend does
+    // not report (the sources file, a stale catalogue).
+    for (const BackendKind kind : m_backends.kinds()) {
+        Inventory* inventory = m_backends.inventory(kind);
+        const auto& sources = inventory->sources();
+        const auto it = std::find_if(sources.begin(), sources.end(),
+                                     [&](const BackendSource& s) { return s.source.id() == *id; });
+        if (it == sources.end()) {
+            // A source id names its backend (`flatpak:`, `packagekit:`): an
+            // unusable backend lists nothing, and is said so.
+            if (id->str().starts_with(std::string(toString(kind)) + ":")
+                && inventory->available() != std::optional<bool>(true))
+                return call.replyError(errors::kBackendUnavailable,
+                                       std::string(toString(kind)) + " is not usable: " + inventory->reason());
+            continue;
+        }
+        Backend& backend = *m_backends.backend(kind);
+        if (auto refused = sourceRequestRefusal(*it, backend.capabilities().userSourceChanges, action))
+            return replyError(call, Result<void>(std::move(*refused)));
+        if (m_sourceChanges->engaged(*id))
+            return call.replyError(errors::kBusy, "a change of " + id->str() + " is not finished");
+        std::optional<Error> refusal;
+        if (action == SourceRequest::Action::Enable && untrustedEnable(*it))
+            refusal = Error::backend(BackendFailure::Untrusted,
+                                     "untrusted: " + id->str() + " does not verify signatures (D-044)");
+        auto path = m_sourceChanges->start(backend, *it, action, std::move(refusal));
+        if (!path)
+            return replyError(call, path);
+        return call.reply(base::dbus::ObjectPath{*path});
+    }
+    call.replyError(errors::kNotFound, "no configured source " + id->str());
 }
 
 } // namespace cutefish::store::service

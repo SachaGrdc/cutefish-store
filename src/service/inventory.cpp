@@ -126,6 +126,40 @@ std::vector<AvailableUpdate> normalizeUpdates(BackendKind kind, std::vector<Avai
     return out;
 }
 
+std::vector<BackendSource> normalizeSources(BackendKind kind, std::vector<BackendSource> sources)
+{
+    std::vector<BackendSource> out;
+    out.reserve(sources.size());
+    for (BackendSource& s : sources) {
+        if (s.source.backend() != kind) {
+            CF_WARNING(cfInventory) << toString(kind) << ": source of another backend left out: " << s.source.id().str();
+            continue;
+        }
+        out.push_back(std::move(s));
+    }
+    std::stable_sort(out.begin(), out.end(),
+                     [](const BackendSource& a, const BackendSource& b) { return a.source.id() < b.source.id(); });
+    const auto end = std::unique(out.begin(), out.end(), [](const BackendSource& a, const BackendSource& b) {
+        return a.source.id() == b.source.id();
+    });
+    out.erase(end, out.end());
+    return out;
+}
+
+bool sameSources(const std::vector<BackendSource>& a, const std::vector<BackendSource>& b)
+{
+    auto key = [](const BackendSource& x) {
+        std::vector<std::string> fed;
+        for (const SourceId& id : x.catalogueSources)
+            fed.push_back(id.str());
+        const Source& s = x.source;
+        return std::tuple(s.id().str(), s.backend(), s.scope(), s.kind(), s.origin(), s.label(), s.url(), s.enabled(),
+                          s.priority(), fed, x.verifiesSignatures, x.installedItems);
+    };
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                      [&](const BackendSource& x, const BackendSource& y) { return key(x) == key(y); });
+}
+
 Inventory::Inventory(Backend& backend, std::filesystem::path catalog, InventoryIo& io)
     : m_backend(backend), m_catalogPath(std::move(catalog)), m_io(io)
 {
@@ -145,9 +179,11 @@ Inventory::Inventory(Backend& backend, std::filesystem::path catalog, InventoryI
             reconcileInstalled();
         if (changes.installed || changes.updates)
             reconcileUpdates();
-        // Repositories reach the catalogue at the next refresh (catalogSources).
+        // The list of sources is read again at once (H.5); their metadata
+        // reaches the catalogue at the next refresh (catalogSources).
         if (changes.sources) {
-            CF_INFO(cfInventory) << toString(m_backend.kind()) << ": repositories changed";
+            CF_INFO(cfInventory) << toString(m_backend.kind()) << ": sources changed";
+            reconcileSources();
         }
     });
 }
@@ -186,11 +222,15 @@ void Inventory::check()
                 if (onUpdatesChanged)
                     onUpdatesChanged();
             }
+            // Nor can its sources be changed: they are listed from the
+            // catalogue only until it comes back (H.5).
+            setSources({});
             return;
         }
         setAvailable(true, {});
         reconcileInstalled();
         reconcileUpdates();
+        reconcileSources();
     });
 }
 
@@ -409,6 +449,47 @@ void Inventory::updatesDone()
     m_updatesRun.running = false;
     if (std::exchange(m_updatesRun.again, false))
         reconcileUpdates();
+}
+
+void Inventory::reconcileSources()
+{
+    if (m_available != true)
+        return;
+    if (m_sourcesRun.running) {
+        m_sourcesRun.again = true;
+        return;
+    }
+    m_sourcesRun.running = true;
+    m_backend.sources([this, alive = m_alive](Result<std::vector<BackendSource>> sources) {
+        if (!*alive)
+            return;
+        if (!sources) {
+            // The last list stays: it is the last one seen.
+            CF_WARNING(cfInventory) << toString(m_backend.kind()) << ": sources not read: " << sources.error().message();
+            return sourcesDone();
+        }
+        // Like the updates: a late answer of a backend that became unusable
+        // meanwhile does not bring its sources back.
+        if (m_available == true)
+            setSources(normalizeSources(m_backend.kind(), std::move(sources).value()));
+        sourcesDone();
+    });
+}
+
+void Inventory::sourcesDone()
+{
+    m_sourcesRun.running = false;
+    if (std::exchange(m_sourcesRun.again, false))
+        reconcileSources();
+}
+
+void Inventory::setSources(std::vector<BackendSource> sources)
+{
+    if (sameSources(sources, m_sources))
+        return;
+    m_sources = std::move(sources);
+    if (onSourcesChanged)
+        onSourcesChanged();
 }
 
 } // namespace cutefish::store::service

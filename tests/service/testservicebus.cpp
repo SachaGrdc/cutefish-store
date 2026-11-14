@@ -66,7 +66,8 @@ TEST(ServiceBus, ActivatedByTheFirstCallAndExportsOnlyWhatWorks)
         EXPECT_NE(xml.find(member), std::string::npos) << member;
     // Nothing that cannot work without the backends (owner's decision).
     for (const char* member : {"\"Install\"", "\"Remove\"", "\"Update\"", "\"UpdateAll\"", "\"GetUpdates\"",
-                               "\"GetPermissions\"", "\"EnableSource\"", "\"UpdateCount\""})
+                               "\"GetPermissions\"", "\"EnableSource\"", "\"DisableSource\"",
+                               "\"RemoveSource\"", "\"AddSource\"", "\"UpdateCount\""})
         EXPECT_EQ(xml.find(member), std::string::npos) << member;
     // Argument names are published for introspection.
     EXPECT_NE(xml.find("name=\"generation\""), std::string::npos);

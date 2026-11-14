@@ -47,6 +47,7 @@ public:
     void setAvailability(Result<void> availability) { m_availability = std::move(availability); }
     void setInstalled(std::vector<InstalledItem> items) { m_installed = std::move(items); }
     void setUpdates(std::vector<AvailableUpdate> updates) { m_updates = std::move(updates); }
+    void setSources(std::vector<BackendSource> sources) { m_sources = std::move(sources); }
     /// While held, answers wait for release(), which posts them in order.
     void hold() { m_holding = true; }
     void release()
@@ -65,6 +66,7 @@ public:
     bool listening() const noexcept { return static_cast<bool>(m_listener); }
     int installedQueries() const noexcept { return m_installedQueries; }
     int updatesQueries() const noexcept { return m_updatesQueries; }
+    int sourcesQueries() const noexcept { return m_sourcesQueries; }
 
     // --- Backend ----------------------------------------------------------
 
@@ -81,7 +83,8 @@ public:
 
     void sources(Completion<std::vector<BackendSource>> done) override
     {
-        post([done] { done(std::vector<BackendSource>{}); });
+        ++m_sourcesQueries;
+        post([done, sources = m_sources] { done(sources); });
     }
 
     void changeSource(const std::string&, const SourceRequest&, Completion<void> done) override
@@ -150,11 +153,13 @@ private:
     Result<void> m_availability;
     std::vector<InstalledItem> m_installed;
     std::vector<AvailableUpdate> m_updates;
+    std::vector<BackendSource> m_sources;
     std::function<void(const BackendChanges&)> m_listener;
     bool m_holding = false;
     std::vector<std::function<void()>> m_held;
     int m_installedQueries = 0;
     int m_updatesQueries = 0;
+    int m_sourcesQueries = 0;
     int m_planCalls = 0;
 };
 

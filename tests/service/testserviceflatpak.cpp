@@ -1,5 +1,6 @@
-// Flatpak transactions through the service (H.3, SERVICE.md §23), and
-// UpdateAll over every backend and installation (H.4, §24): the service
+// Flatpak transactions through the service (H.3, SERVICE.md §23), UpdateAll
+// over every backend and installation (H.4, §24), and the sources and their
+// changes (H.5, §25): the service
 // in-process with the real Flatpak backend (FlatpakBackend) over a double of
 // libflatpak (tests/backend-flatpak/fakestore.h), and, where both backends
 // are needed, its real PackageKit backend against a simulated PackageKit
@@ -1385,6 +1386,328 @@ TEST_F(UpdateAllWithPackageKit, AfterARestartTheChildrenAreRecoveredWithoutTheir
     ASSERT_TRUE(waitState(reattached, "succeeded"));
     EXPECT_EQ(m_store->executes.load(), 0);
     EXPECT_EQ(storeUpdates(false), 1); // never run again
+}
+
+
+// --- Sources (H.5, SERVICE.md §25) ---------------------------------------------------
+
+constexpr const char* kSpare = "flatpak:user:spare";
+constexpr const char* kUnsigned = "flatpak:user:unsigned";
+constexpr const char* kFlathubUser = "flatpak:user:flathub";
+constexpr const char* kFlathubSystem = "flatpak:system:flathub";
+constexpr const char* kNotFound = "org.cutefish.Store1.Error.NotFound";
+constexpr const char* kBackendUnavailable = "org.cutefish.Store1.Error.BackendUnavailable";
+
+class FlatpakSources : public FlatpakTransactions
+{
+protected:
+    void SetUp() override
+    {
+        FlatpakTransactions::SetUp();
+        m_matches.push_back(m_conn->subscribe(rule(kInterface, "SourcesChanged"),
+                                              [this](const dbus::Message&) { ++m_sourcesChanged; }));
+    }
+
+    /// Two more user remotes: `spare` (signed, unused) and `unsigned`
+    /// (gpg-verify=false), with `enabled` as given; GIMP installed from the
+    /// user Flathub, so that remote is in use.
+    static void script(fp::FakeStore& s, bool spareEnabled = true)
+    {
+        s.remotes_[Scope::User].push_back({.name = "spare", .url = "https://example.net/repo/", .disabled = !spareEnabled,
+                                           .gpgVerify = true, .metadataPath = {}, .iconsPath = {}});
+        s.remotes_[Scope::User].push_back({.name = "unsigned", .url = "https://example.org/repo/", .disabled = true,
+                                           .gpgVerify = false, .metadataPath = {}, .iconsPath = {}});
+        s.installed_[Scope::User] = {{app("org.gimp.GIMP"), "flathub"}};
+    }
+
+    std::vector<dbus::VariantMap> sources()
+    {
+        return value<std::vector<dbus::VariantMap>>("ListSources").value_or(std::vector<dbus::VariantMap>{});
+    }
+
+    std::optional<dbus::VariantMap> source(const std::string& id)
+    {
+        for (auto& s : sources())
+            if (s.at("id").value<std::string>() == id)
+                return s;
+        return std::nullopt;
+    }
+
+    const fp::RemoteInfo* remote(Scope scope, const std::string& name)
+    {
+        for (const fp::RemoteInfo& r : m_store->remotes_[scope])
+            if (r.name == name)
+                return &r;
+        return nullptr;
+    }
+
+    Answer enableSource(const std::string& id) { return call(kPath, kInterface, "EnableSource", id); }
+    Answer disableSource(const std::string& id) { return call(kPath, kInterface, "DisableSource", id); }
+    Answer removeSource(const std::string& id) { return call(kPath, kInterface, "RemoveSource", id); }
+
+    int m_sourcesChanged = 0;
+};
+
+TEST_F(FlatpakSources, ListsWhatTheBackendsHaveEnabledOrNot)
+{
+    start([](fp::FakeStore& s) { script(s, false); });
+    ASSERT_TRUE(spin([&] { return source(kSpare).has_value(); }));
+    const auto spare = *source(kSpare);
+    // A disabled remote is listed (it is not in the catalogue).
+    EXPECT_FALSE(spare.at("enabled").value<bool>(true));
+    EXPECT_TRUE(spare.at("configured").value<bool>(false));
+    EXPECT_TRUE(spare.at("can-toggle").value<bool>(false));
+    EXPECT_TRUE(spare.at("can-remove").value<bool>(false));
+    EXPECT_EQ(spare.at("offers").value<std::uint32_t>(), 0u);
+    EXPECT_TRUE(spare.at("gpg-verify").value<bool>(false));
+
+    const auto user = *source(kFlathubUser);
+    EXPECT_EQ(user.at("kind").value<std::string>(), "flathub");
+    EXPECT_GT(user.at("offers").value<std::uint32_t>(), 0u); // from the catalogue
+    EXPECT_TRUE(user.at("can-toggle").value<bool>(false));
+    EXPECT_FALSE(user.at("can-remove").value<bool>(true)); // GIMP came from it (D-041)
+    EXPECT_EQ(user.at("installed-count").value<std::uint32_t>(), 1u);
+
+    const auto system = *source(kFlathubSystem);
+    EXPECT_FALSE(system.at("can-toggle").value<bool>(true)); // D-011
+    EXPECT_FALSE(system.at("can-remove").value<bool>(true));
+
+    EXPECT_FALSE(source(kUnsigned)->at("can-toggle").value<bool>(true)); // D-044
+
+    EXPECT_EQ(backend("flatpak").at("source-operations").value<std::vector<std::string>>(),
+              (std::vector<std::string>{"enable", "disable", "remove"}));
+    // Exported with a backend that changes sources; never an addition (D-040).
+    // Asynchronously: the service answers on this very loop.
+    auto xml = std::make_shared<std::string>();
+    auto done = std::make_shared<bool>(false);
+    std::vector<dbus::PendingCall> calls;
+    calls.push_back(dbus::Proxy(m_conn.get(), kStore, kPath, "org.freedesktop.DBus.Introspectable")
+                            .callAsync("Introspect", [xml, done](const dbus::Reply& r) {
+                                if (!r.isError())
+                                    r.read(*xml);
+                                *done = true;
+                            }));
+    ASSERT_TRUE(spin([&] { return *done; }));
+    ASSERT_FALSE(xml->empty());
+    for (const char* member : {"\"EnableSource\"", "\"DisableSource\"", "\"RemoveSource\""})
+        EXPECT_NE(xml->find(member), std::string::npos) << member;
+    for (const char* member : {"\"AddSource\"", "\"GetPermissions\""})
+        EXPECT_EQ(xml->find(member), std::string::npos) << member;
+}
+
+TEST_F(FlatpakSources, DisablingAndRemovingNeedNoConfirmation)
+{
+    start([](fp::FakeStore& s) { script(s); });
+    const int changedBefore = m_sourcesChanged;
+    const Answer disabled = disableSource(kSpare);
+    ASSERT_EQ(disabled.error, "");
+    ASSERT_TRUE(waitState(disabled.path, "succeeded"));
+    EXPECT_FALSE(has(states(disabled.path), "awaiting-confirmation")); // D-042
+    EXPECT_TRUE(has(states(disabled.path), "running"));
+    const auto tx = transaction(disabled.path);
+    EXPECT_EQ(tx.at("Kind").value<std::string>(), "disable-source");
+    EXPECT_EQ(tx.at("Backend").value<std::string>(), "flatpak");
+    EXPECT_FALSE(tx.at("Plan").value<dbus::VariantMap>().at("requires-confirmation").value<bool>(true));
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+    // Read again from the backend, and said.
+    ASSERT_TRUE(spin([&] { return m_sourcesChanged > changedBefore; }));
+    ASSERT_TRUE(spin([&] { return !source(kSpare)->at("enabled").value<bool>(true); }));
+
+    const Answer removed = removeSource(kSpare);
+    ASSERT_EQ(removed.error, "");
+    ASSERT_TRUE(waitState(removed.path, "succeeded"));
+    EXPECT_EQ(transaction(removed.path).at("Kind").value<std::string>(), "remove-source");
+    EXPECT_EQ(remote(Scope::User, "spare"), nullptr);
+    ASSERT_TRUE(spin([&] { return !source(kSpare).has_value(); }));
+    // Not journaled (D-043).
+    EXPECT_TRUE(journal(disabled.path).empty());
+    EXPECT_TRUE(journal(removed.path).empty());
+}
+
+TEST_F(FlatpakSources, EnablingWaitsForAnExplicitConfirmation)
+{
+    start([](fp::FakeStore& s) { script(s, false); });
+    const Answer a = enableSource(kSpare);
+    ASSERT_EQ(a.error, "");
+    ASSERT_TRUE(waitState(a.path, "awaiting-confirmation"));
+    const auto p = plan(a.path);
+    EXPECT_EQ(p.at("kind").value<std::string>(), "enable-source");
+    EXPECT_TRUE(p.at("requires-confirmation").value<bool>(false));
+    EXPECT_EQ(strings(p, "reasons"), std::vector<std::string>{"new-source"});
+    EXPECT_EQ(p.at("source").value<dbus::VariantMap>().at("id").value<std::string>(), kSpare);
+    EXPECT_GT(txProperty<std::uint64_t>(a.path, "ConfirmationDeadline"), 0u);
+    EXPECT_TRUE(txProperty<bool>(a.path, "Cancellable"));
+    // Nothing changes before Confirm.
+    settle(200ms);
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+
+    EXPECT_EQ(confirm(a.path), "");
+    ASSERT_TRUE(waitState(a.path, "succeeded"));
+    EXPECT_FALSE(remote(Scope::User, "spare")->disabled);
+    EXPECT_TRUE(strings(plan(a.path), "reasons").empty()); // no confirmation pending any more
+    EXPECT_EQ(confirm(a.path), kNotAllowed);
+    ASSERT_TRUE(spin([&] { return source(kSpare)->at("enabled").value<bool>(false); }));
+}
+
+TEST_F(FlatpakSources, AnUnconfirmedOrCancelledEnableChangesNothing)
+{
+    start([](fp::FakeStore& s) { script(s, false); }, Options{.packagekit = false, .confirmationTimeout = 300ms});
+    const Answer expired = enableSource(kSpare);
+    ASSERT_TRUE(waitState(expired.path, "awaiting-confirmation"));
+    ASSERT_TRUE(waitState(expired.path, "cancelled")); // D-019
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+
+    const Answer cancelled = enableSource(kSpare);
+    ASSERT_TRUE(waitState(cancelled.path, "awaiting-confirmation"));
+    EXPECT_EQ(cancel(cancelled.path), "");
+    ASSERT_TRUE(waitState(cancelled.path, "cancelled"));
+    EXPECT_EQ(confirm(cancelled.path), kNotAllowed);
+    settle();
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+}
+
+TEST_F(FlatpakSources, ARemoteWithoutSignaturesIsNeverEnabled)
+{
+    start([](fp::FakeStore& s) { script(s); });
+    const Answer a = enableSource(kUnsigned);
+    ASSERT_EQ(a.error, "");
+    ASSERT_TRUE(waitState(a.path, "failed"));
+    EXPECT_EQ(errorCode(a.path), "untrusted"); // D-044
+    EXPECT_FALSE(has(states(a.path), "awaiting-confirmation")); // nothing to confirm
+    EXPECT_TRUE(remote(Scope::User, "unsigned")->disabled);
+    // Removing it stays possible.
+    const Answer removed = removeSource(kUnsigned);
+    ASSERT_TRUE(waitState(removed.path, "succeeded"));
+    EXPECT_EQ(remote(Scope::User, "unsigned"), nullptr);
+}
+
+TEST_F(FlatpakSources, AnInstallFromARemoteWithoutSignaturesFailsUntrusted)
+{
+    start([](fp::FakeStore& s) { s.remotes_[Scope::User][0].gpgVerify = false; });
+    const Answer a = install(kGimpUser);
+    ASSERT_TRUE(waitState(a.path, "failed"));
+    EXPECT_EQ(errorCode(a.path), "untrusted"); // D-044, while planning
+    EXPECT_EQ(m_store->executes.load(), 0);
+}
+
+TEST_F(FlatpakSources, RequestsAreCheckedBeforeAnyTransaction)
+{
+    start([](fp::FakeStore& s) { script(s, false); });
+    const int added = m_added;
+    // The system installation is read-only (D-011).
+    EXPECT_EQ(enableSource(kFlathubSystem).error, kNotAllowed);
+    EXPECT_EQ(disableSource(kFlathubSystem).error, kNotAllowed);
+    EXPECT_EQ(removeSource(kFlathubSystem).error, kNotAllowed);
+    // A remote something installed came from is not removed (D-041).
+    EXPECT_EQ(removeSource(kFlathubUser).error, kNotAllowed);
+    EXPECT_EQ(enableSource(kFlathubUser).error, kNotAllowed);  // already enabled
+    EXPECT_EQ(disableSource(kSpare).error, kNotAllowed);       // already disabled
+    EXPECT_EQ(enableSource("flatpak:user:nowhere").error, kNotFound);
+    EXPECT_EQ(enableSource("").error, kInvalidArgs);
+    EXPECT_EQ(m_added, added); // no transaction was created
+    EXPECT_FALSE(remote(Scope::User, "flathub")->disabled);
+
+    // A second change of a source whose change is not finished: Busy.
+    const Answer first = enableSource(kSpare);
+    ASSERT_TRUE(waitState(first.path, "awaiting-confirmation"));
+    EXPECT_EQ(enableSource(kSpare).error, kBusy);
+    EXPECT_EQ(removeSource(kSpare).error, kBusy);
+    EXPECT_EQ(cancel(first.path), "");
+    ASSERT_TRUE(waitState(first.path, "cancelled"));
+}
+
+TEST_F(FlatpakSources, ASourceChangeWaitsForTheRunningTransaction)
+{
+    // One modification at a time on Flatpak (P-009, D-034): the change waits
+    // in the lane behind a running installation.
+    start([](fp::FakeStore& s) { script(s); });
+    const Answer installing = install(kInkscapeUser);
+    ASSERT_TRUE(waitState(installing.path, "awaiting-confirmation"));
+    m_store->whileRunning.close();
+    EXPECT_EQ(confirm(installing.path), "");
+    ASSERT_TRUE(waitState(installing.path, "running"));
+
+    const Answer change = disableSource(kSpare);
+    ASSERT_EQ(change.error, "");
+    settle(200ms);
+    EXPECT_EQ(state(change.path), "queued");
+    EXPECT_FALSE(remote(Scope::User, "spare")->disabled);
+
+    m_store->whileRunning.open();
+    ASSERT_TRUE(waitState(installing.path, "succeeded"));
+    ASSERT_TRUE(waitState(change.path, "succeeded"));
+    EXPECT_TRUE(remote(Scope::User, "spare")->disabled);
+}
+
+TEST_F(FlatpakSources, AQueuedChangeCanBeCancelled)
+{
+    start([](fp::FakeStore& s) { script(s); });
+    const Answer installing = install(kInkscapeUser);
+    ASSERT_TRUE(waitState(installing.path, "awaiting-confirmation"));
+    m_store->whileRunning.close();
+    EXPECT_EQ(confirm(installing.path), "");
+    ASSERT_TRUE(waitState(installing.path, "running"));
+    const Answer change = disableSource(kSpare);
+    ASSERT_TRUE(waitState(change.path, "queued"));
+    EXPECT_EQ(cancel(change.path), "");
+    ASSERT_TRUE(waitState(change.path, "cancelled"));
+    m_store->whileRunning.open();
+    ASSERT_TRUE(waitState(installing.path, "succeeded"));
+    settle();
+    EXPECT_FALSE(remote(Scope::User, "spare")->disabled); // never ran
+}
+
+TEST_F(FlatpakSources, EnablingARemoteNeverAllowsAnImplicitAddition)
+{
+    // G.1 stays: the consent given to one source is not a consent to add
+    // another during a transaction.
+    start([](fp::FakeStore& s) { script(s, false); });
+    const Answer enabled = enableSource(kSpare);
+    ASSERT_TRUE(waitState(enabled.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(enabled.path), "");
+    ASSERT_TRUE(waitState(enabled.path, "succeeded"));
+
+    m_store->remoteAddAttempted = true;
+    const Answer a = install(kInkscapeUser);
+    ASSERT_EQ(a.error, "");
+    ASSERT_TRUE(waitState(a.path, "failed"));
+    EXPECT_EQ(errorCode(a.path), "not-allowed");
+    EXPECT_EQ(m_store->executes.load(), 0);
+    EXPECT_EQ(m_store->remotes_[Scope::User].size(), 3u); // nothing added
+}
+
+TEST_F(FlatpakSources, AfterARestartAPendingEnableIsGone)
+{
+    // D-043: source transactions are not journaled; nothing is replayed.
+    start([](fp::FakeStore& s) { script(s, false); });
+    const Answer a = enableSource(kSpare);
+    ASSERT_TRUE(waitState(a.path, "awaiting-confirmation"));
+    release();
+    start([](fp::FakeStore& s) { script(s, false); });
+    EXPECT_TRUE(value<std::vector<dbus::ObjectPath>>("ListTransactions").value_or(std::vector<dbus::ObjectPath>{}).empty());
+    EXPECT_TRUE(history().empty());
+    EXPECT_TRUE(m_store->remotes_[Scope::User][1].disabled);
+}
+
+TEST_F(FlatpakSources, AnUnusableBackendChangesNoSource)
+{
+    // No Flatpak installation: the backend is configured, not usable.
+    auto store = newStore();
+    store->scopes_ = {};
+    m_instance = std::make_unique<Instance>(m_loop, *m_conn, m_dir.path(), std::move(store), Options{});
+    m_store = m_instance->store_;
+    ASSERT_TRUE(m_instance->service->start());
+    ASSERT_TRUE(spin([&] {
+        const auto b = backend("flatpak");
+        return b.contains("available") && b.at("reason").value<std::string>() != "not checked yet";
+    }));
+    EXPECT_EQ(enableSource(kSpare).error, kBackendUnavailable);
+    EXPECT_EQ(disableSource(kFlathubUser).error, kBackendUnavailable);
+    // The catalogue still lists its sources, as not configured.
+    const auto user = source(kFlathubUser);
+    ASSERT_TRUE(user);
+    EXPECT_FALSE(user->at("configured").value<bool>(true));
+    EXPECT_FALSE(user->at("can-toggle").value<bool>(true));
 }
 
 } // namespace

@@ -2,6 +2,7 @@
 
 #include "marshal.h"
 #include "options.h"
+#include "sourcelist.h"
 #include "sourcesfile.h"
 
 #include <gtest/gtest.h>
@@ -149,4 +150,166 @@ TEST(Marshal, ANewInstallInASharedSystemInstallationIsRefused)
     EXPECT_EQ(newInstallRefusal(offer("flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable")), "");
     // Distribution packages are system-wide by nature: not concerned.
     EXPECT_EQ(newInstallRefusal(offer("packagekit:gimp")), "");
+}
+
+// --- Sources (H.5) ----------------------------------------------------------------
+
+namespace {
+
+Source makeSource(const char* id, BackendKind backend, Scope scope, SourceKind kind, const char* origin, bool enabled)
+{
+    return Source::create({.id = SourceId::parse(id).value(),
+                           .backend = backend,
+                           .scope = scope,
+                           .kind = kind,
+                           .origin = origin,
+                           .label = {},
+                           .url = "https://example.org/",
+                           .enabled = enabled,
+                           .priority = 10})
+            .value();
+}
+
+BackendSource remote(const char* name, Scope scope, bool enabled, std::optional<bool> gpg, std::optional<std::uint32_t> installed)
+{
+    const std::string id = std::string("flatpak:") + (scope == Scope::User ? "user:" : "system:") + name;
+    return {.source = makeSource(id.c_str(), BackendKind::Flatpak, scope, SourceKind::ThirdParty, name, enabled),
+            .catalogueSources = {},
+            .verifiesSignatures = gpg,
+            .installedItems = installed};
+}
+
+CatalogueSource recorded(const char* id, BackendKind backend, Scope scope, std::int64_t offers,
+                         std::optional<UnixSeconds> last)
+{
+    return {.recorded = {.source = makeSource(id, backend, scope, SourceKind::Distribution, "origin", true),
+                         .fingerprint = std::nullopt,
+                         .offers = offers},
+            .lastRefresh = last};
+}
+
+const dbus::VariantMap& entry(const std::vector<dbus::VariantMap>& list, const std::string& id)
+{
+    for (const auto& m : list)
+        if (m.at("id").value<std::string>() == id)
+            return m;
+    static const dbus::VariantMap none;
+    ADD_FAILURE() << "no entry " << id;
+    return none;
+}
+
+} // namespace
+
+TEST(SourceList, MergesWhatBackendsHaveWithTheCatalogue)
+{
+    // A Debian repository feeds two DEP-11 sources; a disabled user remote
+    // is not in the catalogue; a source of the sources file is reported by
+    // no backend.
+    BackendSource debian{.source = makeSource("packagekit:/etc/apt/sources.list:deb:http://deb.debian.org/debian/:trixie:main,contrib",
+                                              BackendKind::PackageKit, Scope::System, SourceKind::Distribution,
+                                              "/etc/apt/sources.list:deb:http://deb.debian.org/debian/:trixie:main,contrib",
+                                              true),
+                         .catalogueSources = {SourceId::parse("packagekit:debian-trixie-main").value(),
+                                              SourceId::parse("packagekit:debian-trixie-contrib").value()},
+                         .verifiesSignatures = std::nullopt,
+                         .installedItems = std::nullopt};
+    const std::vector<BackendSources> backends{
+            {.kind = BackendKind::PackageKit, .userSourceChanges = false, .sources = {debian}},
+            {.kind = BackendKind::Flatpak,
+             .userSourceChanges = true,
+             .sources = {remote("flathub", Scope::User, true, true, 2), remote("spare", Scope::User, false, true, 0),
+                         remote("unsigned", Scope::User, false, false, 0), remote("flathub", Scope::System, true, true, 0)}}};
+    const std::vector<CatalogueSource> catalogue{
+            recorded("packagekit:debian-trixie-main", BackendKind::PackageKit, Scope::System, 100, 2000),
+            recorded("packagekit:debian-trixie-contrib", BackendKind::PackageKit, Scope::System, 5, 1000),
+            recorded("flatpak:user:flathub", BackendKind::Flatpak, Scope::User, 40, 3000),
+            recorded("packagekit:local-file", BackendKind::PackageKit, Scope::System, 3, std::nullopt)};
+    const auto list = sourceList(backends, catalogue);
+    // The two DEP-11 sources are accounted for by their repository.
+    ASSERT_EQ(list.size(), 6u);
+
+    const auto& d = entry(list, debian.source.id().str());
+    EXPECT_TRUE(d.at("configured").value<bool>());
+    EXPECT_EQ(d.at("offers").value<std::uint32_t>(), 105u);
+    EXPECT_EQ(d.at("last-refresh").value<std::uint64_t>(), 1000u); // the oldest
+    EXPECT_FALSE(d.at("can-toggle").value<bool>(true));             // D-039
+    EXPECT_FALSE(d.at("can-remove").value<bool>(true));
+    EXPECT_FALSE(d.contains("gpg-verify")); // PackageKit cannot tell
+    EXPECT_FALSE(d.contains("installed-count"));
+
+    const auto& f = entry(list, "flatpak:user:flathub");
+    EXPECT_EQ(f.at("offers").value<std::uint32_t>(), 40u);
+    EXPECT_TRUE(f.at("can-toggle").value<bool>());
+    EXPECT_FALSE(f.at("can-remove").value<bool>(true)); // two items came from it (D-041)
+    EXPECT_TRUE(f.at("gpg-verify").value<bool>());
+    EXPECT_EQ(f.at("installed-count").value<std::uint32_t>(), 2u);
+
+    const auto& spare = entry(list, "flatpak:user:spare");
+    EXPECT_FALSE(spare.at("enabled").value<bool>(true)); // listed although disabled
+    EXPECT_EQ(spare.at("offers").value<std::uint32_t>(), 0u);
+    EXPECT_FALSE(spare.contains("last-refresh"));
+    EXPECT_TRUE(spare.at("can-toggle").value<bool>());
+    EXPECT_TRUE(spare.at("can-remove").value<bool>());
+
+    // Without signature checks it cannot be enabled (D-044), only removed.
+    const auto& u = entry(list, "flatpak:user:unsigned");
+    EXPECT_FALSE(u.at("can-toggle").value<bool>(true));
+    EXPECT_TRUE(u.at("can-remove").value<bool>());
+    EXPECT_FALSE(u.at("gpg-verify").value<bool>(true));
+
+    // The system installation is read-only (D-011).
+    const auto& sys = entry(list, "flatpak:system:flathub");
+    EXPECT_FALSE(sys.at("can-toggle").value<bool>(true));
+    EXPECT_FALSE(sys.at("can-remove").value<bool>(true));
+
+    const auto& file = entry(list, "packagekit:local-file");
+    EXPECT_FALSE(file.at("configured").value<bool>(true));
+    EXPECT_FALSE(file.at("can-toggle").value<bool>(true));
+    EXPECT_FALSE(file.at("can-remove").value<bool>(true));
+    for (const auto& m : list)
+        EXPECT_FALSE(m.at("suggested").value<bool>(true)); // nothing before P-011
+
+    // Sorted by id.
+    for (std::size_t i = 1; i < list.size(); ++i)
+        EXPECT_LT(list[i - 1].at("id").value<std::string>(), list[i].at("id").value<std::string>());
+}
+
+TEST(SourceList, AnUnusableBackendLeavesTheCatalogueEntries)
+{
+    // Its inventory lists nothing: the catalogue still shows the source,
+    // as not configured (nothing can be changed through it).
+    const std::vector<BackendSources> backends{{.kind = BackendKind::Flatpak, .userSourceChanges = true, .sources = {}}};
+    const auto list = sourceList(backends, {recorded("flatpak:user:flathub", BackendKind::Flatpak, Scope::User, 40, 3000)});
+    ASSERT_EQ(list.size(), 1u);
+    EXPECT_FALSE(list[0].at("configured").value<bool>(true));
+    EXPECT_FALSE(list[0].at("can-toggle").value<bool>(true));
+    EXPECT_EQ(list[0].at("last-refresh").value<std::uint64_t>(), 3000u);
+}
+
+TEST(SourceList, RequestsTheServiceRefusesBeforeAnyTransaction)
+{
+    using A = SourceRequest::Action;
+    auto code = [](const std::optional<Error>& e) { return e ? std::optional<ErrorCode>(e->code()) : std::nullopt; };
+    const auto enabled = remote("on", Scope::User, true, true, 0);
+    const auto disabled = remote("off", Scope::User, false, true, 0);
+    const auto used = remote("used", Scope::User, true, true, 1);
+    const auto unknown = remote("unknown", Scope::User, true, true, std::nullopt);
+    const auto system = remote("sys", Scope::System, false, true, 0);
+
+    EXPECT_EQ(code(sourceRequestRefusal(enabled, false, A::Disable)), ErrorCode::NotSupported); // D-039
+    for (const A a : {A::Enable, A::Disable, A::Remove})
+        EXPECT_EQ(code(sourceRequestRefusal(system, true, a)), ErrorCode::NotAllowed); // D-011
+    EXPECT_EQ(code(sourceRequestRefusal(enabled, true, A::Enable)), ErrorCode::NotAllowed);
+    EXPECT_FALSE(sourceRequestRefusal(enabled, true, A::Disable));
+    EXPECT_FALSE(sourceRequestRefusal(disabled, true, A::Enable));
+    EXPECT_EQ(code(sourceRequestRefusal(disabled, true, A::Disable)), ErrorCode::NotAllowed);
+    EXPECT_FALSE(sourceRequestRefusal(enabled, true, A::Remove));
+    EXPECT_EQ(code(sourceRequestRefusal(used, true, A::Remove)), ErrorCode::NotAllowed);    // D-041
+    EXPECT_EQ(code(sourceRequestRefusal(unknown, true, A::Remove)), ErrorCode::NotAllowed); // cannot tell
+    // Disabling a used source is allowed: nothing is removed.
+    EXPECT_FALSE(sourceRequestRefusal(used, true, A::Disable));
+
+    EXPECT_FALSE(untrustedEnable(disabled));
+    EXPECT_TRUE(untrustedEnable(remote("u", Scope::User, false, false, 0)));
+    EXPECT_TRUE(untrustedEnable(remote("u", Scope::User, false, std::nullopt, 0))); // unknown is not trusted
 }
