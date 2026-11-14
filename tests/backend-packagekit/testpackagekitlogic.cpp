@@ -396,3 +396,79 @@ TEST(DebianProfile, CatalogueSourcesFromSwcatalog)
     EXPECT_EQ(sources[2].source.kind(), SourceKind::ThirdParty);
     EXPECT_TRUE(debian::catalogSources(dir / "missing").empty());
 }
+
+// --- Other programs' transactions (H.2, SERVICE.md §22) --------------------------------
+
+namespace {
+
+PkTransactionInfo tx(const char* path, Role role, Status status = Status::Running, std::uint64_t flags = 0)
+{
+    return {path, static_cast<std::uint32_t>(role), static_cast<std::uint32_t>(status), flags};
+}
+
+} // namespace
+
+TEST(PackageKitActivity, NothingRunningIsIdle)
+{
+    EXPECT_EQ(externalActivity({}).kind, ExternalActivity::Kind::None);
+    EXPECT_TRUE(externalActivity({}).role.empty());
+}
+
+TEST(PackageKitActivity, QueriesAndSimulationsOnlyCheck)
+{
+    // Cutefish Software Update's check: RefreshCache, then GetUpdates.
+    const std::vector<PkTransactionInfo> getUpdates{tx("/1", Role::GetUpdates, Status::Query)};
+    EXPECT_EQ(externalActivity(getUpdates).kind, ExternalActivity::Kind::Checking);
+    EXPECT_EQ(externalActivity(getUpdates).role, "get-updates");
+    EXPECT_FALSE(externalActivity(getUpdates).blocksChanges());
+    // A simulated install changes nothing.
+    const std::vector<PkTransactionInfo> simulation{
+            tx("/1", Role::InstallPackages, Status::DepResolve, flag::kOnlyTrusted | flag::kSimulate)};
+    EXPECT_EQ(externalActivity(simulation).kind, ExternalActivity::Kind::Checking);
+    EXPECT_EQ(externalActivity(simulation).role, "install-packages");
+}
+
+TEST(PackageKitActivity, RefreshesAndDownloadsChangeNoPackage)
+{
+    const std::vector<PkTransactionInfo> refresh{tx("/1", Role::RefreshCache, Status::RefreshCache)};
+    EXPECT_EQ(externalActivity(refresh).kind, ExternalActivity::Kind::Refreshing);
+    EXPECT_FALSE(externalActivity(refresh).blocksChanges());
+    const std::vector<PkTransactionInfo> onlyDownload{
+            tx("/1", Role::UpdatePackages, Status::Download, flag::kOnlyTrusted | flag::kOnlyDownload)};
+    EXPECT_EQ(externalActivity(onlyDownload).kind, ExternalActivity::Kind::Refreshing);
+}
+
+TEST(PackageKitActivity, InstallsRemovalsAndUpdatesChangeTheSystem)
+{
+    // Cutefish Software Update's update(): UpdatePackages, only-trusted.
+    const std::vector<PkTransactionInfo> update{tx("/1", Role::UpdatePackages, Status::Install, flag::kOnlyTrusted)};
+    const ExternalActivity a = externalActivity(update);
+    EXPECT_EQ(a.kind, ExternalActivity::Kind::Changing);
+    EXPECT_TRUE(a.blocksChanges());
+    EXPECT_EQ(a.role, "update-packages");
+    EXPECT_EQ(a.status, "install");
+    for (const Role r : {Role::InstallFiles, Role::InstallPackages, Role::InstallSignature, Role::RemovePackages,
+                         Role::RepoEnable, Role::RepoSetData, Role::UpgradeSystem, Role::RepairSystem,
+                         Role::RepoRemove}) {
+        const std::vector<PkTransactionInfo> one{tx("/1", r, Status::Wait)};
+        EXPECT_TRUE(externalActivity(one).blocksChanges()) << roleName(static_cast<std::uint32_t>(r));
+    }
+}
+
+TEST(PackageKitActivity, NotStartedAndFinishedTransactionsAreLeftOut)
+{
+    const std::vector<PkTransactionInfo> list{tx("/1", Role::Unknown, Status::Wait),
+                                              tx("/2", Role::UpdatePackages, Status::Finished),
+                                              tx("/3", Role::Cancel, Status::Running)};
+    EXPECT_EQ(externalActivity(list).kind, ExternalActivity::Kind::None);
+}
+
+TEST(PackageKitActivity, TheMostSignificantWinsDeterministically)
+{
+    const std::vector<PkTransactionInfo> a{tx("/3", Role::GetUpdates), tx("/2", Role::RemovePackages),
+                                           tx("/1", Role::RefreshCache), tx("/4", Role::InstallPackages)};
+    std::vector<PkTransactionInfo> b(a.rbegin(), a.rend());
+    EXPECT_EQ(externalActivity(a), externalActivity(b));
+    EXPECT_EQ(externalActivity(a).kind, ExternalActivity::Kind::Changing);
+    EXPECT_EQ(externalActivity(a).role, "remove-packages"); // "/2" < "/4"
+}

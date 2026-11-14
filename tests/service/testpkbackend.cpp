@@ -555,3 +555,272 @@ TEST_F(PkBackendTest, ChangesMadeOutsideAreGrouped)
     EXPECT_TRUE(seen[0].updates);
     EXPECT_FALSE(seen[0].sources);
 }
+
+// --- Other programs' transactions (H.2, SERVICE.md §22) ---------------------------------
+//
+// Cutefish Software Update (cutefish-core, org.cutefish.Services.SoftwareUpdate)
+// drives packagekitd itself: check() is RefreshCache then GetUpdates,
+// update() is UpdatePackages with only-trusted. The fake plays that other
+// program with startExternal(); nothing here talks to Cutefish's service.
+
+namespace {
+
+class PkCoexistenceTest : public PkBackendTest
+{
+protected:
+    void SetUp() override
+    {
+        PkBackendTest::SetUp();
+        backend->setChangeListener([this](const BackendChanges& c) {
+            if (c.activity)
+                ++activityChanges;
+        });
+    }
+
+    bool activityIs(ExternalActivity::Kind kind)
+    {
+        return runUntil([&] { return backend->externalActivity().kind == kind; }, 5s);
+    }
+
+    Answer held(std::vector<Step> steps = {})
+    {
+        Answer a;
+        a.hold = true;
+        a.steps = std::move(steps);
+        return a;
+    }
+
+    std::optional<Result<Plan>> planGimp(const std::string& id = "tx-1")
+    {
+        return wait<Plan>([&](auto d) { backend->plan(id, request(TransactionKind::Install, {"gimp"}), std::move(d)); });
+    }
+
+    int storeTransactions()
+    {
+        int n = 0;
+        for (const auto& c : fake->calls())
+            n += c.method == "Resolve" || c.method == "InstallPackages" || c.method == "RefreshCache";
+        return n;
+    }
+
+    int activityChanges = 0;
+};
+
+void expectLocked(const Error& e)
+{
+    EXPECT_EQ(e.code(), ErrorCode::Backend);
+    EXPECT_EQ(e.backendFailure(), BackendFailure::Locked) << e.message();
+    EXPECT_NE(e.message().find("update-packages"), std::string::npos) << e.message();
+    EXPECT_NE(e.message().find("try again"), std::string::npos) << e.message();
+}
+
+} // namespace
+
+TEST_F(PkCoexistenceTest, IdlePackageKitBlocksNothingAndTheStoresOwnTransactionsDoNotCount)
+{
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    Answer real;
+    real.steps = {{pk::Status::Download, 30, true}, {pk::Status::Install, 80, false}};
+    fake->answer("InstallPackages", real, false);
+    EXPECT_EQ(backend->externalActivity().kind, ExternalActivity::Kind::None);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan) << plan->error().message();
+    const PlanRequest req = request(TransactionKind::Install, {"gimp"});
+    auto r = wait<ExecutionResult>([&](auto d) { backend->execute("tx-1", req, **plan, {}, std::move(d)); });
+    ASSERT_TRUE(r && *r) << r->error().message();
+    runUntil([] { return false; }, 200ms); // observation window for a wrong notification
+    EXPECT_EQ(activityChanges, 0);
+    EXPECT_EQ(backend->externalActivity().kind, ExternalActivity::Kind::None);
+}
+
+TEST_F(PkCoexistenceTest, ACheckForUpdatesByAnotherProgramBlocksNothing)
+{
+    const std::string path = fake->startExternal("GetUpdates", held(), pk::filter::kNone);
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Checking));
+    EXPECT_EQ(backend->externalActivity().role, "get-updates");
+    EXPECT_EQ(activityChanges, 1);
+    // The store's request goes to PackageKit (which queues it as it likes):
+    // the fake runs it at once.
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan) << plan->error().message();
+    ASSERT_TRUE(fake->finish(path));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+    EXPECT_EQ(fake->cancels(), 0);
+}
+
+TEST_F(PkCoexistenceTest, ACacheRefreshByAnotherProgramBlocksNothing)
+{
+    const std::string path = fake->startExternal("RefreshCache", held({{pk::Status::RefreshCache, 40, true}}), 0);
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Refreshing));
+    EXPECT_EQ(backend->externalActivity().role, "refresh-cache");
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan) << plan->error().message();
+    ASSERT_TRUE(fake->finish(path));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+}
+
+TEST_F(PkCoexistenceTest, ASystemUpdateFromSoftwareUpdateBlocksChangesUntilItEnds)
+{
+    // A plan made before, while PackageKit was idle.
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto accepted = planGimp("tx-0");
+    ASSERT_TRUE(accepted && *accepted);
+    const std::string path = fake->startExternal(
+            "UpdatePackages", held({{pk::Status::Download, 20, true}, {pk::Status::Install, 60, false}}));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    EXPECT_EQ(backend->externalActivity().role, "update-packages");
+    EXPECT_EQ(activityChanges, 1);
+    const int before = storeTransactions();
+
+    // Plan, execute and refresh are refused at once, with a temporary
+    // failure; nothing is sent to PackageKit.
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && !*plan);
+    expectLocked(plan->error());
+    const PlanRequest req = request(TransactionKind::Install, {"gimp"});
+    auto exec = wait<ExecutionResult>([&](auto d) { backend->execute("tx-2", req, **accepted, {}, std::move(d)); });
+    ASSERT_TRUE(exec && !*exec);
+    expectLocked(exec->error());
+    auto refresh = wait<void>([&](auto d) { backend->refresh("tx-3", {}, std::move(d)); });
+    ASSERT_TRUE(refresh && !*refresh);
+    expectLocked(refresh->error());
+    EXPECT_EQ(storeTransactions(), before);
+    // Queries still go (inventory, updates).
+    auto installed = wait<std::vector<InstalledItem>>([&](auto d) { backend->queryInstalled(std::move(d)); });
+    ASSERT_TRUE(installed && *installed);
+
+    // Its steps are followed without new notifications.
+    fake->setStatus(path, pk::Status::Commit);
+    ASSERT_TRUE(runUntil([&] { return backend->externalActivity().status == "commit"; }, 5s));
+    EXPECT_EQ(activityChanges, 1);
+
+    // It ends: the store works again (the user retries).
+    ASSERT_TRUE(fake->finish(path));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+    EXPECT_EQ(activityChanges, 2);
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto again = planGimp("tx-4");
+    ASSERT_TRUE(again && *again) << again->error().message();
+    // The store never asked to cancel the other program's update.
+    EXPECT_EQ(fake->cancels(), 0);
+}
+
+TEST_F(PkCoexistenceTest, AnUpdateAlreadyRunningAtStartupIsSeen)
+{
+    const std::string path = fake->startExternal("UpdatePackages", held());
+    // A new backend, as a service started while Settings updates.
+    backend = std::make_unique<PackageKitBackend>(
+            loop, PackageKitBackend::Options{.bus = PkTransport::Bus::Session, .swcatalog = bus.dir() / "swcatalog"});
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && !*plan);
+    expectLocked(plan->error());
+    ASSERT_TRUE(fake->finish(path));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+}
+
+TEST_F(PkCoexistenceTest, AnExternalUpdateCancelledOrFailedFreesTheBackend)
+{
+    std::string path = fake->startExternal("UpdatePackages", held());
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    // Cancelled from Settings (its cancel(), PackageKit's Cancel): the end.
+    ASSERT_TRUE(fake->finish(path, pk::Exit::Cancelled, fakepk::errorCode("transaction-cancelled")));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+    path = fake->startExternal("InstallPackages", held());
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    EXPECT_EQ(backend->externalActivity().role, "install-packages");
+    // A PackageKit error ends it too.
+    ASSERT_TRUE(fake->finish(path, pk::Exit::Failed, fakepk::errorCode("package-failed-to-install")));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+    EXPECT_EQ(activityChanges, 4);
+    EXPECT_EQ(fake->cancels(), 0); // never the store's doing
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan);
+}
+
+TEST_F(PkCoexistenceTest, PackageKitGoingAwayEndsTheActivity)
+{
+    fake->startExternal("UpdatePackages", held());
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    fake->stop();
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+    auto r = wait<void>([&](Completion<void> d) { backend->availability(std::move(d)); });
+    ASSERT_TRUE(r && !*r);
+    EXPECT_EQ(r->error().backendFailure(), BackendFailure::Unavailable);
+    // It comes back idle: usable again.
+    fake->start();
+    auto back = wait<void>([&](Completion<void> d) { backend->availability(std::move(d)); });
+    ASSERT_TRUE(back && *back) << back->error().message();
+    EXPECT_EQ(backend->externalActivity().kind, ExternalActivity::Kind::None);
+}
+
+TEST_F(PkCoexistenceTest, AnUpdateStartedDuringTheSimulationStopsTheExecutionBeforeAnyChange)
+{
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan);
+    // The new simulation of the execution stays running until released.
+    Answer sim = gimpInstallPlan();
+    sim.hold = true;
+    fake->replace("InstallPackages", sim, true);
+    std::optional<Result<ExecutionResult>> r;
+    const PlanRequest req = request(TransactionKind::Install, {"gimp"});
+    backend->execute("tx-1", req, **plan, {}, [&](Result<ExecutionResult> x) { r.emplace(std::move(x)); });
+    std::string simPath;
+    ASSERT_TRUE(runUntil([&] {
+        int simulations = 0;
+        for (const auto& c : fake->calls())
+            simulations += c.method == "InstallPackages" && c.simulate();
+        const auto running = fake->runningTransactions();
+        if (simulations >= 2 && running.size() == 1)
+            simPath = running.front();
+        return !simPath.empty();
+    }));
+    // Settings starts the system update meanwhile.
+    const std::string update = fake->startExternal("UpdatePackages", held());
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    ASSERT_TRUE(fake->finish(simPath));
+    ASSERT_TRUE(runUntil([&] { return r.has_value(); }));
+    ASSERT_FALSE(*r);
+    expectLocked(r->error());
+    EXPECT_TRUE(realCalls("InstallPackages").empty()); // the real transaction never started
+    ASSERT_TRUE(fake->finish(update));
+}
+
+TEST_F(PkCoexistenceTest, AnUpdateStartedWhileTheStoreInstallsLeavesTheStoresTransactionAlone)
+{
+    // The reverse scenario: the store's install runs, then Settings starts
+    // the system update. packagekitd queues it (one transaction at a time);
+    // the store neither cancels it nor is cancelled, and refuses a new
+    // change until it is over.
+    fake->answer("InstallPackages", gimpInstallPlan(), true);
+    Answer real;
+    real.hold = true;
+    real.steps = {{pk::Status::Install, 50, false}};
+    fake->answer("InstallPackages", real, false);
+    auto plan = planGimp();
+    ASSERT_TRUE(plan && *plan);
+    std::optional<Result<ExecutionResult>> r;
+    const PlanRequest req = request(TransactionKind::Install, {"gimp"});
+    std::string own;
+    OperationEvents ev;
+    ev.handle = [&](const std::string& h) { own = h; };
+    backend->execute("tx-1", req, **plan, ev, [&](Result<ExecutionResult> x) { r.emplace(std::move(x)); });
+    ASSERT_TRUE(runUntil([&] { return !own.empty(); }));
+    EXPECT_EQ(backend->externalActivity().kind, ExternalActivity::Kind::None); // its own: not counted
+    const std::string update = fake->startExternal("UpdatePackages", held({{pk::Status::Wait, 101, true}}));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::Changing));
+    auto second = planGimp("tx-2");
+    ASSERT_TRUE(second && !*second);
+    expectLocked(second->error());
+    // The store's transaction ends normally.
+    ASSERT_TRUE(fake->finish(own));
+    ASSERT_TRUE(runUntil([&] { return r.has_value(); }));
+    ASSERT_TRUE(*r) << r->error().message();
+    EXPECT_EQ(fake->cancels(), 0);
+    ASSERT_TRUE(fake->finish(update));
+    ASSERT_TRUE(activityIs(ExternalActivity::Kind::None));
+}

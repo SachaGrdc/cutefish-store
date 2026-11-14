@@ -6,7 +6,11 @@
 // object per transaction, SetHints, a method that is answered at once, then
 // property changes (Status, Percentage, AllowCancel, DownloadSizeRemaining),
 // ItemProgress, Packages or RepoDetail, ErrorCode, Finished and Destroy.
-// What it answers is scripted by the test; every call is recorded.
+// What it answers is scripted by the test; every call is recorded. As
+// packagekitd, it emits TransactionListChanged when a transaction is created
+// or ends, and a transaction's Role and TransactionFlags change (with
+// PropertiesChanged) when its method is called. Transactions of "another
+// program" (Cutefish Software Update, pkcon) are started by startExternal().
 //
 // A double, not PackageKit: it reproduces the protocol the backend relies
 // on (ARCHITECTURE §7.2, prototype 4), not APT's resolution.
@@ -147,6 +151,35 @@ public:
         return future.get();
     }
 
+    /// Starts a transaction as another program would (Cutefish Software
+    /// Update's UpdatePackages, pkcon's InstallPackages), with these
+    /// TransactionFlags; with `hold` it stays running until finish(). Its
+    /// steps set its Status. Returns its path.
+    std::string startExternal(const std::string& method, Answer a, std::uint64_t flags = pk::flag::kOnlyTrusted)
+    {
+        std::promise<std::string> path;
+        auto future = path.get_future();
+        run([this, method, flags, a = std::move(a), &path]() mutable {
+            const std::string p = newTransaction();
+            m_transactions[p]->startAs(method, flags, std::move(a));
+            path.set_value(p);
+        });
+        return future.get();
+    }
+
+    /// Changes a running transaction's Status, as its work goes on.
+    void setStatus(const std::string& path, pk::Status status)
+    {
+        std::promise<void> done;
+        auto future = done.get_future();
+        run([this, path, status, &done] {
+            if (const auto it = m_transactions.find(path); it != m_transactions.end())
+                it->second->setStatus(status);
+            done.set_value();
+        });
+        future.wait();
+    }
+
     /// The transactions the daemon is still running (GetTransactionList).
     /// Asks its own loop, like any other client.
     std::vector<std::string> runningTransactions()
@@ -224,7 +257,8 @@ private:
             m_object.addProperty("Percentage", [this] { return m_percentage; });
             m_object.addProperty("AllowCancel", [this] { return m_allowCancel; });
             m_object.addProperty("DownloadSizeRemaining", [this] { return m_downloadRemaining; });
-            m_object.addProperty("Role", [] { return std::uint32_t(0); });
+            m_object.addProperty("Role", [this] { return m_role; });
+            m_object.addProperty("TransactionFlags", [this] { return m_flags; });
             m_object.addMethod("SetHints", "as", "", [this](dbus::MethodCall& c) {
                 c.read(m_hints);
                 c.reply();
@@ -256,6 +290,21 @@ private:
         }
 
         bool running() const { return !m_finished; }
+
+        /// Started by another program: role and flags set, then its work.
+        void startAs(const std::string& method, std::uint64_t flags, Answer a)
+        {
+            setMethod(method, flags);
+            begin({method, flags}, std::move(a));
+        }
+
+        void setStatus(pk::Status status)
+        {
+            if (m_finished)
+                return;
+            m_status = status;
+            m_object.emitPropertiesChanged({"Status"});
+        }
 
         /// Ends a held transaction, as the daemon would when its work ends.
         void finishNow(pk::Exit exit, std::optional<std::uint32_t> error)
@@ -307,6 +356,7 @@ private:
             if (args.size() > 1)
                 if (auto v = args[1].get<std::vector<std::string>>())
                     call.values = *v;
+            setMethod(method, isAction(method) || method == "RefreshCache" ? call.flags : 0);
             Answer a = m_fake.next(method, call.simulate());
             if (!a.dbusError.empty()) {
                 c.replyError(a.dbusError, "refused by the fake");
@@ -316,6 +366,25 @@ private:
             }
             c.reply();
             begin(std::move(call), std::move(a));
+        }
+
+        static bool isAction(const std::string& m)
+        {
+            return m == "InstallPackages" || m == "RemovePackages" || m == "UpdatePackages";
+        }
+
+        /// As packagekitd when the method is called: Role and TransactionFlags.
+        void setMethod(const std::string& method, std::uint64_t flags)
+        {
+            static const std::map<std::string, pk::Role> kRoles{
+                    {"GetPackages", pk::Role::GetPackages},         {"GetRepoList", pk::Role::GetRepoList},
+                    {"GetUpdates", pk::Role::GetUpdates},           {"Resolve", pk::Role::Resolve},
+                    {"InstallPackages", pk::Role::InstallPackages}, {"RemovePackages", pk::Role::RemovePackages},
+                    {"UpdatePackages", pk::Role::UpdatePackages},   {"RefreshCache", pk::Role::RefreshCache}};
+            const auto it = kRoles.find(method);
+            m_role = static_cast<std::uint32_t>(it == kRoles.end() ? pk::Role::Unknown : it->second);
+            m_flags = flags;
+            m_object.emitPropertiesChanged({"Role", "TransactionFlags"});
         }
 
         void tick()
@@ -361,8 +430,11 @@ private:
             m_object.emitPropertiesChanged({"Status"});
             m_object.emitSignal("Finished", static_cast<std::uint32_t>(m_answer.exit), std::uint32_t(10));
             m_object.emitSignal("Destroy");
-            std::lock_guard lock(m_fake.m_mutex);
-            --m_fake.m_active;
+            {
+                std::lock_guard lock(m_fake.m_mutex);
+                --m_fake.m_active;
+            }
+            m_fake.listChanged();
         }
 
         FakePackageKit& m_fake;
@@ -371,6 +443,8 @@ private:
         Answer m_answer;
         std::size_t m_step = 0;
         pk::Status m_status = pk::Status::Wait;
+        std::uint32_t m_role = 0;
+        std::uint64_t m_flags = 0;
         std::uint32_t m_percentage = 101;
         bool m_allowCancel = true;
         std::uint64_t m_downloadRemaining = 0;
@@ -396,7 +470,24 @@ private:
     {
         const std::string path = "/" + std::to_string(++m_next) + "_fake";
         m_transactions[path] = std::make_unique<Transaction>(*this, path);
+        listChanged();
         return path;
+    }
+
+    std::vector<std::string> runningPaths() const
+    {
+        std::vector<std::string> paths;
+        for (const auto& [p, t] : m_transactions)
+            if (t->running())
+                paths.push_back(p);
+        return paths;
+    }
+
+    /// TransactionListChanged(as), on the daemon's loop.
+    void listChanged()
+    {
+        if (m_daemon)
+            m_daemon->emitSignal("TransactionListChanged", runningPaths());
     }
 
     void exportDaemon()
@@ -428,6 +519,7 @@ private:
         });
         for (const char* s : {"InstalledChanged", "UpdatesChanged", "RepoListChanged"})
             m_daemon->addSignal(s, "");
+        m_daemon->addSignal("TransactionListChanged", "as");
         m_daemon->publish();
     }
 

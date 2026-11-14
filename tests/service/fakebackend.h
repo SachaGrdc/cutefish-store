@@ -99,8 +99,10 @@ public:
 
     void plan(const std::string&, const PlanRequest&, Completion<Plan> done) override
     {
+        ++m_planCalls;
         post([done] { done(Error::notSupported("no planning in this fake")); });
     }
+    int planCalls() const noexcept { return m_planCalls; }
 
     void execute(const std::string&, const PlanRequest&, const Plan&, OperationEvents,
                  Completion<ExecutionResult> done) override
@@ -145,6 +147,7 @@ private:
     std::vector<std::function<void()>> m_held;
     int m_installedQueries = 0;
     int m_updatesQueries = 0;
+    int m_planCalls = 0;
 };
 
 } // namespace cutefish::store::service::testutil

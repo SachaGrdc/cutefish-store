@@ -69,6 +69,17 @@ if(TARGET store-backend-packagekit)
     gtest_discover_tests(store-pkbackend-tests PROPERTIES TIMEOUT 60)
 endif()
 
+# Coexistence with Cutefish Settings' system updates (H.2): the service
+# in-process, its PackageKit backend against the simulated PackageKit.
+if(TARGET store-backend-packagekit)
+    add_executable(store-service-coexist-tests testservicecoexist.cpp fakebackend.h fakepackagekit.h privatebus.h)
+    target_include_directories(store-service-coexist-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/core)
+    target_compile_definitions(store-service-coexist-tests PRIVATE DBUS_DAEMON="${DBUS_DAEMON_EXECUTABLE}")
+    target_compile_options(store-service-coexist-tests PRIVATE -Wall -Wextra)
+    target_link_libraries(store-service-coexist-tests PRIVATE store-service GTest::gtest_main Threads::Threads)
+    gtest_discover_tests(store-service-coexist-tests PROPERTIES TIMEOUT 60)
+endif()
+
 # The service with its PackageKit backend, against a simulated PackageKit on
 # the test's bus (--packagekit session): never the system's packagekitd.
 if(TARGET store-backend-packagekit)
