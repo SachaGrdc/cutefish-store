@@ -19,7 +19,7 @@ valide chaque étape et chaque décision ; un agent propose, il ne décide pas.
    étapes et leur état, §16 service v0.1, §17 backend PackageKit, §18
    gestionnaire de transactions (F2), §19 backend Flatpak (G, G.1), §20 à
    §22 multi-backends et coexistence (H.1, H.2), §23 transactions
-   multi-backends (H.3).
+   multi-backends (H.3), §24 `UpdateAll` multi-backends (H.4).
 
 ## Le projet en bref
 
@@ -56,7 +56,8 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | G.1 | Audit et durcissement du backend Flatpak (refus des ajouts de remote, ressources) | `41dbbd8` … `9380041` |
 | H.1 | Registre multi-backends et sélection (service) | `81dfa71` … `66492a1` |
 | H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `3166ea9` … `a9e5f09` |
-| H.3 | Transactions Flatpak de bout en bout avec PackageKit, D-033 à D-035 | `bde081d` … `6d586db`, puis la documentation |
+| H.3 | Transactions Flatpak de bout en bout avec PackageKit, D-033 à D-035 | `bde081d` … `6d586db`, `e262afc` |
+| H.4 | `UpdateAll` multi-backends, D-036 à D-038 | voir `git log` après `e262afc` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -104,9 +105,21 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   `Cancellable` vrai dès `running` pour un backend `cancelAnytime`. Tests
   du vrai `FlatpakBackend` sur le faux magasin, avec PackageKit simulé
   (`store-service-flatpak-tests`, 18 tests). Rien de réel n'est vérifié
-  (VM). **Le propriétaire doit encore valider H.3.**
-  Prochaines étapes : H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
-  (moniteur Flatpak), H.7 (catalogue unifié).
+  (VM). H.3 est **validée** par le propriétaire.
+- **H.4** : `UpdateAll` sur tous les backends et installations (SERVICE.md
+  §24) : offres déjà engagées laissées de côté et listées (`Skipped`),
+  `Busy` seulement si toutes le sont (D-036) ; parente agrégée :
+  `Children`, `Plan` agrégé, `Progress` (jamais de fraction inventée),
+  octets, `Cancellable` (D-036, évolution de `Store1`) ; une seule demande
+  de confirmation quand tous les plans sont connus, délai des enfants
+  démarré à ce moment (D-037) ; PackageKit occupé : enfant deb `locked`,
+  Flatpak continue, parente `failed` (D-038) ; enfants journalisés
+  ensemble (`StateStore::saveTransactions`). Relation parent/enfant après
+  un redémarrage : étude et options O1 à O4 en §24.4, **rien de modifié**,
+  décision du propriétaire attendue. Tests sur doubles seulement.
+  **Le propriétaire doit encore valider H.4.**
+  Prochaines étapes : H.5 (sources et API D-Bus), H.6 (moniteur Flatpak),
+  H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
@@ -115,7 +128,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   cité P-001 comme règle de travail à l'étape F, sans changer son statut.
   Questions ouvertes notables : O-001 (licence), O-014 (formatage).
 - Limites connues et points jamais vérifiés : SERVICE.md §16.4, §17.6,
-  §18, §21.8, §22.5 et §23.4, ARCHITECTURE.md §7.2 (« Reste à tester »).
+  §18, §21.8, §22.5, §23.4 et §24.6, ARCHITECTURE.md §7.2 (« Reste à tester »).
 
 ## Reprendre le projet (nouvel agent)
 

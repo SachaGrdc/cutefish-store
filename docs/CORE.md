@@ -386,6 +386,10 @@ Choix de persistance :
   (`Transaction::snapshot()` / `Transaction::restore()`). Les raisons de
   confirmation sont recalculées depuis le plan ; seul `plan-changed` est
   gardé. Un enregistrement que `restore` refuserait n'est pas écrit.
+  `saveTransactions(records)` (H.4) enregistre plusieurs transactions en
+  une seule transaction SQLite, toutes ou aucune, après avoir vérifié
+  chacune (identifiants distincts) : les enfants d'un `UpdateAll`
+  (SERVICE.md §24).
 - **Rétention (D-018)** : au plus 200 transactions terminées et au plus
   90 jours après leur fin, la plus stricte l'emporte ; appliquée à chaque
   enregistrement d'une transaction terminée (à sa date de fin) et par

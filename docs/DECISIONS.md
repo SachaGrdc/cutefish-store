@@ -574,6 +574,96 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   backends relèvent d'`UpdateAll` (D-031) et de l'étape H.4.
 - **Détails** : SERVICE.md §23.
 
+### D-036 — `UpdateAll` : offres déjà engagées et parente agrégée (évolution de `Store1`)
+
+- **Statut** : Validée dans son principe (propriétaire, étape H.4,
+  décisions A et C, option 2 chacune). La sémantique détaillée ci-dessous
+  a été écrite avec l'implémentation et se valide avec H.4.
+- **Offres déjà engagées (A)** : une mise à jour dont l'offre est déjà
+  prise par une transaction non terminée (`Update`, `Remove`, ou l'enfant
+  d'un autre `UpdateAll`) est laissée de côté ; les autres forment les
+  enfants. `UpdateAll` répond `Busy` seulement si **toutes** les offres
+  sont engagées, `NotFound` s'il n'y a aucune mise à jour. Les offres
+  laissées de côté sont listées par la propriété `Skipped` de la parente,
+  et journalisées par le service (`cutefish.store.transactions`).
+- **Évolution de `org.cutefish.Store1.Transaction`** : deux propriétés
+  ajoutées à **tous** les objets de transaction (vides hors parente), et
+  une sémantique propre à la parente pour quatre propriétés existantes.
+  Ajouter des propriétés ne casse aucun client (A §5.1, un client ignore
+  ce qu'il ne connaît pas) : le nom d'interface ne change pas (P-012).
+
+  | Propriété | Type | Sur la parente `update-all` | Ailleurs |
+  |---|---|---|---|
+  | `Children` | `ao` | Chemins des enfants, dans l'ordre de création ; fixée à la création, jamais modifiée. Un chemin peut ne plus exister après le retrait de l'enfant (5 minutes après sa fin) | `[]` |
+  | `Skipped` | `aa{sv}` | Une entrée par offre laissée de côté : `offer-id` `s`, `app-id` `s` (si connue), `reason` `s` (`engaged`, seule valeur aujourd'hui ; un client ignore une valeur inconnue), `transaction` `o` (celle qui l'engageait au moment de l'appel). Fixée à la création | `[]` |
+  | `Plan` | `a{sv}` | Plan agrégé, voir ci-dessous | Inchangé (§4.6) |
+  | `Progress` | `d` | Celle de l'enfant s'il est seul ; −1 (inconnue) s'il y en a plusieurs | Inchangé |
+  | `DownloadedBytes`, `TotalBytes` | `t`, `t` | Enfant seul : les siens. Plusieurs : sommes des octets annoncés par les enfants, publiées seulement quand chaque enfant encore ouvert est `running` et a annoncé son total ; sinon 0 et 0 (inconnu) | Inchangé |
+  | `Cancellable` | `b` | Vrai quand `Cancel` sur la parente atteindrait au moins un enfant : un enfant `queued`, `awaiting-confirmation`, `planning` (hors seconde passe), en seconde passe sur un backend `cancelAnytime`, ou `running` et `Cancellable` | Inchangé |
+  | `ConfirmationDeadline` | `t` | En `awaiting-confirmation` : la plus proche des échéances des enfants qui attendent ; 0 sinon | Inchangé |
+
+  **Plan agrégé** : `kind` = `update-all`, `backend` = `multiple` ;
+  `complete` `b` (le plan de chaque enfant est connu, D-037) ;
+  `requires-confirmation` `b` (au moins un enfant attend une
+  confirmation) ; `reasons` `as` (réunion triée des raisons des enfants qui
+  attendent) ; `children` `aa{sv}`, une entrée par enfant dans l'ordre de
+  `Children` : `transaction` `o`, `backend`, `scope`, `state`, `plan` (le
+  `Plan` publié par l'enfant, vide tant qu'il n'est pas connu) ;
+  `download-size` `t` et `installed-size-change` `x`, **seulement quand
+  `complete` est vrai** : sommes des plans des enfants, sans ceux qui ont
+  fini sans s'exécuter. Les opérations restent celles des enfants : la
+  parente ne les recopie pas hors de `children`.
+- **Raison du refus d'une fraction agrégée** : une mise à jour deb et un
+  téléchargement Flatpak ne se mesurent pas dans la même unité ; une
+  moyenne, même pondérée par les tailles de téléchargement, ferait avancer
+  une barre au mauvais rythme. Les octets s'additionnent sans biais, mais
+  seulement quand tous les totaux restants sont connus.
+- **Écartés** : rejeter tout `UpdateAll` dès qu'une offre est engagée
+  (comportement de F2) ; une fraction « nombre d'enfants terminés sur le
+  nombre d'enfants » ; une moyenne pondérée.
+- **Détails** : SERVICE.md §24.
+
+### D-037 — `UpdateAll` : une seule demande de confirmation, quand tous les plans sont connus
+
+- **Statut** : Validée (propriétaire, étape H.4, décision D, option 2).
+- **Décision** : la parente reste en `planning` tant qu'un enfant non
+  terminé n'a pas de plan ; elle passe alors **une fois** en
+  `awaiting-confirmation` si au moins un enfant attend une confirmation.
+  Un enfant terminé sans plan (refusé, `locked`, annulé) compte comme
+  connu. Avant ce moment, `Confirm` sur la parente répond `NotAllowed`.
+  Un enfant qui n'a besoin d'aucune confirmation n'attend pas ses frères :
+  il s'exécute dès que son plan est accepté (la parente est alors
+  `running`, puis `awaiting-confirmation` quand tous les plans sont là).
+- **Délai de confirmation (D-019)** : le délai de 10 minutes d'un enfant
+  qui attend ne commence qu'au moment où la parente demande la
+  confirmation (`ConfirmationDeadline` de l'enfant à 0 jusque-là), pour
+  qu'un enfant ne soit pas annulé pendant qu'un autre planifie encore.
+  Ensuite chaque enfant garde son propre délai.
+- **Seule exception** : un enfant dont le plan change à la vérification
+  (D-017, `plan-changed`) redemande une confirmation après la première ;
+  la parente repasse alors en `awaiting-confirmation`. C'est la garantie
+  de D-017 (rien d'inconfirmé n'est exécuté), pas une seconde demande
+  initiale.
+- **Confirmation d'un enfant seul** : `Confirm` reste possible sur un
+  enfant (son plan est publié) ; la règle porte sur la parente.
+- **Détails** : SERVICE.md §24.
+
+### D-038 — `UpdateAll` et PackageKit occupé par un autre programme
+
+- **Statut** : Validée (propriétaire, étape H.4, décision B, option 1).
+- **Décision** : pendant une modification du système par un autre
+  programme (Cutefish Settings, `activity` = `changing`, SERVICE §22), la
+  parente crée quand même l'enfant PackageKit, qui échoue en `planning`
+  avec `locked` sans rien envoyer à PackageKit (§22.3) ; les enfants
+  Flatpak continuent ; la parente se termine `failed` avec l'erreur
+  `locked` si aucun autre enfant n'a échoué avant (première erreur dans
+  l'ordre de `Children`). L'utilisateur relance `UpdateAll` quand
+  PackageKit est libre. La mise à jour système n'est jamais annulée.
+- **Écartés** : ne pas créer l'enfant deb (l'échec deviendrait invisible) ;
+  refuser tout `UpdateAll` (Flatpak serait bloqué sans raison, contraire à
+  §22.4).
+- **Détails** : SERVICE.md §24.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de

@@ -381,6 +381,12 @@ Propriétés de A §5.3, inchangées : `Id`, `Kind`, `Backend`, `AppIds`,
 |---|---|---|
 | `ConfirmationDeadline` | `t` | Horodatage où une attente de confirmation expire (§5.3) |
 | `Parent` | `o` | Pour les sous-transactions d'`UpdateAll` ; `/` sinon |
+| `Children` | `ao` | Enfants d'une parente `update-all`, dans l'ordre ; vide sinon (D-036, H.4) |
+| `Skipped` | `aa{sv}` | Mises à jour laissées de côté par `UpdateAll`, avec leur motif ; vide sinon (D-036, H.4) |
+
+Sur une parente `update-all`, `Plan`, `Progress`, les octets,
+`Cancellable` et `ConfirmationDeadline` sont agrégés selon D-036 et D-037
+(§24).
 
 | Méthode ou signal | Comportement | Erreurs |
 |---|---|---|
@@ -1111,8 +1117,10 @@ testée contre le PackageKit simulé (§18), sa validation formelle par le
 propriétaire restant en attente ; le backend Flatpak (G, §19) et son audit
 de durcissement (G.1) sont faits et validés ; il est **raccordé au service**
 par un registre multi-backends (H.1, §20, validée) et un inventaire unifié
-(H.2, §21 et §22, validée). L'intégration multi-backends des transactions,
-des mises à jour groupées et des sources (H.3–H.8) suit. Aucune
+(H.2, §21 et §22, validée). Les transactions multi-backends (H.3, §23)
+sont validées ; `UpdateAll` multi-backends (H.4, §24) est implémenté et
+testé sur doubles, à valider. Les sources, le moniteur Flatpak et le
+catalogue unifié (H.5–H.8) suivent. Aucune
 étape n'exige de commande root sur la machine de développement ; les étapes
 marquées « VM » se testent dans une machine virtuelle.
 
@@ -1586,8 +1594,8 @@ construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
 - **Fait (H.2)** : inventaire unifié, §21.
 - **Fait (H.3)** : transactions Flatpak de bout en bout, à côté de
   PackageKit, §23.
-- **À faire (H.4–H.8)** : `UpdateAll` multi-backends complet,
-  gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
+- **Fait (H.4, à valider)** : `UpdateAll` multi-backends, §24.
+- **À faire (H.5–H.8)** : gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
   `GetPermissions`), moniteur de changements externes Flatpak, et catalogue
   unifié (l'indexeur lit déjà les deux sources ; l'agrégation fine est à
   vérifier).
@@ -2184,5 +2192,185 @@ d'une transaction terminée à son état installé, et des compteurs atomiques.
 - Une transaction Flatpak interrompue par l'arrêt du service peut avoir
   été menée à terme ou non par libflatpak ; l'état réel est relu par
   l'inventaire au démarrage suivant, sans être déduit du journal.
-- `UpdateAll` multi-backends (H.4), sources et `GetPermissions` (H.5),
-  moniteur Flatpak (H.6) et catalogue unifié (H.7) restent hors périmètre.
+- Sources et `GetPermissions` (H.5), moniteur Flatpak (H.6) et catalogue
+  unifié (H.7) restent hors périmètre ; `UpdateAll` multi-backends : §24.
+
+## 24. `UpdateAll` multi-backends (H.4)
+
+H.4 fait d'`UpdateAll` une mise à jour groupée de tous les backends et de
+toutes les installations, à côté des actions unitaires d'H.3. Décisions du
+propriétaire : D-036 (offres engagées, parente agrégée, évolution de
+`Store1`), D-037 (une seule demande de confirmation), D-038 (PackageKit
+occupé). Aucune méthode ni signal ajouté ; deux propriétés ajoutées aux
+objets de transaction (`Children`, `Skipped`) ; aucune migration de
+schéma.
+
+### 24.1 Ce qui existait (F2, H.2, H.3) et reste inchangé
+
+- Une parente `update-all` (`Backend` = `multiple`, non journalisée) et un
+  enfant `update` par backend et par installation (D-031), regroupés
+  d'après l'`offer_id` ; les mises à jour viennent des listes normalisées
+  de chaque backend utilisable (H.2, §21.4). Sans backend utilisable :
+  `BackendUnavailable`.
+- Une file par backend (D-030), une seule pour les deux installations
+  Flatpak (D-034) : l'enfant PackageKit et un enfant Flatpak avancent en
+  même temps, les deux enfants Flatpak l'un après l'autre.
+- Chaque enfant suit le chemin d'une transaction ordinaire : plan,
+  confirmation éventuelle, seconde passe ou nouvelle simulation vérifiée
+  (D-017), journal (D-018), raisons `system-scope` (D-014).
+- L'état final de la parente : `succeeded` seulement si tous les enfants
+  réussissent ; sinon `failed` (avec la première erreur, dans l'ordre de
+  `Children`), puis `interrupted`, puis `cancelled`.
+
+### 24.2 Changements
+
+- **Offres déjà engagées (D-036, A)** : `startUpdateAll` met de côté chaque
+  offre déjà prise par une transaction non terminée et la décrit dans
+  `Skipped` (`offer-id`, `app-id`, `reason` = `engaged`, `transaction`) ;
+  un message `UpdateAll leaves … out: engaged by …` est journalisé. `Busy`
+  seulement si toutes le sont ; `NotFound` s'il n'y a aucune mise à jour.
+- **Parente agrégée (D-036, C)** : `Children` ; `Plan` agrégé (`complete`,
+  `requires-confirmation`, `reasons`, `children`, et les totaux seulement
+  quand tous les plans sont connus) ; `Progress` d'un enfant seul, −1 pour
+  plusieurs ; octets additionnés seulement quand chaque enfant ouvert est
+  `running` et a annoncé son total ; `Cancellable` vrai quand `Cancel`
+  atteindrait un enfant ; `ConfirmationDeadline` la plus proche des
+  enfants qui attendent. Sémantique complète : D-036.
+- **Une seule demande de confirmation (D-037, D)** : la parente reste en
+  `planning` tant qu'un enfant ouvert n'a pas de plan, et `Confirm` y
+  répond `NotAllowed` ; le délai de 10 minutes (D-019) d'un enfant qui
+  attend ne démarre qu'à la demande de la parente.
+- **PackageKit occupé (D-038, B)** : comportement déjà obtenu par §22.3,
+  désormais décidé et testé pour `UpdateAll`.
+- **Journal atomique** (correctif) : les enregistrements initiaux des
+  enfants passent par `StateStore::saveTransactions`, une seule transaction
+  SQLite ; un échec n'en laisse aucun en `queued`, qui serait devenu une
+  transaction `interrupted` inconnue de l'utilisateur au redémarrage
+  suivant. Aucun changement de schéma.
+- **Objet de transaction** (`actiontransaction.{h,cpp}`) : propriétés
+  `Children` et `Skipped`, accesseurs du plan publié, de l'échéance et de
+  `Cancellable`. Les chemins des enfants sont attribués avant la
+  publication de la parente, pour que `Children` soit complet dès sa
+  création.
+
+### 24.3 Comportements
+
+| Situation | Résultat |
+|---|---|
+| Mises à jour deb, Flatpak utilisateur et Flatpak système | Trois enfants ; PackageKit s'exécute dès son plan accepté ; la parente demande la confirmation des deux enfants Flatpak quand tous les plans sont connus ; un `Confirm` sur la parente les confirme ensemble ; ils s'exécutent l'un après l'autre pendant que PackageKit continue |
+| Une offre déjà dans un `Update` en attente | Laissée de côté (`Skipped`) ; la parente porte les autres ; la transaction existante est inchangée |
+| Toutes les offres engagées | `Busy`, aucune transaction, rien de journalisé |
+| Un plan encore en calcul (PackageKit lent) | Parente `planning`, plan agrégé `complete` faux et sans totaux, `Confirm` refusé, aucun délai démarré |
+| Settings met à jour le système | Enfant deb `failed`/`locked`, enfants Flatpak menés à terme, parente `failed`/`locked`, mise à jour système intacte |
+| Un enfant échoue (polkit) | Les autres vont à leur terme ; parente `failed` avec l'erreur de l'enfant |
+| `Cancel` sur la parente, PackageKit non annulable | L'enfant Flatpak est annulé, PackageKit continue ; ensuite `Cancellable` de la parente est faux et un nouveau `Cancel` répond `NotAllowed` ; parente finale `cancelled` |
+| Arrêt du service pendant l'exécution | §24.4 |
+
+### 24.4 Relation parent/enfant après un redémarrage : étude
+
+Rien n'a été modifié ici : les options ci-dessous touchent au schéma du
+journal ou aux garanties de reprise, et attendent la décision du
+propriétaire.
+
+**Constat** [CODE ; testé par
+`UpdateAllWithPackageKit.AfterARestartTheChildrenAreRecoveredWithoutTheirParent`] :
+
+- La table `transactions` (schéma version 1, `stateschema.h`) n'a pas de
+  colonne `parent` : celle que prévoyait §8.2 n'a pas été créée à
+  l'étape B, et la contrainte `kind` n'admet pas `update-all`. La parente
+  n'existe qu'en mémoire.
+- Au redémarrage (§5.6), chaque enfant devient terminal (`interrupted` ou
+  `cancelled`), sauf un enfant PackageKit `running` dont packagekitd a
+  encore la transaction : il est rattaché **seul**, avec `Parent` = `/`.
+  Il y a au plus un tel enfant par `UpdateAll` (un seul enfant
+  PackageKit).
+- Ce qui est perdu : (1) l'enfant rattaché ne dit plus à quel `UpdateAll`
+  il appartenait ; (2) `GetTransactionHistory` ne permet pas de regrouper
+  les enfants d'un même `UpdateAll` ; (3) une interface relancée ne peut
+  pas montrer le résultat d'ensemble.
+- Ce qui n'est pas perdu : aucune garantie de D-017 ni de §5.6 (rien de
+  replanifié, rien de réexécuté, aucune confirmation reportée) ; l'état
+  réel est relu par les inventaires.
+
+**Options** :
+
+| Option | Contenu | Schéma | Garanties de reprise | Coût |
+|---|---|---|---|---|
+| **O1. Rien changer** (état actuel) | Limite documentée | Inchangé | Inchangées | Nul |
+| **O2. Colonne `parent_id`** | `parent_id TEXT NULL` (l'`Id` de la parente, sans clé étrangère : la parente n'est pas une ligne) ; `TransactionRecord::parent` ; clé `parent-id` dans `GetTransactionHistory` et dans le journal relu au démarrage | Migration v1 → v2 (`ALTER TABLE … ADD COLUMN`, `user_version` = 2) ; un binaire plus ancien refuse ensuite le fichier sans le modifier (§8.6) | Inchangées : aucun objet parent recréé ; l'enfant rattaché garde `Parent` = `/`, mais son historique dit à quel `UpdateAll` il appartenait | Faible : cœur (migration, tests de migration), service (clé d'historique) |
+| **O3. O2 et parente reconstruite** | Au démarrage, pour un enfant rattaché, un nouvel objet `update-all` (nouveau chemin, même `Id`) dont `Children` liste l'enfant vivant et les enfants terminés lus du journal | Comme O2 | **Modifiées** : un objet parent republié après un arrêt ; `Confirm` sans objet, `Cancel` limité à l'enfant rattaché ; état agrégé en partie lu du journal | Moyen : nouveaux cas de reprise à spécifier et tester |
+| **O4. Parente journalisée** | Une ligne `kind = update-all` | Contraintes `kind`, `backend`, `scope` et « au moins une offre » à relâcher | Modifiées (la parente aurait sa propre reprise) | Élevé ; contredit D-018 et D-031 (« non journalisée ») |
+
+**Recommandation** : O1 tant qu'aucune interface ne lit l'historique
+groupé ; O2, en étape séparée, quand l'écran d'historique en aura besoin.
+O3 et O4 ne sont pas recommandées : elles ajoutent de la reprise pour un
+seul enfant au plus.
+
+### 24.5 Tests (doubles uniquement)
+
+Aucun vrai PackageKit, APT, libflatpak, polkit ni service Cutefish :
+PackageKit simulé (`fakepackagekit.h`) et faux magasin Flatpak
+(`fakestore.h`), service en processus sur un bus privé.
+
+- `store-core-tests` : `StateStoreTest.SeveralTransactionsAreSavedTogetherOrNotAtAll`
+  (tout ou rien : enregistrement invalide, identifiant en double,
+  validation refusée par la garde de validation).
+- `store-transaction-manager-tests` (backends scriptés) :
+  `AParentWithOneChildShowsItsProgress` (fraction et octets de l'enfant,
+  `Cancellable` faux comme lui) ; `AParentWithSeveralChildrenNeverInventsAFraction`
+  (fraction −1 en permanence ; octets à 0 tant qu'un total manque, puis
+  sommés).
+- `store-service-flatpak-tests` (12 tests ajoutés, 30 au total), avec le
+  vrai `FlatpakBackend` et, pour `UpdateAllWithPackageKit.*`, le vrai
+  backend PackageKit :
+  - `FlatpakTransactions.UpdateAllLeavesOutWhatIsAlreadyEngagedAndSaysWhy`,
+    `UpdateAllIsBusyOnlyWhenEveryUpdateIsEngaged`,
+    `TheParentOfOneChildShowsItsProgress` ;
+  - `UpdateAllCoversEveryBackendAndInstallation` (trois enfants, `Parent`,
+    `Children`, `Skipped` vide, plan agrégé identique aux plans publiés et
+    dans l'ordre de `Children`, total de téléchargement, journal des
+    enfants sans la parente, `GetUpdates` et `UpdateCount` à zéro après la
+    réconciliation) ;
+  - `PackageKitRunsBesideFlatpakAndFlatpakOneAtATime` ;
+  - `TheParentAsksForConfirmationOnceEveryPlanIsKnown` (simulation
+    PackageKit retenue : parente `planning`, `Confirm` refusé, échéance de
+    l'enfant à 0, plan partiel sans totaux ; puis une seule
+    `awaiting-confirmation`, échéance de la parente = la plus proche) ;
+  - `AChildConfirmationDelayStartsWhenTheParentAsks` (délai court :
+    l'enfant n'est pas annulé pendant que l'autre planifie, puis tout
+    expire sans rien exécuter) ;
+  - `ALockedPackageKitFailsItsChildWhileFlatpakUpdates` ;
+  - `APartialFailureNeverSucceeds` ;
+  - `CancellingTheParentReachesWhatCanBeCancelled` ;
+  - `TheParentShowsNoFractionForSeveralChildren` ;
+  - `AfterARestartTheChildrenAreRecoveredWithoutTheirParent` (§24.4).
+- **Vérifié par mutation** (règle retirée, test qui échoue) : parente en
+  `awaiting-confirmation` sans attendre tous les plans ; `Confirm` accepté
+  sur une parente en `planning` ; délai démarré sans attendre la parente ;
+  offres engagées non mises de côté ; fraction d'un enfant recopiée sur
+  une parente de plusieurs ; octets sommés sans tous les totaux ;
+  `Cancellable` toujours vrai ; totaux publiés sur un plan incomplet.
+
+### 24.6 Limites et points non vérifiés
+
+- **Rien de réel** : ni packagekitd, ni libflatpak, ni polkit, ni
+  Cutefish Settings ; à vérifier en VM, avec les points de §22.5 et §23.4.
+- Les doubles n'annoncent pas d'octets : l'addition des octets n'est
+  testée qu'avec les backends scriptés du gestionnaire.
+- `Skipped` est l'image du moment de l'appel : une offre laissée de côté
+  dont la transaction finit sans la mettre à jour demande un nouvel
+  `UpdateAll`.
+- Un enfant qui attend sa confirmation sans délai démarré (D-037) attend
+  aussi longtemps qu'un frère planifie ; la planification est bornée par
+  les délais des backends (§5.3), pas par D-019.
+- `Cancellable` d'un enfant reste faux en `queued`, `planning` et
+  `awaiting-confirmation` (§23.4), alors que celui de la parente est vrai
+  dans ces cas, puisqu'un `Cancel` les atteint : écart voulu, la parente
+  dit ce que ferait son `Cancel`.
+- Un chemin de `Children` peut désigner un enfant déjà retiré du bus
+  (5 minutes après sa fin).
+- Le chemin d'erreur du journal atomique n'est testé que dans le cœur ;
+  côté service, l'échec d'écriture (`Internal`, rien de créé) est lu dans
+  le code, pas provoqué.
+- La relation parent/enfant n'est pas conservée après un redémarrage
+  (§24.4, options en attente).
