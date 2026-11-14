@@ -406,6 +406,8 @@ Choix de persistance :
   (temporaire) ; un fichier endommagé ou des données refusées par le schéma,
   `InvalidArgument` ; le reste, `Internal`. `setDurableCommits(false)`
   (`synchronous = NORMAL`) est réservé à un écrivain de cache.
+  `setCommitGuard` (audit final H.2) : appelée avant chaque validation,
+  verrou d'écriture tenu ; un refus annule la transaction (`Cancelled`).
 - **Occupation** : `openTransactionFor(offer)` donne la transaction non
   terminée qui porte déjà sur une offre (erreur `Busy`, A §5.5).
 

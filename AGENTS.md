@@ -86,7 +86,11 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   §21.5). Coexistence avec les mises à jour système de Cutefish Settings
   (SERVICE.md §22) : activité des autres programmes dans PackageKit
   (`activity` de `Backends`), actions deb refusées en `locked` pendant une
-  modification du système, Flatpak non concerné.
+  modification du système, Flatpak non concerné. Audit final : une instance
+  qui s'arrête ne valide plus aucune écriture d'inventaire (garde de
+  validation SQLite, arrêt avant la libération du nom), pour qu'une
+  nouvelle instance ne voie jamais un inventaire plus ancien écrit après le
+  sien (SERVICE.md §21.5, « Arrêt et redémarrage »).
   **Le propriétaire doit encore valider H.2.** Prochaines étapes : H.3
   (transactions), H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
   (moniteur Flatpak), H.7 (catalogue unifié).

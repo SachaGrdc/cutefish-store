@@ -1749,6 +1749,46 @@ Les erreurs SQLite sont classées par le cœur (`errorCodeOf`, `sqlite.h`) :
   remplacé ou supprimé est recréé à la tentative suivante (`StateStore`
   rouvert après un échec d'ouverture).
 
+#### Arrêt et redémarrage (audit final H.2)
+
+**Risque constaté** : `onIdle` libère le nom de bus **avant** la fin de la
+boucle et la destruction de `InventoryIo`. Dès le nom libéré, une nouvelle
+instance B peut être activée, alors que le fil d'E/S de A peut encore
+commencer ou finir une écriture (détaché à la destruction). Le verrou de
+SQLite sérialise les deux transactions, mais n'ordonne pas leur fraîcheur :
+si A valide après B, l'inventaire plus ancien de A remplace celui de B (en
+WAL, une écriture de A qui attend le verrou le prend dès que B a validé).
+Mesuré : sans la correction, les tests ci-dessous trouvent `gimp` (A) à la
+place de `gitg` (B). Le reste était sûr : le fil détaché ne touche qu'à
+`Shared` (possédé par `shared_ptr`), à des copies des données et à sa propre
+connexion, qu'il ferme lui-même ; ses résultats passent par l'`IoJob`
+annulé et par `LoopHandle::post`, qui échoue sans effet quand la boucle a
+disparu ; B a sa propre connexion.
+
+**Correction** :
+
+- `StateStore::setCommitGuard` (cœur) : un *commit hook* SQLite, appelé
+  pendant que la connexion **tient le verrou d'écriture**, juste avant la
+  validation ; s'il refuse, la validation devient une annulation
+  (`SQLITE_CONSTRAINT_COMMITHOOK` → `Cancelled`), rien n'est écrit.
+- `InventoryIo::stop()` : arrêt définitif (travaux en attente abandonnés,
+  écriture non commencée abandonnée, et garde de validation qui refuse) ;
+  appelé par le destructeur et, surtout, par `StoreService` **avant**
+  `onIdle` (donc avant que l'hôte libère le nom), et par `main.cpp` quand
+  le bus disparaît (`stopInventoryWrites`).
+- Pourquoi c'est sûr : B ne peut démarrer qu'après la libération du nom,
+  donc après `stop()`. Une validation de A est soit déjà passée par la
+  garde avant `stop()` — elle tient alors le verrou d'écriture, et toute
+  écriture de B lui est postérieure —, soit refusée. Une écriture de A
+  commencée après une validation de B passe par la garde après `stop()` :
+  refusée. Aucune attente n'est ajoutée : `stop()` ne fait que lever un
+  drapeau et vider la file ; le redémarrage de B n'attend pas A.
+- Une instance qui s'arrête ignore le `Cancelled` de sa propre écriture
+  (rien à signaler ni à retenter).
+
+Ni le journal (synchrone, `synchronous = FULL`) ni le choix
+`synchronous = NORMAL` de l'inventaire ne changent.
+
 #### Thread principal et journal (décision du propriétaire, 14 novembre 2026)
 
 Le journal des transactions reste écrit **de façon synchrone par le thread
@@ -1822,6 +1862,23 @@ pendant la destruction.
   une fois le fichier retiré ; détruire le registre pendant une écriture
   rend la main en moins d'une seconde (le délai d'attente de l'écriture est
   de 3 s) sans rien livrer ensuite ; un registre inactif joint son fil.
+- Arrêt et redémarrage (audit final) : `store-inventory-tests`
+  `AStoppedInstanceNeverWritesOverTheNextOne` (A arrêtée et détruite alors
+  que son fil est retenu avant d'écrire ; B enregistre ; A reprend et
+  n'écrit rien ; aucun fil ni connexion restant, fichier WAL supprimé à la
+  dernière fermeture), `AWriteOfAStoppedInstanceInsideItsTransactionIsRolledBack`
+  (A retenue à sa validation, verrou tenu ; B échoue puis attend ; la
+  validation de A devient une annulation ; B enregistre),
+  `TwoSuccessiveInstancesEachRecordTheirOwnInventory`,
+  `AStoppedWriterTakesNoMoreWork` ; `store-service-multi-tests`
+  `ServiceRestart.*` (service complet : A passe au repos et libère son nom
+  comme `main.cpp`, B démarre aussitôt — sans attendre, < 1 s — et
+  enregistre, puis l'écriture de A reprend : rien de A n'apparaît ; variante
+  où A existe encore, sur une autre connexion). Preuves par mutation : sans
+  la garde ni le contrôle, les deux premiers et la variante échouent
+  (`gimp` au lieu de `gitg`) ; sans l'arrêt au repos, la variante échoue ;
+  la garde seule suffit. `store-core-tests`
+  `ACommitGuardTurnsACommitIntoARollback`.
 
 Synchronisation des tests : chaque attente porte sur une condition ; les
 seules durées fixes sont la durée de tenue d'un verrou (les assertions
@@ -1837,10 +1894,21 @@ n'ordonne rien.
   décider par le propriétaire.
 - Le thread principal écrit toujours le journal (voir « Thread principal et
   journal » ci-dessus, décision du propriétaire).
-- Un fil d'E/S détaché à la destruction peut encore écrire, au plus une
-  fois et pendant au plus son délai d'attente, après la fin du service ; à
-  la sortie du processus, SQLite garantit qu'une transaction inachevée
-  disparaît.
+- Un fil d'E/S détaché à la destruction peut encore travailler un moment
+  (au plus son délai d'attente et une écriture), mais ne valide plus rien
+  (garde de validation). Si le processus se termine pendant ce temps, le
+  fil est tué et SQLite annule la transaction inachevée ; un message de
+  journalisation émis par ce fil pendant la destruction des objets
+  statiques (seulement si la lecture du catalogue échoue à ce moment-là)
+  reste théoriquement possible.
+- Si la transaction d'une ancienne instance tient encore le verrou au
+  démarrage de la nouvelle, la reprise du journal de celle-ci
+  (`recoverAfterRestart`, synchrone, délai de 5 s) l'attend, ou échoue et
+  est journalisée (« journal recovery failed »), sans être retentée. En
+  pratique la transaction d'inventaire ne dure que quelques millisecondes
+  une fois le verrou pris ; observé seulement dans un test qui tenait ce
+  verrou indéfiniment. Changer cela touche aux garanties du journal :
+  hors de ce périmètre.
 - Un écrivain d'un autre processus qui écrirait sans pause pendant plus de
   4 minutes épuiserait le budget : l'erreur est alors signalée, et la
   réconciliation suivante réessaie.
