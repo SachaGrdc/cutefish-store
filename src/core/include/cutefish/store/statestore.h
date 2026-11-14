@@ -7,6 +7,7 @@
 #include <cutefish/store/source.h>
 #include <cutefish/store/transaction.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -106,6 +107,23 @@ public:
     /// journal, SERVICE.md §8).
     static Result<StateStore> open(const std::filesystem::path& path, UnixSeconds now);
 
+    /// Errors of the methods below, by code (H.2): Conflict when another
+    /// connection held the file past the busy timeout (SQLITE_BUSY,
+    /// SQLITE_LOCKED: temporary, the same call may succeed later);
+    /// InvalidArgument for a damaged file or data the schema refuses
+    /// (permanent); Internal otherwise (I/O error, full disk, read-only
+    /// file). A failed write changes nothing.
+
+    /// How long this connection waits for another one's lock before a
+    /// Conflict (5 s by default).
+    void setBusyTimeout(std::chrono::milliseconds timeout) noexcept;
+    /// Whether each commit of this connection waits for the disk
+    /// (synchronous=FULL, the default) or not (NORMAL: in WAL mode the
+    /// file stays consistent after a crash, but the last commits of this
+    /// connection may be lost at a power cut). For a connection that only
+    /// writes what can be rebuilt, such as the installed state (a cache).
+    Result<void> setDurableCommits(bool durable);
+
     StateStore(StateStore&&) noexcept;
     StateStore& operator=(StateStore&&) noexcept;
     ~StateStore() override;
@@ -117,6 +135,11 @@ public:
     /// and installation; offers are unique.
     Result<void> replaceInstalled(BackendKind backend, Scope scope, std::span<const InstalledItem> items,
                                   UnixSeconds now);
+    /// The same for several installations of one backend, in one SQLite
+    /// transaction (H.2): every listed scope is replaced, or none is. Each
+    /// item must belong to `backend` and to one of `scopes`.
+    Result<void> replaceInstalled(BackendKind backend, std::span<const Scope> scopes,
+                                  std::span<const InstalledItem> items, UnixSeconds now);
     /// When replaceInstalled() last ran for this backend and installation.
     Result<std::optional<UnixSeconds>> lastReconciled(BackendKind backend, Scope scope) const;
 

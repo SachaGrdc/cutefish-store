@@ -519,10 +519,17 @@ Result<StateStore> StateStore::open(const std::filesystem::path& path, UnixSecon
 Result<void> StateStore::replaceInstalled(BackendKind backend, Scope scope, std::span<const InstalledItem> items,
                                           UnixSeconds now)
 {
+    const Scope one[] = {scope};
+    return replaceInstalled(backend, std::span<const Scope>(one), items, now);
+}
+
+Result<void> StateStore::replaceInstalled(BackendKind backend, std::span<const Scope> scopes,
+                                          std::span<const InstalledItem> items, UnixSeconds now)
+{
     std::vector<std::string_view> ids;
     ids.reserve(items.size());
     for (const InstalledItem& item : items) {
-        if (item.backend() != backend || item.scope() != scope)
+        if (item.backend() != backend || std::find(scopes.begin(), scopes.end(), item.scope()) == scopes.end())
             return Error::invalidArgument("installed item " + item.offer().str() + " belongs to another backend or "
                                           "installation");
         ids.push_back(item.offer().str());
@@ -537,15 +544,28 @@ Result<void> StateStore::replaceInstalled(BackendKind backend, Scope scope, std:
     auto del = Statement::prepare(d->db, "DELETE FROM installed WHERE backend = ?1 AND scope = ?2");
     if (!del)
         return std::move(del).error();
-    del->bind(1, toString(backend)).bind(2, toString(scope));
-    if (auto ok = del->run(); !ok)
-        return ok;
+    for (const Scope scope : scopes) {
+        del->bind(1, toString(backend)).bind(2, toString(scope));
+        if (auto ok = del->run(); !ok)
+            return ok;
+    }
     for (const InstalledItem& item : items)
         if (auto ok = insertInstalled(d->db, item); !ok)
             return ok;
-    if (auto ok = setMetaInt(d->db, reconciledKey(backend, scope), now); !ok)
-        return ok;
+    for (const Scope scope : scopes)
+        if (auto ok = setMetaInt(d->db, reconciledKey(backend, scope), now); !ok)
+            return ok;
     return tx->commit();
+}
+
+void StateStore::setBusyTimeout(std::chrono::milliseconds timeout) noexcept
+{
+    sqlite3_busy_timeout(d->db.handle(), static_cast<int>(timeout.count()));
+}
+
+Result<void> StateStore::setDurableCommits(bool durable)
+{
+    return d->db.exec(durable ? "PRAGMA synchronous = FULL" : "PRAGMA synchronous = NORMAL");
 }
 
 Result<std::optional<UnixSeconds>> StateStore::lastReconciled(BackendKind backend, Scope scope) const

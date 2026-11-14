@@ -290,6 +290,77 @@ TEST_F(StateStoreTest, InvalidInventoriesChangeNothing)
     EXPECT_EQ(*store.lastReconciled(BackendKind::Flatpak, Scope::User), std::optional<UnixSeconds>(kT0));
 }
 
+TEST_F(StateStoreTest, SeveralInstallationsAreReplacedTogetherOrNotAtAll)
+{
+    auto store = open();
+    const Scope both[] = {Scope::User, Scope::System};
+    const std::vector<InstalledItem> first{flatpakItem("A"), flatpakItem("A", Scope::System)};
+    ASSERT_TRUE(store.replaceInstalled(BackendKind::Flatpak, both, first, kT0));
+    EXPECT_EQ(store.items(BackendKind::Flatpak)->size(), 2u);
+    EXPECT_EQ(*store.lastReconciled(BackendKind::Flatpak, Scope::System), std::optional<UnixSeconds>(kT0));
+    EXPECT_EQ(*store.lastReconciled(BackendKind::Flatpak, Scope::User), std::optional<UnixSeconds>(kT0));
+
+    // An item outside the listed scopes refuses the whole inventory.
+    const Scope userOnly[] = {Scope::User};
+    const std::vector<InstalledItem> bad{flatpakItem("B"), flatpakItem("B", Scope::System)};
+    EXPECT_FALSE(store.replaceInstalled(BackendKind::Flatpak, userOnly, bad, kT0 + 1));
+    // A write that fails inside the SQLite transaction (a duplicate offer
+    // reaching the primary key would; here the lock of another connection)
+    // leaves both scopes as they were.
+    sqlite3* holder = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    store.setBusyTimeout(std::chrono::milliseconds(10));
+    const std::vector<InstalledItem> second{flatpakItem("C"), flatpakItem("C", Scope::System)};
+    auto locked = store.replaceInstalled(BackendKind::Flatpak, both, second, kT0 + 2);
+    ASSERT_FALSE(locked);
+    sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
+    sqlite3_close(holder);
+    const auto items = store.items(BackendKind::Flatpak);
+    ASSERT_EQ(items->size(), 2u);
+    for (const InstalledItem& i : *items)
+        EXPECT_NE(i.offer().str().find("org.example.A"), std::string::npos);
+    EXPECT_EQ(*store.lastReconciled(BackendKind::Flatpak, Scope::User), std::optional<UnixSeconds>(kT0));
+    // Once the lock is gone, the same call goes through.
+    EXPECT_TRUE(store.replaceInstalled(BackendKind::Flatpak, both, second, kT0 + 3));
+    EXPECT_EQ(store.items(BackendKind::Flatpak)->size(), 2u);
+}
+
+TEST_F(StateStoreTest, ErrorsTellALockFromADamagedFile)
+{
+    auto store = open();
+    // Another connection holds the write lock past the busy timeout:
+    // Conflict, temporary.
+    sqlite3* holder = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &holder), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    store.setBusyTimeout(std::chrono::milliseconds(10));
+    const std::vector<InstalledItem> user{flatpakItem("A")};
+    auto r = store.replaceInstalled(BackendKind::Flatpak, Scope::User, user, kT0);
+    ASSERT_FALSE(r);
+    EXPECT_EQ(r.error().code(), ErrorCode::Conflict) << r.error().message();
+    auto t = store.saveTransaction(finishedRecord(1, kT0));
+    ASSERT_FALSE(t);
+    EXPECT_EQ(t.error().code(), ErrorCode::Conflict) << t.error().message();
+    sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
+    sqlite3_close(holder);
+    EXPECT_TRUE(store.replaceInstalled(BackendKind::Flatpak, Scope::User, user, kT0));
+
+    // Commits that do not wait for the disk are still commits.
+    ASSERT_TRUE(store.setDurableCommits(false));
+    EXPECT_TRUE(store.replaceInstalled(BackendKind::Flatpak, Scope::User, {}, kT0 + 1));
+    EXPECT_EQ(rawQuery(path, "SELECT count(*) FROM installed"), "0");
+
+    // A file that is not a database: InvalidArgument, permanent.
+    {
+        std::ofstream out(dir / "junk.sqlite", std::ios::binary);
+        out << std::string(4096, 'x');
+    }
+    auto junk = StateStore::open(dir / "junk.sqlite", kT0);
+    ASSERT_FALSE(junk);
+    EXPECT_EQ(junk.error().code(), ErrorCode::InvalidArgument) << junk.error().message();
+}
+
 TEST_F(StateStoreTest, ReadersSeeCommittedChanges)
 {
     auto store = open();

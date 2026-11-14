@@ -2,6 +2,22 @@
 
 namespace cutefish::store::detail {
 
+ErrorCode errorCodeOf(int sqliteResult) noexcept
+{
+    switch (sqliteResult & 0xFF) {
+    case SQLITE_BUSY:
+    case SQLITE_LOCKED:
+        return ErrorCode::Conflict;
+    case SQLITE_CORRUPT:
+    case SQLITE_NOTADB:
+    case SQLITE_CONSTRAINT:
+    case SQLITE_MISMATCH:
+        return ErrorCode::InvalidArgument;
+    default:
+        return ErrorCode::Internal;
+    }
+}
+
 Result<Database> Database::open(const std::string& uri, int flags)
 {
     sqlite3* db = nullptr;
@@ -26,17 +42,18 @@ void Database::close() noexcept
 Result<void> Database::exec(const char* sql)
 {
     char* message = nullptr;
-    if (sqlite3_exec(m_db, sql, nullptr, nullptr, &message) != SQLITE_OK) {
+    if (const int rc = sqlite3_exec(m_db, sql, nullptr, nullptr, &message); rc != SQLITE_OK) {
         std::string text = message ? message : "unknown error";
         sqlite3_free(message);
-        return Error::internal("SQLite: " + text);
+        return Error(errorCodeOf(rc), "SQLite: " + text);
     }
     return {};
 }
 
-Error Database::error(std::string_view context, ErrorCode code) const
+Error Database::error(std::string_view context, std::optional<ErrorCode> code) const
 {
-    return Error(code, std::string(context) + ": " + (m_db ? sqlite3_errmsg(m_db) : "no database"));
+    const ErrorCode c = code ? *code : (m_db ? errorCodeOf(sqlite3_extended_errcode(m_db)) : ErrorCode::Internal);
+    return Error(c, std::string(context) + ": " + (m_db ? sqlite3_errmsg(m_db) : "no database"));
 }
 
 Result<std::int64_t> Database::queryInt(const char* sql)
@@ -66,7 +83,7 @@ Result<void> Statement::run()
     Result<void> result;
     if (rc != SQLITE_DONE) {
         const char* message = sqlite3_errmsg(sqlite3_db_handle(m_stmt));
-        result = Error::internal(std::string("SQLite: ") + (message ? message : "step failed"));
+        result = Error(errorCodeOf(rc), std::string("SQLite: ") + (message ? message : "step failed"));
     }
     reset();
     return result;

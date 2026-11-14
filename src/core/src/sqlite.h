@@ -8,11 +8,22 @@
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 namespace cutefish::store::detail {
+
+/// The ErrorCode of an SQLite result code (H.2), so that callers can tell
+/// what may go away from what will not:
+/// - SQLITE_BUSY, SQLITE_LOCKED (another connection holds the file, a
+///   shared-cache table lock): Conflict, temporary;
+/// - SQLITE_CORRUPT, SQLITE_NOTADB (a damaged file), SQLITE_CONSTRAINT,
+///   SQLITE_MISMATCH (data that breaks the schema): InvalidArgument,
+///   permanent until the file or the data change;
+/// - anything else (I/O, full disk, read-only file, misuse): Internal.
+ErrorCode errorCodeOf(int sqliteResult) noexcept;
 
 class Database
 {
@@ -41,8 +52,9 @@ public:
 
     /// Runs one or more statements without results.
     Result<void> exec(const char* sql);
-    /// Error with the last SQLite message, the given context and code.
-    Error error(std::string_view context, ErrorCode code = ErrorCode::Internal) const;
+    /// Error with the last SQLite message and the given context. Its code is
+    /// `code` when given, errorCodeOf() the last result otherwise.
+    Error error(std::string_view context, std::optional<ErrorCode> code = std::nullopt) const;
     /// First column of the first row as an integer.
     Result<std::int64_t> queryInt(const char* sql);
 
