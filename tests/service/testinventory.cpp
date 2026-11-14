@@ -27,7 +27,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -181,7 +183,7 @@ protected:
     /// fixture catalogue (generation 1), and wires counting callbacks.
     void start(bool packagekit = true, bool flatpak = true)
     {
-        m_backends = std::make_unique<Backends>(m_dir / "catalog.sqlite", statePath());
+        m_backends = std::make_unique<Backends>(m_dir / "catalog.sqlite", statePath(), m_io);
         if (packagekit) {
             auto b = std::make_unique<FakeBackend>(m_loop, BackendKind::PackageKit);
             m_pk = b.get();
@@ -279,6 +281,7 @@ protected:
 
     catalogfixture::TempDir m_dir;
     base::EventLoop m_loop;
+    InventoryIo::Options m_io;
     std::vector<InstalledItem> m_pkInstalled;
     std::vector<InstalledItem> m_fpInstalled;
     std::vector<AvailableUpdate> m_pkUpdates;
@@ -707,33 +710,190 @@ TEST_F(InventoryFixture, AReconciliationWaitsForALockHeldByAnotherConnection)
     ASSERT_EQ(sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(holder);
 
-    // Released within the busy timeout: both writes go through.
+    // Released: both writes go through, at once or at their next attempt.
     ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1 && m_counts[1].installed == 1; }));
     EXPECT_EQ(offers(recorded()), (std::vector<std::string>{kGimpFlathub, "packagekit:gimp"}));
     EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
 }
 
-TEST_F(InventoryFixture, AWriteDroppedAfterTheBusyTimeoutIsTriedAgain)
+// --- H.2 finalisation: writes that never block, and never get lost ---------------------
+
+/// Another connection holding the write lock of state.sqlite, as the main
+/// thread's journal or another process would.
+class Lock
 {
-    // Slow (about 6 s): the lock is held past the busy timeout of
-    // state.sqlite (5 s), so the first attempt fails with SQLITE_BUSY. Before
-    // H.2 the inventory was then lost until the next change; now it is
-    // written by the next attempt, once the lock is released.
+public:
+    explicit Lock(const std::filesystem::path& path)
+    {
+        EXPECT_EQ(sqlite3_open(path.c_str(), &m_db), SQLITE_OK);
+        EXPECT_EQ(sqlite3_exec(m_db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+    ~Lock() { release(); }
+    void release()
+    {
+        if (!m_db)
+            return;
+        sqlite3_exec(m_db, "COMMIT", nullptr, nullptr, nullptr);
+        sqlite3_close(m_db);
+        m_db = nullptr;
+    }
+
+private:
+    sqlite3* m_db = nullptr;
+};
+
+void createState(const std::filesystem::path& path)
+{
+    auto s = unwrap(StateStore::open(path, 1));
+}
+
+TEST_F(InventoryFixture, AWriteNeverBlocksTheMainLoop)
+{
+    m_io.busyTimeout = 20ms;
+    m_io.retryDelays = std::vector<std::chrono::milliseconds>(200, 20ms);
     m_pkInstalled = {debItem("gimp")};
     start(true, false);
-    { auto s = unwrap(StateStore::open(statePath(), 1)); }
-    sqlite3* holder = nullptr;
-    ASSERT_EQ(sqlite3_open(statePath().c_str(), &holder), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    createState(statePath());
+    Lock lock(statePath());
+    int ticks = 0;
+    const int timer = m_loop.startTimer(1ms, true, [&] { ++ticks; });
     checkAll();
-    ASSERT_TRUE(spin([&] { return m_pk->installedQueries() == 1; }));
-    idle(6s); // longer than the busy timeout: the first attempt has failed
+    // Each new attempt is scheduled by a timer of this loop: several
+    // attempts mean the loop kept running while the writes failed.
+    ASSERT_TRUE(spin([&] { return m_backends->io().writes() >= 4; }));
+    m_loop.stopTimer(timer);
+    EXPECT_GT(ticks, 0);
     EXPECT_EQ(m_counts[0].installed, 0);
-    ASSERT_EQ(sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
-    sqlite3_close(holder);
+    EXPECT_TRUE(m_backends->inventory(BackendKind::PackageKit)->recordError().empty()); // still trying
+    lock.release();
     ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1; }));
-    EXPECT_EQ(m_pk->installedQueries(), 1); // the same answer, written again
     EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gimp"});
+    EXPECT_EQ(m_pk->installedQueries(), 1); // tried again from the same answer
+}
+
+TEST_F(InventoryFixture, ATemporaryFailureIsRetriedAndAppliedOnce)
+{
+    m_io.busyTimeout = 10ms;
+    m_io.retryDelays = std::vector<std::chrono::milliseconds>(500, 10ms);
+    m_pkInstalled = {debItem("gimp"), debItem("gitg")};
+    m_fpInstalled = {flatpakItem(Scope::User, "flathub", "app/org.gimp.GIMP/x86_64/stable")};
+    start();
+    createState(statePath());
+    {
+        Lock lock(statePath());
+        checkAll();
+        // Both inventories failed at least once (first attempts, then retries).
+        ASSERT_TRUE(spin([&] { return m_backends->io().writes() >= 4; }));
+    }
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1 && m_counts[1].installed == 1; }));
+    EXPECT_EQ(offers(recorded()),
+              (std::vector<std::string>{kGimpFlathub, "packagekit:gimp", "packagekit:gitg"}));
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+    // Applied once: a reconciliation of the same state changes nothing and
+    // tells nothing; the rows are there once.
+    m_pk->emitChange({.installed = true});
+    m_pk->setInstalled({debItem("gimp"), debItem("gitg"), debItem("libfoo1")});
+    m_pk->emitChange({.installed = true}); // runs after the first: proves it ended
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 2; }));
+    EXPECT_EQ(m_counts[1].installed, 1);
+    EXPECT_EQ(rawQuery(statePath(), "SELECT count(*) FROM installed"), "4");
+}
+
+TEST_F(InventoryFixture, AWriteThatFailsEveryAttemptIsReportedAndStaysRecoverable)
+{
+    m_io.busyTimeout = 10ms;
+    m_io.retryDelays = {10ms, 10ms}; // three attempts
+    m_pkInstalled = {debItem("gimp")};
+    start(true, false);
+    createState(statePath());
+    Inventory* inventory = m_backends->inventory(BackendKind::PackageKit);
+    {
+        Lock lock(statePath());
+        checkAll();
+        ASSERT_TRUE(spin([&] { return !inventory->recordError().empty(); }));
+        EXPECT_EQ(m_backends->io().writes(), 3);
+        // Bounded: no other attempt while the file stays locked.
+        idle(100ms);
+        EXPECT_EQ(m_backends->io().writes(), 3);
+        EXPECT_NE(inventory->recordError().find("locked"), std::string::npos) << inventory->recordError();
+        EXPECT_EQ(m_counts[0].installed, 0);
+        // Reported as a change of the backend's state (the Backends property).
+        EXPECT_EQ(m_counts[0].availability, 2);
+    }
+    // The next reconciliation (a change, a Refresh) records it and clears
+    // the error.
+    m_pk->emitChange({.installed = true});
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1; }));
+    EXPECT_TRUE(inventory->recordError().empty());
+    EXPECT_EQ(m_counts[0].availability, 3);
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gimp"});
+}
+
+TEST_F(InventoryFixture, APermanentErrorIsReportedAtOnceWithoutRetrying)
+{
+    m_io.retryDelays = std::vector<std::chrono::milliseconds>(10, 10ms);
+    m_pkInstalled = {debItem("gimp")};
+    {
+        std::ofstream junk(statePath(), std::ios::binary);
+        junk << std::string(4096, 'x'); // not a database: permanent
+    }
+    start(true, false);
+    Inventory* inventory = m_backends->inventory(BackendKind::PackageKit);
+    checkAll();
+    ASSERT_TRUE(spin([&] { return !inventory->recordError().empty(); }));
+    EXPECT_NE(inventory->recordError().find("not a state database"), std::string::npos) << inventory->recordError();
+    idle(100ms);
+    EXPECT_EQ(m_backends->io().writes(), 1);
+    EXPECT_EQ(m_counts[0].installed, 0);
+
+    // Once the file is fixed (moved aside, as the host may), it recovers.
+    std::filesystem::remove(statePath());
+    checkAll();
+    ASSERT_TRUE(spin([&] { return m_counts[0].installed == 1; }));
+    EXPECT_TRUE(inventory->recordError().empty());
+    EXPECT_EQ(offers(recorded()), std::vector<std::string>{"packagekit:gimp"});
+}
+
+TEST_F(InventoryFixture, DestroyingTheRegistryDuringAWriteDoesNotWaitForIt)
+{
+    m_io.busyTimeout = 3s; // the write in progress waits this long
+    m_pkInstalled = {debItem("gimp")};
+    start(true, false);
+    createState(statePath());
+    Lock lock(statePath());
+    Inventory* inventory = m_backends->inventory(BackendKind::PackageKit);
+    inventory->check();
+    ASSERT_TRUE(spin([&] { return m_backends->io().writes() == 1; })); // the write is waiting for the lock
+    // From now on, nothing may be told any more.
+    bool calledAfter = false;
+    inventory->onInstalledChanged = [&](const std::vector<std::string>&) { calledAfter = true; };
+    inventory->onAvailabilityChanged = [&] { calledAfter = true; };
+    inventory->onUpdatesChanged = [&] { calledAfter = true; };
+    const std::shared_future<void> stopped = m_backends->io().stopped();
+    const auto before = std::chrono::steady_clock::now();
+    m_backends.reset();
+    m_pk = nullptr;
+    const auto took = std::chrono::steady_clock::now() - before;
+    // It would take the 3 s of the busy timeout if it waited for the write.
+    EXPECT_LT(took, 1s);
+    // The thread ends on its own (its write fails), its result dropped.
+    lock.release();
+    ASSERT_EQ(stopped.wait_for(10s), std::future_status::ready);
+    idle(50ms);
+    EXPECT_FALSE(calledAfter);
+    EXPECT_EQ(rawQuery(statePath(), "PRAGMA integrity_check"), "ok");
+}
+
+TEST_F(InventoryFixture, DestroyingAnIdleRegistryEndsItsThread)
+{
+    start();
+    checkAll();
+    ASSERT_TRUE(spin([&] { return bothReconciled(); }));
+    const std::shared_future<void> stopped = m_backends->io().stopped();
+    m_backends.reset();
+    m_pk = m_fp = nullptr;
+    // Joined: already ended when the destructor returned.
+    EXPECT_EQ(stopped.wait_for(0s), std::future_status::ready);
 }
 
 } // namespace
