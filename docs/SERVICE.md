@@ -1107,10 +1107,12 @@ choix d'une offre : la séparation demandée existe dans le code, il reste à
 
 Chaque étape compile, a ses tests, ne dépend que des précédentes et peut être
 validée seule. **État** : A à F faites et validées ; F2 implémentée et
-testée contre le PackageKit simulé (§18), à valider par le propriétaire ; le
-backend Flatpak est implémenté (§19) et **raccordé au service** par un
-registre multi-backends (H.1, §20) ; l'intégration multi-backends des
-lectures, des mises à jour et des sources (H.2–H.8) reste à faire. Aucune
+testée contre le PackageKit simulé (§18), sa validation formelle par le
+propriétaire restant en attente ; le backend Flatpak (G, §19) et son audit
+de durcissement (G.1) sont faits et validés ; il est **raccordé au service**
+par un registre multi-backends (H.1, §20, validée) et un inventaire unifié
+(H.2, §21 et §22, validée). L'intégration multi-backends des transactions,
+des mises à jour groupées et des sources (H.3–H.8) suit. Aucune
 étape n'exige de commande root sur la machine de développement ; les étapes
 marquées « VM » se testent dans une machine virtuelle.
 
@@ -1419,12 +1421,12 @@ seule l'erreur locale est publiée (D-028).
 Le backend Flatpak est implémenté dans `src/backend-flatpak/`
 (`store-backend-flatpak`). Il respecte P-006 : la bibliothèque ne dépend ni
 de Cutefish ni de D-Bus, et le cœur (`store-core`) ne dépend pas de
-libflatpak. Il n'est **pas encore raccordé au service** : l'intégration
-multi-backends (choix du backend, `Inventory` et `TransactionManager` sur
-deux backends) est l'étape suivante. Il n'existe donc pas encore de méthode
-D-Bus nouvelle : `Install`, `Remove`, `Update`, `UpdateAll`, `GetUpdates`,
-`GetPermissions` et `ListSources` couvrent déjà Flatpak une fois le backend
-raccordé.
+libflatpak. Il a été écrit d'abord comme bibliothèque autonome (G), puis
+durci (G.1, ci-dessous) ; il est depuis **raccordé au service** (H.1, §20 ;
+inventaire H.2, §21). Aucune méthode D-Bus nouvelle n'a été nécessaire :
+`Install`, `Remove`, `Update`, `UpdateAll`, `GetUpdates` et `ListSources`
+couvrent Flatpak ; `GetPermissions`, `EnableSource` et `DisableSource`
+restent hors de l'API (D-022, H.5).
 
 ### Composants
 

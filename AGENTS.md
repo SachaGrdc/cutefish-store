@@ -50,9 +50,10 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | E | Service D-Bus v0.1 en lecture | `ed56113`, `d017c02` |
 | F | Backend PackageKit, intégration en lecture, D-028, D-029 | `59084c2` … `40d3c7b` |
 | F2 | Gestionnaire de transactions (`Install`, `Remove`, `Update`, `UpdateAll`) | `5ef279f`, tests F2 `6329b90` … `8b00b7a` |
-| G | Backend Flatpak autonome (`store-backend-flatpak`) | `feat(backend-flatpak): …` |
-| H.1 | Registre multi-backends et sélection (service) | `feat(service): …` |
-| H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `fix(state): …`, `feat(service): …`, `feat(backend-packagekit): …` |
+| G | Backend Flatpak autonome (`store-backend-flatpak`) | `c052eb9`, `565f520` |
+| G.1 | Audit et durcissement du backend Flatpak (refus des ajouts de remote, ressources) | `41dbbd8` … `9380041` |
+| H.1 | Registre multi-backends et sélection (service) | `81dfa71` … `66492a1` |
+| H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `3166ea9` … `a9e5f09` |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -63,17 +64,18 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   `UpdateAll` (dont l'échec partiel) ont désormais des tests. Les
   transactions réelles, le dialogue polkit, le verrou dpkg et debconf
   restent à vérifier en VM.
-- **G** : le backend Flatpak est implémenté comme bibliothèque autonome
-  (SERVICE.md §19), testé sur un faux magasin (25 tests). Il refuse tout
-  ajout de remote déclenché par une transaction (P-011), filtre les remotes
-  désactivés du catalogue, et libère ses `GError`.
-- **H.1** : le service porte désormais plusieurs backends (SERVICE.md §20) :
+- **G et G.1** (validées) : le backend Flatpak est implémenté comme
+  bibliothèque autonome (SERVICE.md §19), testé sur un faux magasin
+  (25 tests). L'audit G.1 l'a durci : il refuse tout ajout de remote
+  déclenché par une transaction (P-011), filtre les remotes désactivés du
+  catalogue, et libère ses `GError`.
+- **H.1** (validée) : le service porte désormais plusieurs backends (SERVICE.md §20) :
   registre `Backends` (un `Backend` + un `Inventory` par `BackendKind`),
   sélection par `offer_id` sans bascule silencieuse, propriété D-Bus
   `Backends`, sémantique `degraded` seulement quand tous les backends sont
   inutilisables, et construction optionnelle de PackageKit et Flatpak dans
   `main.cpp` (`--flatpak`, compatible sans libflatpak).
-- **H.2** : inventaire unifié (SERVICE.md §21) : normalisation de ce que
+- **H.2** (validée) : inventaire unifié (SERVICE.md §21) : normalisation de ce que
   chaque backend liste (offres étrangères, doublons), `GetUpdates` et
   `UpdateCount` tirés d'une seule liste triée par `offer_id`, signaux sans
   doublon, un thread d'E/S partagé par les inventaires avec nouvelle
@@ -91,9 +93,8 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   validation SQLite, arrêt avant la libération du nom), pour qu'une
   nouvelle instance ne voie jamais un inventaire plus ancien écrit après le
   sien (SERVICE.md §21.5, « Arrêt et redémarrage »).
-  **Le propriétaire doit encore valider H.2.** Prochaines étapes : H.3
-  (transactions), H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
-  (moniteur Flatpak), H.7 (catalogue unifié).
+  Prochaines étapes : H.3 (transactions), H.4 (`UpdateAll`), H.5 (sources
+  et API D-Bus), H.6 (moniteur Flatpak), H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
