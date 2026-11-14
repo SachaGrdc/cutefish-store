@@ -41,6 +41,8 @@ Renvois : « A §x.y » désigne une section d'[ARCHITECTURE.md](ARCHITECTURE.md
 14. [Écarts avec le cœur actuel](#14-écarts-avec-le-cœur-actuel)
 15. [Plan d'implémentation](#15-plan-dimplémentation)
 16. [Service v0.1 (étape E)](#16-service-v01-étape-e)
+17. à 24. : étapes F à H.4 (voir les titres)
+25. [Sources et API D-Bus (H.5)](#25-sources-et-api-d-bus-h5)
 
 ---
 
@@ -362,7 +364,7 @@ la mesure l'exige].
 | `Update` | `as offer_ids, a{sv} options` → `o` | Idem ; `InvalidArgs` si les offres relèvent de plusieurs backends ou périmètres | PackageKit : `system-update` [MESURÉ] ; Flatpak système : `app-update`, et **`app-install`** si un nouveau runtime est nécessaire [CODE, prototype 2] ; ce runtime est montré dans le plan et confirmé (D-014, §7.3) | Idem |
 | `UpdateAll` | `a{sv} options` → `o` | `NotReady` | Celles des mises à jour concernées | Idem |
 | `Refresh` | `a{sv} options` (`force` `b`, `repositories` `b`, D-028) → `o` | — | PackageKit : `system-sources-refresh` (`yes` pour l'utilisateur actif [MESURÉ]) ; Flatpak système : `appstream-update` (`yes`) | Idem |
-| `EnableSource`, `DisableSource` | `s source_id` → `o` | `NotFound`, `NotAllowed` (sources en lecture seule) | Aucune (remote Flathub utilisateur, P-011) | Idem |
+| `EnableSource`, `DisableSource`, `RemoveSource` (H.5, §25) | `s source_id` → `o` | `NotFound`, `NotAllowed` (installation système, source utilisée), `NotSupported` (PackageKit, D-039), `Busy` | Aucune (remotes de l'installation utilisateur) | Idem |
 
 Écart avec A §5.2 : `UpdateAll` crée **une transaction par backend et par
 périmètre**, regroupées sous une transaction parente de type `update-all`
@@ -1118,9 +1120,10 @@ propriétaire restant en attente ; le backend Flatpak (G, §19) et son audit
 de durcissement (G.1) sont faits et validés ; il est **raccordé au service**
 par un registre multi-backends (H.1, §20, validée) et un inventaire unifié
 (H.2, §21 et §22, validée). Les transactions multi-backends (H.3, §23)
-sont validées ; `UpdateAll` multi-backends (H.4, §24) est implémenté et
-testé sur doubles, à valider. Les sources, le moniteur Flatpak et le
-catalogue unifié (H.5–H.8) suivent. Aucune
+sont validées, ainsi que `UpdateAll` multi-backends (H.4, §24). Les
+sources et leur API (H.5, §25) sont implémentées et testées sur doubles,
+à valider ; l'ajout de Flathub (H.5d) attend P-011. Le moniteur Flatpak
+et le catalogue unifié (H.6–H.8) suivent. Aucune
 étape n'exige de commande root sur la machine de développement ; les étapes
 marquées « VM » se testent dans une machine virtuelle.
 
@@ -1433,8 +1436,8 @@ libflatpak. Il a été écrit d'abord comme bibliothèque autonome (G), puis
 durci (G.1, ci-dessous) ; il est depuis **raccordé au service** (H.1, §20 ;
 inventaire H.2, §21). Aucune méthode D-Bus nouvelle n'a été nécessaire :
 `Install`, `Remove`, `Update`, `UpdateAll`, `GetUpdates` et `ListSources`
-couvrent Flatpak ; `GetPermissions`, `EnableSource` et `DisableSource`
-restent hors de l'API (D-022, H.5).
+couvrent Flatpak ; `EnableSource`, `DisableSource` et `RemoveSource`
+viennent avec H.5 (§25) ; `GetPermissions` reste hors de l'API (D-022).
 
 ### Composants
 
@@ -1476,7 +1479,8 @@ deux threads pourra être rétablie à l'intégration sans changer le contrat.
   `FALSE` ; toute transaction qui tenterait d'ajouter un dépôt (une
   dépendance introuvable dans les remotes configurés) est refusée avec une
   erreur explicite `NotAllowed`, sans rien configurer ni déployer. Seul
-  `addRemote()`, appelé sur consentement explicite (P-011), ajoute un dépôt.
+  `addRemoteFromFile()` (H.5, depuis un `.flatpakrepo` avec sa clé,
+  D-040), qui n'est appelé par rien encore, ajoute un dépôt.
 - **Erreurs et ressources** : chaque `GError` est traduit puis libéré
   (`g_clear_error`), y compris sur les retours précoces de la double passe ;
   l'URL d'un remote (`flatpak_remote_get_url`, transfert complet) est libérée.
@@ -1509,10 +1513,9 @@ déclarent. Le résumé de risque (`risk`) reste du ressort du service
   fabriquées.
 - **Raccordé au service** (H.1, §20) : le backend est enregistré dans le
   registre, son inventaire est maintenu et la propriété `Backends` le montre.
-  Restent hors de l'API : `sources()` et `EnableSource`/`DisableSource`
-  (D-022), et l'ajout de la remote Flathub (P-011, encore proposée) ne se fait
-  jamais silencieusement : `addRemote` n'est appelé que sur consentement
-  explicite.
+  Les sources sont exposées par H.5 (§25) ; l'ajout de la remote Flathub
+  (P-011, encore proposée) n'est pas raccordé, et l'ajout par URL seule a
+  été retiré (D-040).
 - **Surveillance des changements externes** : `setChangeListener` ne pose pas
   de moniteur d'installation (`flatpak_installation_create_monitor` demande
   un `GMainContext`). Sans moniteur, un `flatpak install/remove` fait en
@@ -1594,11 +1597,14 @@ construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
 - **Fait (H.2)** : inventaire unifié, §21.
 - **Fait (H.3)** : transactions Flatpak de bout en bout, à côté de
   PackageKit, §23.
-- **Fait (H.4, à valider)** : `UpdateAll` multi-backends, §24.
-- **À faire (H.5–H.8)** : gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
-  `GetPermissions`), moniteur de changements externes Flatpak, et catalogue
-  unifié (l'indexeur lit déjà les deux sources ; l'agrégation fine est à
-  vérifier).
+- **Fait (H.4)** : `UpdateAll` multi-backends, §24.
+- **Fait (H.5, à valider)** : sources et API D-Bus (`ListSources` tiré
+  des backends, `EnableSource`, `DisableSource`, `RemoveSource`), §25.
+  `AddSource` n'est pas prévu en H.5 (D-040) ; `GetPermissions` reste hors
+  de l'API.
+- **À faire (H.5d, H.6–H.8)** : ajout de Flathub (après P-011), moniteur
+  de changements externes Flatpak, et catalogue unifié (l'indexeur lit
+  déjà les deux sources ; l'agrégation fine est à vérifier).
 
 ## 21. Inventaire unifié multi-backends (H.2)
 
@@ -2192,8 +2198,9 @@ d'une transaction terminée à son état installé, et des compteurs atomiques.
 - Une transaction Flatpak interrompue par l'arrêt du service peut avoir
   été menée à terme ou non par libflatpak ; l'état réel est relu par
   l'inventaire au démarrage suivant, sans être déduit du journal.
-- Sources et `GetPermissions` (H.5), moniteur Flatpak (H.6) et catalogue
-  unifié (H.7) restent hors périmètre ; `UpdateAll` multi-backends : §24.
+- Sources (H.5, §25), `GetPermissions`, moniteur Flatpak (H.6) et
+  catalogue unifié (H.7) restent hors périmètre ; `UpdateAll`
+  multi-backends : §24.
 
 ## 24. `UpdateAll` multi-backends (H.4)
 
@@ -2374,3 +2381,165 @@ PackageKit simulé (`fakepackagekit.h`) et faux magasin Flatpak
   le code, pas provoqué.
 - La relation parent/enfant n'est pas conservée après un redémarrage
   (§24.4, options en attente).
+
+## 25. Sources et API D-Bus (H.5)
+
+H.5 expose la gestion des sources dans les limites fixées par le
+propriétaire (DECISIONS D-039 à D-044). **Aucune source n'est ajoutée** :
+l'ajout de Flathub (H.5d) attend la décision sur P-011, qui reste
+proposée ; aucun fichier `flathub.flatpakrepo` n'est livré.
+
+### 25.1 Ce que permettent les API réelles [CODE, en-têtes et symboles installés]
+
+| Opération | PackageKit 1.3.1 (backend APT) | libflatpak 1.16.6 |
+|---|---|---|
+| Lister | `GetRepoList` → `RepoDetail(id, description, enabled)` | `flatpak_installation_list_remotes`, `get_disabled`, `get_gpg_verify`, `get_url` |
+| Ajouter | **Impossible** : pas de `RepoAdd`, `RepoSetData` non annoncé par le backend APT | `flatpak_remote_new_from_file` (contenu d'un `.flatpakrepo`), `installation_add_remote` |
+| Activer, désactiver | `RepoEnable(id, enabled)` | `remote_set_disabled` + `installation_modify_remote` |
+| Supprimer | `RepoRemove(flags, id, autoremove)` | `installation_remove_remote` ; `FLATPAK_ERROR_REMOTE_USED` existe |
+| Autorisation | polkit `system-sources-configure` : `auth_admin_keep` pour tous | Installation utilisateur : aucune. Système : `flatpak-system-helper` ; action polkit exacte non vérifiée [HYPOTHÈSE] |
+| Notification | Signal `RepoListChanged` du démon | Aucune sans moniteur (H.6) |
+
+Décision D-039 : les dépôts APT restent en lecture seule ; D-011 : les
+remotes système aussi. H.5 n'utilise donc **aucune opération
+privilégiée**.
+
+### 25.2 Contrat `Backend` (cœur)
+
+- `sources()` rend des `BackendSource` : la `Source`, les sources du
+  catalogue qu'elle alimente (`catalogueSources`, vide : celle de même
+  identifiant), `verifiesSignatures` et `installedItems`, **absents
+  quand le backend ne sait pas** (PackageKit ne dit ni l'un ni l'autre).
+- `changeSource(operationId, SourceRequest)` : `Enable`, `Disable`,
+  `Remove`. Pas d'ajout dans le contrat (D-040). Opération modificatrice,
+  non annulable. Le backend revérifie au moment d'agir ce que l'hôte a
+  vérifié : `NotSupported` sans `capabilities().userSourceChanges`,
+  `NotFound`, `NotAllowed` (installation système, source utilisée pour
+  `Remove`), `Backend/Untrusted` (activer une remote sans vérification
+  des signatures). Activer une source active, ou désactiver une source
+  inactive, réussit sans rien changer.
+- PackageKit : `userSourceChanges` faux, `changeSource` rend
+  `NotSupported` sans appel à packagekitd. Chaque dépôt nomme les sources
+  DEP-11 qu'il alimente (`debian::catalogueSourceIds` : une par
+  composant, `packagekit:<archive>-<suite>-<composant>`, comme les noms
+  des fichiers DEP-11).
+- Flatpak : `userSourceChanges` vrai ; tout se fait sur le thread de
+  travail, entre deux transactions.
+
+### 25.3 Backend Flatpak : sécurité
+
+- **D-044** : une installation ou une mise à jour dont une opération
+  (l'application ou un runtime ajouté par flatpak) viendrait d'une remote
+  `gpg-verify=false` échoue `untrusted`, à la planification et de nouveau
+  dans la seconde passe, avant toute exécution. Les suppressions ne sont
+  pas concernées.
+- **D-040** : `addRemote(url)` est remplacée par
+  `addRemoteFromFile(scope, nom, contenu d'un .flatpakrepo)` : refus sans
+  `GPGKey` (`untrusted`), sans `Url` en `https://`, au-delà de 64 Kio, ou
+  pour un nom hors `[A-Za-z0-9._-]` (`flatpakrepo.h`, logique pure) ;
+  `gpg-verify` est forcé. **Rien dans le service ne l'appelle.**
+- **G.1 inchangé** : `add-new-remote` reste refusé dans les deux passes,
+  y compris après l'activation d'une remote (test de service).
+- **Correction des erreurs** (constatée pendant H.5) : la traduction des
+  codes `FlatpakError`, GIO et GDBus utilisait des valeurs décalées
+  (13 pour `UNTRUSTED`, qui vaut 12 ; 28, `HOST_NOT_FOUND`, lu comme un
+  refus d'autorisation...) et lisait une erreur d'un autre domaine comme
+  une erreur Flatpak. Les valeurs sont nommées et vérifiées à la
+  compilation contre les énumérations de libflatpak 1.16, GIO et GDBus ;
+  `REMOTE_USED`, `INVALID_NAME` et `INVALID_DATA` sont traduites.
+
+### 25.4 Service et API `Store1`
+
+**`ListSources`** : ce que chaque backend a configuré maintenant (actif
+ou non), complété par le catalogue ; puis les sources du catalogue
+qu'aucun backend ne rapporte (fichier de sources, backend inutilisable).
+Clés ajoutées (compatibles, A §5.1) :
+
+| Clé | Type | Sens |
+|---|---|---|
+| `configured` | `b` | Le backend rapporte la source maintenant ; faux pour une entrée du seul catalogue |
+| `can-toggle` | `b` | Source utilisateur d'un backend qui change ses sources ; pour l'activer, signatures vérifiées (D-044) |
+| `can-remove` | `b` | Idem, et rien d'installé n'en vient (D-041) |
+| `gpg-verify` | `b` | Absente si le backend ne sait pas (PackageKit) |
+| `installed-count` | `u` | Éléments installés depuis la source (applications et runtimes) ; absente si inconnu |
+
+`offers` additionne les sources DEP-11 qu'un dépôt alimente ;
+`last-refresh` est la plus ancienne d'entre elles. `suggested` reste faux
+(P-011). Une remote désactivée, absente du catalogue, est listée avec
+0 offre.
+
+**Propriété `Backends`** : clé `source-operations` `as` (`enable`,
+`disable`, `remove` pour Flatpak ; vide pour PackageKit).
+
+**Méthodes** (exportées seulement si un backend change ses sources,
+D-022 modifiée) :
+
+| Méthode | Entrée → sortie | Refus immédiats (aucune transaction) |
+|---|---|---|
+| `EnableSource` | `s source_id` → `o` | `InvalidArgs`, `NotFound`, `BackendUnavailable`, `NotSupported`, `NotAllowed` (système, déjà active), `Busy` (changement de cette source en cours) |
+| `DisableSource` | `s source_id` → `o` | Idem (`NotAllowed` : déjà inactive) |
+| `RemoveSource` | `s source_id` → `o` (**ajout** à A §5.2) | Idem ; `NotAllowed` si quelque chose d'installé en vient, ou si le backend ne peut pas le dire |
+
+`AddSource` n'est pas exporté (D-040). La signature suit A §5.2 (`s`, sans
+`a{sv}`).
+
+**Transactions** (`Store1.Transaction`, objet `ActionTransaction`) :
+`Kind` `enable-source`, `disable-source` ou `remove-source`, `Backend`
+`flatpak`, `AppIds` et `OfferIds` vides. `Plan` : `kind`, `backend`,
+`scope`, `requires-confirmation`, `reasons` (`new-source` tant que la
+confirmation est attendue) et `source` (`id`, `name`, `origin`, `url`,
+`kind`, `scope`, `enabled`, `gpg-verify`).
+
+| Demande | États |
+|---|---|
+| Activer (D-042) | `awaiting-confirmation` (délai D-019, puis `cancelled`) → `Confirm` → `queued` → `running` → `succeeded` / `failed` |
+| Activer une remote sans signatures (D-044) | `failed`, code `untrusted`, sans confirmation |
+| Désactiver, supprimer | `queued` → `running` → `succeeded` / `failed` |
+
+`Cancel` est immédiat en `awaiting-confirmation` et `queued` ; une
+transaction `running` n'est pas annulable. Les changements passent par la
+file du backend (`TransactionManager::exclusive`) : ils attendent une
+transaction Flatpak en cours (P-009, D-034). Ils ne sont pas journalisés
+(D-043) : `GetTransactionHistory` ne les montre pas, un redémarrage les
+oublie.
+
+**Après un changement** : l'inventaire relit les sources
+(`SourcesChanged` si la liste a changé), puis le service relit les
+métadonnées locales (D-028, sans réseau) pour qu'une remote activée ou
+désactivée entre dans le catalogue ou en sorte ; pendant une actualisation,
+cette relecture attend sa fin. `RepoListChanged` de PackageKit fait aussi
+relire la liste.
+
+### 25.5 Tests (doubles uniquement)
+
+| Où | Ce qui est vérifié |
+|---|---|
+| `store-backend-packagekit-tests` | Sources DEP-11 alimentées par un dépôt (composants, archive, URI sans chemin, `deb-src`) |
+| `store-pkbackend-tests` | Dépôts actifs et inactifs listés ; aucune modification, aucun appel à packagekitd (D-039) |
+| `store-backend-flatpak-tests` | `gpg-verify` et nombre d'éléments installés par remote ; activer, désactiver, supprimer une remote utilisateur ; refus système, remote utilisée, remote sans signatures, source inconnue ou étrangère, installation absente ; `.flatpakrepo` (clé, `https`, taille, nom) ; installation et seconde passe refusées `untrusted` ; codes d'erreur réels |
+| `store-service-tests` | Fusion de `ListSources` (dépôt et sources DEP-11, remote absente du catalogue, système, fichier de sources, tri) ; règles de refus |
+| `store-inventory-tests` | Sources gardées, triées, dédoublonnées ; relues sur un changement extérieur ; notification seulement si elles changent ; effacées quand le backend devient inutilisable |
+| `store-service-flatpak-tests` | `ListSources` et `Backends` ; introspection (pas d'`AddSource`) ; désactiver et supprimer sans confirmation, non journalisés ; activer après `Confirm` seulement ; expiration et annulation ; remote sans signatures ; installation `untrusted` ; refus immédiats et `Busy` ; attente derrière une installation en cours ; annulation en file ; G.1 après activation ; redémarrage ; backend inutilisable |
+| `store-service-bus-tests`, `store-service-pk-tests` | Sans backend, ou avec PackageKit seul : aucune méthode de source exportée |
+
+### 25.6 Limites et points non vérifiés
+
+- **Rien de réel** : aucune remote ni aucun dépôt n'a été modifié ;
+  `addRemoteFromFile`, `modify_remote` et `remove_remote` réels ne sont
+  pas exécutés (VM). Le comportement de `remove_remote` quand une ref
+  installée en dépend n'est pas vérifié [HYPOTHÈSE] : le service et le
+  backend refusent avant l'appel.
+- Le nombre d'éléments installés vient de l'origine des refs installées ;
+  une ref sans origine n'est pas comptée.
+- Entre la vérification du backend et la modification, un `flatpak`
+  lancé en ligne de commande peut installer depuis la remote : fenêtre
+  courte, sans moniteur (H.6).
+- Un changement fait hors de la boutique n'est vu côté Flatpak qu'à la
+  prochaine relecture (vérification, actualisation, transaction) : pas de
+  moniteur avant H.6.
+- Deux dépôts APT de même archive, suite et composant sur des hôtes
+  différents alimentent les mêmes identifiants DEP-11 (les noms de
+  fichiers DEP-11 ne gardent pas l'hôte).
+- Les transactions de source ne survivent pas à un redémarrage (D-043).
+- `NotSupported` pour une source PackageKit est testé au niveau du
+  backend et des règles, pas par un appel D-Bus avec PackageKit simulé.

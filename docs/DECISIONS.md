@@ -422,6 +422,10 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
 - **Modifiée** (étape F2) : avec un backend configuré, `Install`, `Remove`,
   `Update` et `UpdateAll` sont exportés. `EnableSource`, `DisableSource` et
   `GetPermissions` restent absentes.
+- **Modifiée** (étape H.5) : avec un backend qui change ses sources
+  (Flatpak), `EnableSource`, `DisableSource` et `RemoveSource` sont
+  exportés (D-039 à D-044, SERVICE.md §25). `AddSource` et
+  `GetPermissions` restent absentes.
 
 ### D-023 — Filtrage des mises à jour par l'hôte (D-010)
 

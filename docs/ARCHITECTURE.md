@@ -602,15 +602,18 @@ Nom de bus `org.cutefish.Store`, objet `/org/cutefish/Store`, interface
 | `Refresh` | `a{sv} options` | `o transaction` (options `force` et `repositories`, `b` ; D-028 : `repositories` faux relit les métadonnées locales sans réseau) |
 | `EnableSource` | `s source_id` | `o transaction` |
 | `DisableSource` | `s source_id` | `o transaction` |
+| `RemoveSource` | `s source_id` | `o transaction` (H.5 ; remote utilisateur inutilisée seulement, D-041) |
 
 Les `options` sont réservées en v1 (dictionnaire vide accepté, clés inconnues
 refusées avec `InvalidArgs`, pour éviter qu'un client croie une option prise en
 compte alors qu'elle ne l'est pas).
 
-En v1, `EnableSource` et `DisableSource` ne concernent que la remote Flathub de
-l'installation utilisateur (P-011). Les remotes de l'installation système sont
+En v1, `EnableSource`, `DisableSource` et `RemoveSource` ne concernent que
+les remotes de l'installation utilisateur (H.5, SERVICE.md §25) ; activer
+demande une confirmation (D-042). Les remotes de l'installation système sont
 listées en lecture seule (D-011). Les dépôts de la distribution sont listés en
-lecture seule (`can-toggle = false`).
+lecture seule (`can-toggle = false`, D-039). Aucune source n'est ajoutée en
+H.5 (D-040) : la création de Flathub attend P-011.
 
 #### Images
 
@@ -643,7 +646,7 @@ Chemin `/org/cutefish/Store/Transactions/<n>`, où `<n>` est un compteur propre
 | Propriété | Type | Description |
 |---|---|---|
 | `Id` | `s` | UUID stable, conservé dans le journal (le chemin, lui, ne survit pas à un redémarrage) |
-| `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source` |
+| `Kind` | `s` | `install`, `remove`, `update`, `update-all`, `refresh`, `enable-source`, `disable-source`, `remove-source` |
 | `Backend` | `s` | `packagekit`, `flatpak`, ou `multiple` pour `update-all` et `refresh` |
 | `AppIds` | `as` | Applications concernées (vide pour `refresh`, les transactions de source et une mise à jour de runtime seule) |
 | `OfferIds` | `as` | Offres concernées |
@@ -705,7 +708,9 @@ pas de type « système » (D-010).
 
 **Source** (`ListSources`) : `id`, `backend`, `name`, `url`, `scope`,
 `enabled` `b`, `kind` (`distribution`, `flathub`, `third-party`),
-`can-toggle` `b`, `suggested` `b` (source connue mais pas encore configurée,
+`can-toggle` `b`, `can-remove` `b`, `configured` `b`, `gpg-verify` `b` et
+`installed-count` `u` quand le backend les connaît (H.5, SERVICE.md §25),
+`suggested` `b` (source connue mais pas encore configurée,
 comme Flathub au premier lancement).
 
 **Plan** (propriété `Plan` d'une transaction) :
@@ -1408,12 +1413,17 @@ particularités de l'installation système sont décrites au §7.4.
 - liste : `flatpak_installation_list_remotes` [SYMBOLE] ;
 - création de Flathub après consentement : `flatpak_remote_new_from_file`
   sur le `flathub.flatpakrepo` livré avec la boutique, puis
-  `flatpak_installation_add_remote` [SYMBOLE] (P-011) ;
+  `flatpak_installation_add_remote` [SYMBOLE] (P-011, proposée ; H.5d en
+  attente). Le magasin n'ajoute une remote que depuis un `.flatpakrepo`
+  contenant sa clé, `gpg-verify` forcé, jamais depuis une URL seule
+  (D-040) ;
 - activation et désactivation : `flatpak_remote_set_disabled` puis
   `flatpak_installation_modify_remote` [SYMBOLE] ;
 - les remotes déjà configurées par l'utilisateur sont affichées et
   utilisées. Elles sont marquées `third-party` sauf Flathub, reconnue par
-  son URL et sa clé ;
+  l'hôte de son URL (`dl.flathub.org`, `flathub.org`, `mirror.flathub.org`) ;
+  la clé n'est pas comparée par la boutique, flatpak vérifie les signatures
+  (D-044, H.5 ; ce n'est pas une validation de P-011) ;
 - les remotes de l'installation système sont affichées et utilisées pour les
   applications système, en lecture seule (D-011).
 

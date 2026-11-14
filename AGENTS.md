@@ -19,7 +19,8 @@ valide chaque étape et chaque décision ; un agent propose, il ne décide pas.
    étapes et leur état, §16 service v0.1, §17 backend PackageKit, §18
    gestionnaire de transactions (F2), §19 backend Flatpak (G, G.1), §20 à
    §22 multi-backends et coexistence (H.1, H.2), §23 transactions
-   multi-backends (H.3), §24 `UpdateAll` multi-backends (H.4).
+   multi-backends (H.3), §24 `UpdateAll` multi-backends (H.4), §25 sources
+   et API D-Bus (H.5).
 
 ## Le projet en bref
 
@@ -57,7 +58,8 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | H.1 | Registre multi-backends et sélection (service) | `81dfa71` … `66492a1` |
 | H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `3166ea9` … `a9e5f09` |
 | H.3 | Transactions Flatpak de bout en bout avec PackageKit, D-033 à D-035 | `bde081d` … `6d586db`, `e262afc` |
-| H.4 | `UpdateAll` multi-backends, D-036 à D-038 | voir `git log` après `e262afc` |
+| H.4 | `UpdateAll` multi-backends, D-036 à D-038 | `0c01be4` … `286fa00` |
+| H.5 | Sources et API D-Bus, D-039 à D-044 | `769e25c` … (voir `git log` après `286fa00`) |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -117,9 +119,23 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   ensemble (`StateStore::saveTransactions`). Relation parent/enfant après
   un redémarrage : étude et options O1 à O4 en §24.4, **rien de modifié**,
   décision du propriétaire attendue. Tests sur doubles seulement.
-  **Le propriétaire doit encore valider H.4.**
-  Prochaines étapes : H.5 (sources et API D-Bus), H.6 (moniteur Flatpak),
-  H.7 (catalogue unifié).
+  H.4 est **validée** par le propriétaire.
+- **H.5** : sources et API D-Bus (SERVICE.md §25), dans les limites des
+  arbitrages du propriétaire (D-039 à D-044) : `ListSources` tiré des
+  backends (sources actives ou non, `configured`, `can-toggle`,
+  `can-remove`, `gpg-verify`, `installed-count`) ; `EnableSource`
+  (confirmation, D-042), `DisableSource`, `RemoveSource` (remote
+  utilisateur inutilisée, D-041), objets de transaction non journalisés
+  (D-043) ; dépôts APT en lecture seule (D-039) ; remote sans
+  vérification des signatures refusée `untrusted` (D-044) ; ajout par URL
+  seule retiré, ajout futur depuis un `.flatpakrepo` seulement (D-040).
+  Correction en passant : traduction des codes d'erreur Flatpak, GIO et
+  GDBus (valeurs décalées). Tests sur doubles seulement.
+  **Le propriétaire doit encore valider H.5.** **H.5d** (ajout de
+  Flathub) est **suspendue** jusqu'à sa décision sur P-011 et la
+  fourniture du fichier `flathub.flatpakrepo` ; arbitrages D2 et D7
+  reportés.
+  Prochaines étapes : H.6 (moniteur Flatpak), H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
@@ -128,12 +144,15 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   cité P-001 comme règle de travail à l'étape F, sans changer son statut.
   Questions ouvertes notables : O-001 (licence), O-014 (formatage).
 - Limites connues et points jamais vérifiés : SERVICE.md §16.4, §17.6,
-  §18, §21.8, §22.5, §23.4 et §24.6, ARCHITECTURE.md §7.2 (« Reste à tester »).
+  §18, §21.8, §22.5, §23.4, §24.6 et §25.6, ARCHITECTURE.md §7.2 (« Reste à
+  tester »).
 
 ## Reprendre le projet (nouvel agent)
 
-1. `git status`, `git log --oneline -15` : l'arbre doit être propre ; la
-   branche `main` a des commits locaux non poussés (ne pas pousser).
+1. `git status`, `git log --oneline -15`, `git status -sb` : l'arbre doit
+   être propre ; `origin/main` est à `286fa00` (H.4, poussé sur
+   autorisation) ; les commits de H.5 sont locaux (ne pas pousser sans
+   autorisation).
 2. Lire ce fichier, puis les documents de la section suivante.
 3. Construire et lancer toute la suite (section « Construire et tester ») ;
    noter le nombre de tests réellement passés avant tout changement.

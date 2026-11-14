@@ -185,7 +185,9 @@ Contrat de `Backend` :
 | `mayExecute` (`confirmation.h`) | Même règle que `Transaction::verifyExecutionPlan()` : le backend et l'état de la transaction concordent toujours |
 | `cancel()` | Une demande : `NotFound` pour une opération inconnue, `NotSupported` si elle n'est pas annulable maintenant ; la complétion dit ce qui s'est passé |
 | `reattach()` | Suit de nouveau une exécution qui a survécu au service (`RecoveryAction::TryReattach`) ; `NotFound` si le backend ne la connaît plus |
-| `capabilities()` | Installations gérées, permissions, rafraîchissement, annulation à tout moment, rattachement, et `verifiesExecutedPlan` |
+| `capabilities()` | Installations gérées, permissions, rafraîchissement, annulation à tout moment, rattachement, `verifiesExecutedPlan`, et `userSourceChanges` (H.5) |
+| `sources()` | Les sources configurées, actives ou non (`BackendSource`) : sources du catalogue qu'elles alimentent, vérification des signatures et éléments installés depuis elles, absents quand le backend ne sait pas (H.5) |
+| `changeSource()` | Active, désactive ou supprime une source (`SourceRequest`) ; aucun ajout (D-040). `NotSupported` sans `userSourceChanges` (PackageKit, D-039), `NotAllowed` pour l'installation système (D-011) ou une source utilisée (D-041), `Backend/Untrusted` pour activer une source sans vérification des signatures (D-044) |
 
 `verifiesExecutedPlan` rend visible la limite de D-017 : vrai pour Flatpak
 (la seconde passe vérifie le plan de la transaction exécutée elle-même),
