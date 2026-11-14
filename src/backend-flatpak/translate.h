@@ -38,6 +38,13 @@ Result<Source> sourceForRemote(Scope scope, const RemoteInfo& remote);
 /// designates (the inverse of sourceForRemote). InvalidArgument otherwise.
 Result<std::pair<Scope, std::string>> remoteOfSource(const SourceId& source);
 
+/// D-044: Backend/Untrusted when one of these operations would download
+/// from a remote of `remotes` whose signatures are not checked
+/// (`gpg-verify=false`). Removals download nothing and pass. A remote that
+/// is not configured is not judged here: adding one is refused on its own
+/// (G.1, `addsSource`).
+Result<void> checkSignedRemotes(std::span<const FlatpakOp> ops, std::span<const RemoteInfo> remotes);
+
 /// How many of these installed refs came from the remote `name`.
 std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string_view name);
 

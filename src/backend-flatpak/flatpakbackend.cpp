@@ -302,6 +302,12 @@ void FlatpakBackend::plan(const std::string&, const PlanRequest& request, Comple
         auto ops = m_store->resolve(value);
         if (!ops)
             return std::move(ops).error();
+        // D-044: nothing comes from a remote that does not check signatures.
+        auto remotes = m_store->remotes(value.scope);
+        if (!remotes)
+            return std::move(remotes).error();
+        if (auto ok = checkSignedRemotes(*ops, *remotes); !ok)
+            return std::move(ok).error();
         return planFor(request, *ops);
     }, std::move(done));
 }
@@ -332,6 +338,20 @@ void FlatpakBackend::execute(const std::string& operationId, const PlanRequest& 
             std::optional<Error> error;
         };
         auto state = std::make_shared<State>();
+        // The remotes as they are now: the worker runs one store call at a
+        // time, so they cannot change before `ready` (D-044 is checked there).
+        auto remotes = m_store->remotes(value.scope);
+        if (!remotes) {
+            {
+                std::lock_guard lock(m_mutex);
+                m_cancelled.erase(operationId);
+            }
+            post([alive, done, e = std::move(remotes).error()]() mutable {
+                if (*alive)
+                    done(std::move(e));
+            });
+            return;
+        }
 
         ExecuteControl control;
         control.cancelled = [cancelled] { return cancelled->load(); };
@@ -342,7 +362,12 @@ void FlatpakBackend::execute(const std::string& operationId, const PlanRequest& 
                     events.progress(progress);
             });
         };
-        control.onReady = [request, accepted, events, post, alive, state](const std::vector<FlatpakOp>& ops) -> bool {
+        control.onReady = [request, accepted, events, post, alive, state,
+                           remotes = std::move(remotes).value()](const std::vector<FlatpakOp>& ops) -> bool {
+            if (auto ok = checkSignedRemotes(ops, remotes); !ok) {
+                state->error = std::move(ok).error();
+                return false;
+            }
             auto plan = planFor(request, ops);
             if (!plan) {
                 state->error = std::move(plan).error();

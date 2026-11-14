@@ -119,6 +119,20 @@ Result<std::pair<Scope, std::string>> remoteOfSource(const SourceId& source)
     return std::pair{*scope, std::string(name)};
 }
 
+Result<void> checkSignedRemotes(std::span<const FlatpakOp> ops, std::span<const RemoteInfo> remotes)
+{
+    for (const FlatpakOp& op : ops) {
+        if (op.type == OperationType::Uninstall || op.remote.empty())
+            continue;
+        const auto it = std::find_if(remotes.begin(), remotes.end(),
+                                     [&](const RemoteInfo& r) { return r.name == op.remote; });
+        if (it != remotes.end() && !it->gpgVerify)
+            return Error::backend(BackendFailure::Untrusted, "untrusted: " + op.ref.full() + " would come from the remote "
+                                                                 + op.remote + ", which does not verify signatures");
+    }
+    return Result<void>::success();
+}
+
 std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string_view name)
 {
     return static_cast<std::uint32_t>(

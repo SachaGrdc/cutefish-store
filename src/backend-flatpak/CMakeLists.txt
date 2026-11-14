@@ -9,6 +9,8 @@ add_library(store-backend-flatpak STATIC
     flatpakbackend.h
     flatpakstore.h
     flatpaktypes.h
+    flatpakrepo.cpp
+    flatpakrepo.h
     translate.cpp
     translate.h
     worker.h

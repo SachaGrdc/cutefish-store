@@ -31,7 +31,7 @@ public:
 
     std::vector<Scope> scopes() override;
     Result<std::vector<RemoteInfo>> remotes(Scope scope) override;
-    Result<void> addRemote(Scope scope, const std::string& name, const std::string& url) override;
+    Result<void> addRemoteFromFile(Scope scope, const std::string& name, const std::string& flatpakrepo) override;
     Result<void> removeRemote(Scope scope, const std::string& name) override;
     Result<void> setRemoteDisabled(Scope scope, const std::string& name, bool disabled) override;
     Result<std::vector<InstalledRef>> installed(Scope scope) override;

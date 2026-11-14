@@ -79,9 +79,11 @@ public:
 
     // --- Remotes (P-011, D-011) --------------------------------------------
     virtual Result<std::vector<RemoteInfo>> remotes(Scope scope) = 0;
-    /// Adds a remote from its url. The caller obtained consent first (P-011):
-    /// Flathub is never added silently.
-    virtual Result<void> addRemote(Scope scope, const std::string& name, const std::string& url) = 0;
+    /// Adds a remote from the contents of a `.flatpakrepo`, which must carry
+    /// its GPG key; signatures are always verified (D-040). Never from a URL
+    /// alone. The caller obtained an explicit consent first: nothing in the
+    /// service calls it yet (H.5d waits for P-011).
+    virtual Result<void> addRemoteFromFile(Scope scope, const std::string& name, const std::string& flatpakrepo) = 0;
     virtual Result<void> removeRemote(Scope scope, const std::string& name) = 0;
     virtual Result<void> setRemoteDisabled(Scope scope, const std::string& name, bool disabled) = 0;
 

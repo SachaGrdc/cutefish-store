@@ -4,6 +4,7 @@
 // (libflatpakstore.h) is compiled but not exercised by these tests.
 
 #include "flatpakbackend.h"
+#include "flatpakrepo.h"
 #include "translate.h"
 #include "fakestore.h"
 
@@ -518,20 +519,131 @@ TEST_F(BackendFixture, RefusesARemoteAddDuringExecution)
     EXPECT_FALSE(started); // nothing deployed
 }
 
-TEST(FlatpakStore, AddsAndRemovesARemoteOnlyExplicitly)
+constexpr const char* kRepoFile = "[Flatpak Repo]\n"
+                                  "Title=Example\n"
+                                  "Url=https://example.org/repo/\n"
+                                  "GPGKey=mQINBFlD2sABEADsiUZUOYBg1UdDaWkEdJYkTSZD68214m8Q1fbrP5AptaUfCl8KYKFMNoAJ\n";
+
+TEST(FlatpakTranslate, ChecksAFlatpakRepoBeforeAddingIt)
 {
+    auto ok = checkFlatpakRepo(kRepoFile);
+    ASSERT_TRUE(ok) << ok.error().message();
+    EXPECT_EQ(ok->url, "https://example.org/repo/");
+
+    // No key: never added, whatever the URL (D-040).
+    auto unsigned_ = checkFlatpakRepo("[Flatpak Repo]\nUrl=https://example.org/repo/\n");
+    ASSERT_FALSE(unsigned_);
+    EXPECT_EQ(unsigned_.error().backendFailure(), BackendFailure::Untrusted);
+    auto emptyKey = checkFlatpakRepo("[Flatpak Repo]\nUrl=https://example.org/repo/\nGPGKey=\n");
+    ASSERT_FALSE(emptyKey);
+    EXPECT_EQ(emptyKey.error().backendFailure(), BackendFailure::Untrusted);
+    // A URL alone, http, another scheme, or the key outside the group.
+    for (const char* bad : {"https://example.org/repo/",
+                            "[Flatpak Repo]\nUrl=http://example.org/repo/\nGPGKey=abc\n",
+                            "[Flatpak Repo]\nUrl=file:///tmp/repo\nGPGKey=abc\n",
+                            "[Flatpak Repo]\nUrl=https://\nGPGKey=abc\n",
+                            "[Other]\nUrl=https://example.org/repo/\nGPGKey=abc\n"}) {
+        auto r = checkFlatpakRepo(bad);
+        ASSERT_FALSE(r) << bad;
+        EXPECT_EQ(r.error().code(), ErrorCode::InvalidArgument) << bad;
+    }
+    auto outside = checkFlatpakRepo("[Other]\nGPGKey=abc\n[Flatpak Repo]\nUrl=https://example.org/repo/\n");
+    ASSERT_FALSE(outside);
+    EXPECT_EQ(outside.error().backendFailure(), BackendFailure::Untrusted);
+    EXPECT_FALSE(checkFlatpakRepo(std::string(64 * 1024 + 1, '#')));
+
+    EXPECT_TRUE(checkRemoteName("flathub"));
+    EXPECT_TRUE(checkRemoteName("my_remote-2.0"));
+    for (const char* bad : {"", ".hidden", "-x", "a/b", "a b", "a:b", "é"})
+        EXPECT_FALSE(checkRemoteName(bad)) << bad;
+    EXPECT_FALSE(checkRemoteName(std::string(65, 'a')));
+}
+
+TEST(FlatpakStore, AddsARemoteOnlyFromAFlatpakRepoWithItsKey)
+{
+    // The URL-only addition is gone (D-040): a remote comes from a
+    // .flatpakrepo carrying its key, with signatures verified.
     FakeStore store;
-    EXPECT_TRUE(store.addRemote(Scope::User, "flathub", "https://dl.flathub.org/repo/"));
+    auto unsigned_ = store.addRemoteFromFile(Scope::User, "example", "[Flatpak Repo]\nUrl=https://example.org/repo/\n");
+    ASSERT_FALSE(unsigned_);
+    EXPECT_TRUE(store.remotes(Scope::User)->empty());
+
+    EXPECT_TRUE(store.addRemoteFromFile(Scope::User, "example", kRepoFile));
     auto remotes = store.remotes(Scope::User);
     ASSERT_TRUE(remotes);
     ASSERT_EQ(remotes->size(), 1u);
-    EXPECT_EQ(remotes->at(0).name, "flathub");
+    EXPECT_EQ(remotes->at(0).name, "example");
+    EXPECT_EQ(remotes->at(0).url, "https://example.org/repo/");
+    EXPECT_TRUE(remotes->at(0).gpgVerify);
 
-    EXPECT_TRUE(store.setRemoteDisabled(Scope::User, "flathub", true));
+    EXPECT_TRUE(store.setRemoteDisabled(Scope::User, "example", true));
     EXPECT_TRUE(store.remotes(Scope::User)->at(0).disabled);
 
-    EXPECT_TRUE(store.removeRemote(Scope::User, "flathub"));
+    EXPECT_TRUE(store.removeRemote(Scope::User, "example"));
     EXPECT_TRUE(store.remotes(Scope::User)->empty());
+}
+
+TEST(FlatpakTranslate, RefusesOperationsFromRemotesWithoutSignatures)
+{
+    const std::vector<RemoteInfo> remotes{
+            {.name = "flathub", .url = "https://dl.flathub.org/repo/", .disabled = false, .gpgVerify = true,
+             .metadataPath = {}, .iconsPath = {}},
+            {.name = "unsigned", .url = "https://example.org/repo/", .disabled = false, .gpgVerify = false,
+             .metadataPath = {}, .iconsPath = {}}};
+    auto op = [](OperationType type, FlatpakRef ref, const char* remote) {
+        FlatpakOp o;
+        o.type = type;
+        o.ref = std::move(ref);
+        o.remote = remote;
+        return o;
+    };
+    const FlatpakOp signedOp = op(OperationType::Install, appRef("org.gimp.GIMP"), "flathub");
+    const FlatpakOp runtime = op(OperationType::Install, {RefKind::Runtime, "org.example.Platform", "x86_64", "1"}, "unsigned");
+    const FlatpakOp removal = op(OperationType::Uninstall, appRef("org.example.App"), "unsigned");
+    EXPECT_TRUE(checkSignedRemotes(std::vector<FlatpakOp>{signedOp}, remotes));
+    // A removal downloads nothing.
+    EXPECT_TRUE(checkSignedRemotes(std::vector<FlatpakOp>{removal}, remotes));
+    // A runtime flatpak would add from an unsigned remote is enough.
+    auto r = checkSignedRemotes(std::vector<FlatpakOp>{signedOp, runtime}, remotes);
+    ASSERT_FALSE(r);
+    EXPECT_EQ(r.error().backendFailure(), BackendFailure::Untrusted);
+    FlatpakOp update = runtime;
+    update.type = OperationType::Update;
+    EXPECT_FALSE(checkSignedRemotes(std::vector<FlatpakOp>{update}, remotes));
+}
+
+TEST_F(BackendFixture, NeverPlansOrRunsFromARemoteWithoutSignatures)
+{
+    auto unsignedRemote = [](bool gpgVerify) {
+        return RemoteInfo{.name = "flathub", .url = "https://dl.flathub.org/repo/", .disabled = false,
+                          .gpgVerify = gpgVerify, .metadataPath = {}, .iconsPath = {}};
+    };
+    fake->remotes_[Scope::User] = {unsignedRemote(false)};
+    auto refused = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().backendFailure(), BackendFailure::Untrusted);
+
+    // Planned while signed, run after the remote stopped checking them: the
+    // second pass refuses it before anything runs.
+    fake->remotes_[Scope::User] = {unsignedRemote(true)};
+    auto accepted = await<Plan>([this](Completion<Plan> done) {
+        backend.plan("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), std::move(done));
+    });
+    ASSERT_TRUE(accepted) << accepted.error().message();
+    fake->remotes_[Scope::User] = {unsignedRemote(false)};
+    bool started = false;
+    OperationEvents events;
+    events.started = [&](const Plan&) { started = true; };
+    auto result = await<ExecutionResult>([&](Completion<ExecutionResult> done) {
+        backend.execute("op", PlanRequest::create(TransactionKind::Install, {installOffer()}).value(), *accepted,
+                        std::move(events), std::move(done));
+    });
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().backendFailure(), BackendFailure::Untrusted);
+    EXPECT_FALSE(started);
+    EXPECT_EQ(fake->runs.load(), 0);
 }
 
 TEST(FlatpakTranslate, ANewPermissionChangesThePlan)

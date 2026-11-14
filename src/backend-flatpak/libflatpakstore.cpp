@@ -1,5 +1,6 @@
 #include "libflatpakstore.h"
 
+#include "flatpakrepo.h"
 #include "translate.h"
 
 #include <flatpak.h>
@@ -206,14 +207,23 @@ Result<std::vector<RemoteInfo>> LibFlatpakStore::remotes(Scope scope)
     return out;
 }
 
-Result<void> LibFlatpakStore::addRemote(Scope scope, const std::string& name, const std::string& url)
+Result<void> LibFlatpakStore::addRemoteFromFile(Scope scope, const std::string& name, const std::string& flatpakrepo)
 {
+    // What the store never adds is refused before libflatpak sees it
+    // (D-040): no key, no https, a name it would not choose.
+    if (auto ok = checkRemoteName(name); !ok)
+        return std::move(ok).error();
+    if (auto file = checkFlatpakRepo(flatpakrepo); !file)
+        return std::move(file).error();
     auto handle = installation(scope);
     if (!handle)
         return std::move(handle).error();
     GError* error = nullptr;
-    g_autoptr(FlatpakRemote) remote = flatpak_remote_new(name.c_str());
-    flatpak_remote_set_url(remote, url.c_str());
+    g_autoptr(GBytes) data = g_bytes_new(flatpakrepo.data(), flatpakrepo.size());
+    g_autoptr(FlatpakRemote) remote = flatpak_remote_new_from_file(name.c_str(), data, &error);
+    if (remote == nullptr)
+        return errorOf(&error);
+    flatpak_remote_set_gpg_verify(remote, TRUE); // never without signatures
     if (!flatpak_installation_add_remote(static_cast<FlatpakInstallation*>(*handle), remote, FALSE, nullptr, &error))
         return errorOf(&error);
     return Result<void>::success();

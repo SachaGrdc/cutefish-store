@@ -12,6 +12,7 @@
 // read from any thread.
 
 #include "flatpakstore.h"
+#include "flatpakrepo.h"
 
 #include <algorithm>
 #include <atomic>
@@ -116,9 +117,16 @@ public:
         return it == remotes_.end() ? std::vector<RemoteInfo>{} : it->second;
     }
 
-    Result<void> addRemote(Scope scope, const std::string& name, const std::string& url) override
+    Result<void> addRemoteFromFile(Scope scope, const std::string& name, const std::string& flatpakrepo) override
     {
-        RemoteInfo info{.name = name, .url = url, .disabled = false, .gpgVerify = true, .metadataPath = {}, .iconsPath = {}};
+        // The same checks as LibFlatpakStore before libflatpak (D-040).
+        if (auto ok = checkRemoteName(name); !ok)
+            return std::move(ok).error();
+        auto file = checkFlatpakRepo(flatpakrepo);
+        if (!file)
+            return std::move(file).error();
+        RemoteInfo info{.name = name, .url = file->url, .disabled = false, .gpgVerify = true, .metadataPath = {},
+                        .iconsPath = {}};
         remotes_[scope].push_back(std::move(info));
         return Result<void>::success();
     }
