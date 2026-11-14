@@ -536,6 +536,44 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   toute réindexation, régression par rapport à la v0.1) ; indexer deux fois
   un même fichier (la seconde source n'avait que des offres refusées).
 
+### D-033 — Nouvelle installation Flatpak en système : refus immédiat
+
+- **Statut** : Validée (propriétaire, étape H.3, décision A).
+- **Décision** : `Install` répond aussitôt `NotAllowed` pour une offre
+  `flatpak:system:…`, avant de créer une transaction ou d'interroger le
+  backend. Cela applique D-005 (nouvelles installations en utilisateur) et
+  D-011 (l'installation système est détectée, mise à jour et vidée, jamais
+  enrichie). Ne sont pas concernés : `Remove` et `Update` en système
+  (D-011), le runtime système qu'une mise à jour installe (D-014), les
+  paquets de la distribution.
+- **Ce qui reste ouvert** : **O-013** n'est pas tranchée. Proposer un jour
+  une nouvelle installation en système remplacerait cette règle.
+- **Écarté** : un échec en `planning` avec `not-allowed`, à la manière de
+  D-032 : l'offre suffit à décider, aucune transaction n'est utile.
+- **Détails** : SERVICE.md §23.
+
+### D-034 — Une seule file de modification pour Flatpak
+
+- **Statut** : Validée (propriétaire, étape H.3, décision B).
+- **Décision** : le gestionnaire de transactions garde **une** file par
+  backend (D-030) ; les installations utilisateur et système de Flatpak la
+  partagent : une seule transaction Flatpak planifie ou s'exécute à la fois,
+  quelle que soit l'installation. PackageKit et Flatpak restent
+  indépendants l'un de l'autre.
+- **Ce que ce n'est pas** : une validation de **P-009**, qui reste proposée
+  (sa forme « par backend et par installation » n'est pas appliquée).
+- **Détails** : SERVICE.md §23.
+
+### D-035 — `Update` sur plusieurs backends : refus jusqu'à H.4
+
+- **Statut** : Validée (propriétaire, étape H.3, décision C).
+- **Décision** : un `Update` dont les offres relèvent de plusieurs backends
+  (ou de deux installations d'un même backend) est refusé avec
+  `InvalidArgument`, sans transaction (`PlanRequest` : un backend et une
+  installation par requête). Les mises à jour groupées sur plusieurs
+  backends relèvent d'`UpdateAll` (D-031) et de l'étape H.4.
+- **Détails** : SERVICE.md §23.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de

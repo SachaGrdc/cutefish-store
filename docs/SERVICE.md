@@ -1362,7 +1362,7 @@ protégé), et D-017, D-018, D-019, P-008, P-009.
 | `StoreService` | `Install`, `Remove`, `Update`, `UpdateAll` (avec un backend), validation des entrées, `ListTransactions` |
 
 Validation des entrées (§4.1) : `Install`, une offre du catalogue pas encore
-installée ; `Remove`, une offre installée ; `Update`, des offres listées par
+installée, jamais dans l'installation système de Flatpak (D-033, §23) ; `Remove`, une offre installée ; `Update`, des offres listées par
 `GetUpdates` ; aucune option acceptée pour l'instant ; backend utilisable ;
 offre déjà engagée : `Busy`. Le `Plan` publié suit §4.6 (`operations` avec
 versions et origine, `reasons`, `requires-confirmation`).
@@ -1584,7 +1584,9 @@ construit sans libflatpak (`CUTEFISH_STORE_BUILD_FLATPAK=OFF`).
   le `TransactionManager`, sélection par `offer_id`, propriété `Backends`,
   sémantique `degraded`, construction optionnelle des deux backends.
 - **Fait (H.2)** : inventaire unifié, §21.
-- **À faire (H.3–H.8)** : `UpdateAll` multi-backends complet,
+- **Fait (H.3)** : transactions Flatpak de bout en bout, à côté de
+  PackageKit, §23.
+- **À faire (H.4–H.8)** : `UpdateAll` multi-backends complet,
   gestion des sources et API D-Bus (`EnableSource`/`DisableSource`/`AddSource`,
   `GetPermissions`), moniteur de changements externes Flatpak, et catalogue
   unifié (l'indexeur lit déjà les deux sources ; l'agrégation fine est à
@@ -2075,3 +2077,112 @@ son code public fait réellement.
 Non vérifié : le comportement du vrai packagekitd (ordre des signaux
 `TransactionListChanged`/`PropertiesChanged` de `Role`, transactions
 terminées encore listées) et du vrai Settings ; à vérifier en VM.
+
+## 23. Transactions multi-backends (H.3)
+
+H.3 fait passer les transactions Flatpak par le service de bout en bout, à
+côté de celles de PackageKit, avec le vrai `FlatpakBackend`. Jusque-là, le
+gestionnaire (§18) n'avait été piloté, pour Flatpak, que par un backend
+scripté. Aucune méthode, propriété ni signal D-Bus n'est ajouté ; aucune
+migration de schéma. Décisions du propriétaire : D-033, D-034, D-035.
+
+### 23.1 Ce qui existait déjà et reste inchangé
+
+- Sélection du backend par `offer_id`, sans bascule (H.1, §20).
+- Une file par `BackendKind` (D-030) : PackageKit et Flatpak ne s'attendent
+  jamais ; une transaction en `awaiting-confirmation` libère sa file.
+- Double passe Flatpak vérifiée dans `ready` (`verifiesExecutedPlan`, D-017,
+  §19), refus des ajouts de remote (G.1), raison `system-scope` pour les
+  installations et suppressions en système (D-011, D-014, cœur).
+- Reprise : une transaction Flatpak `running` n'a pas de référence de
+  backend (`reattach` est faux) ; le cœur la passe en `interrupted`
+  (`recoveryAction`), sans jamais la relancer (§5.6).
+- Réconciliation après une transaction qui a pu changer le système :
+  l'inventaire du backend est réinterrogé (§8.3, H.2).
+
+### 23.2 Changements
+
+- **Nouvelle installation en système refusée (D-033)** :
+  `newInstallRefusal()` (`marshal.h`, fonction pure) ; `Install` répond
+  `NotAllowed` avant toute transaction pour une offre de l'installation
+  système d'un backend dont l'installation système est partagée
+  (`ConfirmationPolicy::sharedSystemScope` : Flatpak). Le refus précède le
+  contrôle de disponibilité : il ne dépend que de l'offre. `Remove` et
+  `Update` en système ne changent pas.
+- **`Cancellable` d'une transaction Flatpak** (correctif) : la propriété ne
+  venait que de la progression du backend ; une transaction Flatpak en
+  `running` restait annoncée non annulable jusqu'à sa première
+  progression, alors que `Cancel` était accepté. Un backend qui peut
+  toujours annuler (`cancelAnytime`) rend désormais la transaction
+  annulable dès `running`. PackageKit n'est pas concerné (`AllowCancel`,
+  §6.5).
+- **Une file pour Flatpak (D-034)** : rien n'a changé dans le code ; la
+  règle est désormais décidée et testée. Ce n'est pas une validation de
+  P-009.
+- **`Update` sur plusieurs backends (D-035)** : refus existant
+  (`InvalidArgument`) confirmé et testé ; H.4 traitera les mises à jour
+  groupées.
+
+### 23.3 Tests (doubles uniquement)
+
+`store-service-flatpak-tests` (`tests/service/testserviceflatpak.cpp`,
+18 tests) : le service en processus sur un bus privé, avec le vrai
+`FlatpakBackend` sur le faux magasin (`tests/backend-flatpak/fakestore.h`)
+et, pour `WithPackageKit.*`, le vrai backend PackageKit contre le
+PackageKit simulé. Catalogue de test avec Flathub dans les deux
+installations.
+
+- Installation utilisateur : confirmation pour les nouvelles permissions,
+  plan publié (application demandée, runtime ajouté par Flatpak, origine,
+  taille), une première passe, une seconde passe vérifiée puis une
+  exécution, état `running` traversé, journal (`backend`, `scope`, état),
+  `InstalledChanged` et `GetInstalled` après la réinterrogation.
+- Installation système : `NotAllowed` immédiat, aucune transaction créée,
+  aucun appel au magasin, journal vide ; l'offre utilisateur passe.
+  Vérifié par mutation : sans la règle, le test échoue.
+- Suppression en système : `system-scope` sur le plan et sur l'élément ;
+  mise à jour en système qui installe un runtime : `system-scope` sur le
+  runtime seulement (D-014).
+- `Update` sur deux installations, et sur PackageKit et Flatpak :
+  `InvalidArgument`, aucune transaction, aucun backend interrogé.
+- Plan changé à la seconde passe : `awaiting-confirmation` avec
+  `plan-changed`, rien d'exécuté ; ajout de remote refusé à la première ou
+  à la seconde passe : `failed`/`not-allowed`, rien d'exécuté ni configuré ;
+  refus polkit simulé : `failed`/`auth-denied`, l'application reste
+  installée ; confirmation expirée : `cancelled`.
+- Annulation pendant la seconde passe (avant `ready`) : `cancelled`, jamais
+  `running`, rien d'exécuté ; annulation en `running` : `Cancellable` vrai,
+  `cancelled`, journalisée.
+- Une file pour les deux installations : une transaction système confirmée
+  reste en `planning` tant que la transaction utilisateur s'exécute, puis
+  s'exécute à son tour ; `Busy` sur une offre engagée.
+- Redémarrage pendant une transaction Flatpak `running` (instance détruite,
+  nom libéré, nouvelle instance) : `interrupted`, et celle qui attendait une
+  confirmation `cancelled` ; rien n'est replanifié ni réexécuté.
+- PackageKit et Flatpak en même temps : les deux transactions sont
+  `running` ensemble et se terminent chacune de son côté ; pendant une mise
+  à jour système lancée par Settings, l'installation deb finit `locked` et
+  l'installation Flatpak réussit, sans annuler la mise à jour système.
+
+Le faux magasin gagne des portes (avant `ready`, pendant l'exécution), un
+arrêt sur annulation avant `ready` comme `LibFlatpakStore`, l'application
+d'une transaction terminée à son état installé, et des compteurs atomiques.
+
+### 23.4 Limites et points non vérifiés
+
+- **Rien de réel** : aucune installation Flatpak, aucun
+  `flatpak-system-helper`, aucun dialogue polkit, aucun PackageKit ni APT.
+  Le comportement de libflatpak (annulation avant et après `ready`, refus
+  polkit, runtime système d'une mise à jour) n'est vérifié que par le faux
+  magasin, qui imite `LibFlatpakStore` sans le remplacer : à vérifier en VM.
+- `Cancellable` reste faux en `queued`, `planning` et
+  `awaiting-confirmation`, alors que `Cancel` y est toujours immédiat ;
+  comportement antérieur, commun aux deux backends, non modifié ici.
+- La règle D-033 est appliquée par `Install` du service, seul point
+  d'entrée des nouvelles installations ; le gestionnaire de transactions,
+  générique, ne la porte pas.
+- Une transaction Flatpak interrompue par l'arrêt du service peut avoir
+  été menée à terme ou non par libflatpak ; l'état réel est relu par
+  l'inventaire au démarrage suivant, sans être déduit du journal.
+- `UpdateAll` multi-backends (H.4), sources et `GetPermissions` (H.5),
+  moniteur Flatpak (H.6) et catalogue unifié (H.7) restent hors périmètre.

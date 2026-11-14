@@ -17,7 +17,9 @@ valide chaque étape et chaque décision ; un agent propose, il ne décide pas.
 5. [docs/CATALOG.md](docs/CATALOG.md) : catalogue SQLite et indexeur.
 6. [docs/SERVICE.md](docs/SERVICE.md) : le service D-Bus ; §15 plan des
    étapes et leur état, §16 service v0.1, §17 backend PackageKit, §18
-   gestionnaire de transactions (F2).
+   gestionnaire de transactions (F2), §19 backend Flatpak (G, G.1), §20 à
+   §22 multi-backends et coexistence (H.1, H.2), §23 transactions
+   multi-backends (H.3).
 
 ## Le projet en bref
 
@@ -54,6 +56,7 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
 | G.1 | Audit et durcissement du backend Flatpak (refus des ajouts de remote, ressources) | `41dbbd8` … `9380041` |
 | H.1 | Registre multi-backends et sélection (service) | `81dfa71` … `66492a1` |
 | H.2 | Inventaire unifié (installés, mises à jour, `UpdateCount`, écritures SQLite), finalisation, coexistence PackageKit | `3166ea9` … `a9e5f09` |
+| H.3 | Transactions Flatpak de bout en bout avec PackageKit, D-033 à D-035 | `bde081d` … `6d586db`, puis la documentation |
 
 - **F2** : implémentée et testée contre le PackageKit simulé ; le détail de
   ce qui est testé et de ce qui reste hors de portée est dans SERVICE.md
@@ -93,8 +96,17 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   validation SQLite, arrêt avant la libération du nom), pour qu'une
   nouvelle instance ne voie jamais un inventaire plus ancien écrit après le
   sien (SERVICE.md §21.5, « Arrêt et redémarrage »).
-  Prochaines étapes : H.3 (transactions), H.4 (`UpdateAll`), H.5 (sources
-  et API D-Bus), H.6 (moniteur Flatpak), H.7 (catalogue unifié).
+- **H.3** : transactions Flatpak de bout en bout dans le service, à côté
+  de PackageKit (SERVICE.md §23) : nouvelle installation en système
+  refusée `NotAllowed` avant toute transaction (D-033, O-013 reste
+  ouverte), une seule file pour Flatpak (D-034, n'approuve pas P-009),
+  `Update` sur plusieurs backends refusé `InvalidArgument` (D-035) ;
+  `Cancellable` vrai dès `running` pour un backend `cancelAnytime`. Tests
+  du vrai `FlatpakBackend` sur le faux magasin, avec PackageKit simulé
+  (`store-service-flatpak-tests`, 18 tests). Rien de réel n'est vérifié
+  (VM). **Le propriétaire doit encore valider H.3.**
+  Prochaines étapes : H.4 (`UpdateAll`), H.5 (sources et API D-Bus), H.6
+  (moniteur Flatpak), H.7 (catalogue unifié).
   **Ne commencer aucune étape sans l'accord explicite du propriétaire.**
 - **Décisions encore proposées**, à faire valider (ne pas les valider
   soi-même) : D-027, D-029, P-001, P-009 (sa précision PackageKit est
@@ -102,8 +114,8 @@ C++20, CMake, SQLite (FTS5), libappstream (indexeur), Cutefish Toolkit
   modificatrice à la fois par backend »), P-011, P-013. Le propriétaire a
   cité P-001 comme règle de travail à l'étape F, sans changer son statut.
   Questions ouvertes notables : O-001 (licence), O-014 (formatage).
-- Limites connues et points jamais vérifiés : SERVICE.md §16.4, §17.6 et
-  §18, ARCHITECTURE.md §7.2 (« Reste à tester »).
+- Limites connues et points jamais vérifiés : SERVICE.md §16.4, §17.6,
+  §18, §21.8, §22.5 et §23.4, ARCHITECTURE.md §7.2 (« Reste à tester »).
 
 ## Reprendre le projet (nouvel agent)
 
