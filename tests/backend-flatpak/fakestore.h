@@ -1,23 +1,73 @@
 #pragma once
 
 // A deterministic double of FlatpakStore, for the tests of the Flatpak
-// backend (like fakepackagekit.h is for PackageKit). It holds two
-// installations, a few remotes, installed refs and updates, and resolves
-// transactions into operations; its execution can be told to report a
-// changed plan, fail, or wait for a cancellation.
+// backend (like fakepackagekit.h is for PackageKit) and of the service with
+// that backend (H.3). It holds two installations, a few remotes, installed
+// refs and updates, and resolves transactions into operations; its execution
+// can be told to report a changed plan, fail, wait for a cancellation, stop
+// at a gate, and apply a completed transaction to its installed state.
+//
+// Threads: the script fields are set by the test while the backend's worker
+// is idle (before the call that reaches it); the counters and gates may be
+// read from any thread.
 
 #include "flatpakstore.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace cutefish::store::flatpak {
+
+/// A point of the execution where the fake can be held, from any thread.
+/// Closed, the worker waits there until it is opened (or, when given a
+/// cancellation check, until a cancellation is asked).
+class FakeGate
+{
+public:
+    void close()
+    {
+        std::lock_guard lock(m_mutex);
+        m_closed = true;
+    }
+    void open()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_closed = false;
+        }
+        m_changed.notify_all();
+    }
+    /// How many times the worker reached the gate.
+    int reached() const
+    {
+        std::lock_guard lock(m_mutex);
+        return m_reached;
+    }
+    /// Called by the worker.
+    void pass(const std::function<bool()>& cancelled = {})
+    {
+        std::unique_lock lock(m_mutex);
+        ++m_reached;
+        m_changed.notify_all();
+        while (m_closed && !(cancelled && cancelled()))
+            m_changed.wait_for(lock, std::chrono::milliseconds(1));
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    std::condition_variable m_changed;
+    bool m_closed = false;
+    int m_reached = 0;
+};
 
 class FakeStore final : public FlatpakStore
 {
@@ -36,13 +86,25 @@ public:
     std::optional<Error> executeError;
     /// When set, a transaction would add a remote: it is refused (P-011).
     bool remoteAddAttempted = false;
+    /// When set, these are the operations the first pass resolves to
+    /// (overrides the default).
+    std::optional<std::vector<FlatpakOp>> resolveOps;
     /// When set, these are the operations the second pass resolves to
     /// (overrides the default), to script a specific plan change.
     std::optional<std::vector<FlatpakOp>> executeOps;
 
-    int resolves = 0;
-    int executes = 0;
-    int cancels = 0;
+    /// When set, a completed transaction changes the installed refs and the
+    /// updates as Flatpak would (for the reconciliation after it).
+    bool applyCompleted = false;
+    /// Held before the second pass resolves (`ready`), and once running.
+    FakeGate beforeReady;
+    FakeGate whileRunning;
+
+    std::atomic<int> resolves{0};
+    std::atomic<int> executes{0};
+    std::atomic<int> cancels{0};
+    /// Executions that reached running (`ready` returned true).
+    std::atomic<int> runs{0};
     std::atomic<bool> executing{false};
     std::vector<std::string> progressRefs;
 
@@ -97,7 +159,7 @@ public:
         if (remoteAddAttempted)
             return Error::notAllowed("the transaction would add the remote 'flathub', which the store only adds "
                                      "with explicit consent");
-        return opsFor(spec);
+        return resolveOps ? *resolveOps : opsFor(spec);
     }
 
     Result<ExecutionOutcome> execute(const TransactionSpec& spec, ExecuteControl control) override
@@ -108,6 +170,7 @@ public:
                                      "with explicit consent");
         if (executeError)
             return *executeError;
+        beforeReady.pass();
         std::vector<FlatpakOp> ops = executeOps ? *executeOps : opsFor(spec);
         if (planChanged) {
             FlatpakOp extra;
@@ -115,13 +178,21 @@ public:
             extra.ref = FlatpakRef{RefKind::Runtime, "org.example.Extra", "x86_64", "24.08"};
             ops.push_back(std::move(extra));
         }
+        // Like LibFlatpakStore: a cancellation asked before `ready` stops the
+        // transaction there, without running anything.
+        if (control.cancelled && control.cancelled()) {
+            ++cancels;
+            return Error::cancelled("cancelled");
+        }
         const bool run = control.onReady(ops);
         if (!run)
             return ExecutionOutcome{.type = ExecutionOutcome::Type::PlanChanged, .ops = std::move(ops)};
+        ++runs;
         if (runError)
             return *runError;
 
         executing = true;
+        whileRunning.pass(control.cancelled);
         // A cancellation request is honoured at the next step (§7.6).
         for (int i = 0; i < 200 && !control.cancelled(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -136,10 +207,27 @@ public:
             progressRefs.push_back(spec.refs.front().ref.full());
         }
         executing = false;
+        if (applyCompleted)
+            apply(spec);
         return ExecutionOutcome{.type = ExecutionOutcome::Type::Completed, .ops = {}};
     }
 
 private:
+    void apply(const TransactionSpec& spec)
+    {
+        auto& installed = installed_[spec.scope];
+        auto& updates = updates_[spec.scope];
+        for (const RefRequest& r : spec.refs) {
+            const std::string full = r.ref.full();
+            auto same = [&](const auto& x) { return x.ref.full() == full; };
+            if (spec.kind == TransactionKind::Install)
+                installed.push_back({r.ref, r.remote});
+            else if (spec.kind == TransactionKind::Remove)
+                installed.erase(std::remove_if(installed.begin(), installed.end(), same), installed.end());
+            updates.erase(std::remove_if(updates.begin(), updates.end(), same), updates.end());
+        }
+    }
+
     static std::vector<FlatpakOp> opsFor(const TransactionSpec& spec)
     {
         OperationType type = spec.kind == TransactionKind::Install   ? OperationType::Install

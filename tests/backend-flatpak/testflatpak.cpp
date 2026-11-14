@@ -278,7 +278,7 @@ TEST_F(BackendFixture, ExecutesACompatiblePlan)
     ASSERT_TRUE(started) << "started was not emitted before running";
     EXPECT_EQ(started->items().size(), 2u);
     ASSERT_FALSE(progress.empty());
-    EXPECT_EQ(fake->executes, 1);
+    EXPECT_EQ(fake->executes.load(), 1);
 }
 
 TEST_F(BackendFixture, AChangedPlanIsNeverExecuted)
@@ -301,7 +301,7 @@ TEST_F(BackendFixture, AChangedPlanIsNeverExecuted)
     EXPECT_EQ(result->outcome, ExecutionResult::Outcome::PlanChanged);
     ASSERT_TRUE(result->freshPlan) << "a changed plan carries the fresh plan";
     EXPECT_FALSE(started); // nothing ran
-    EXPECT_EQ(fake->executes, 1);
+    EXPECT_EQ(fake->executes.load(), 1);
 }
 
 TEST_F(BackendFixture, MapsExecutionErrors)
@@ -340,7 +340,7 @@ TEST_F(BackendFixture, CancelsARunningExecution)
     auto result = future.get();
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code(), ErrorCode::Cancelled);
-    EXPECT_EQ(fake->cancels, 1);
+    EXPECT_EQ(fake->cancels.load(), 1);
 }
 
 TEST_F(BackendFixture, RefusesATransactionThatWouldAddARemote)
