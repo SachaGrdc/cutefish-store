@@ -523,10 +523,10 @@ TEST_F(FlatpakTransactions, ASystemUpdateThatInstallsARuntimeShowsIt)
     ASSERT_TRUE(spin([&] { return !has(updateOffers(), kQgisSystem); }));
 }
 
-TEST_F(FlatpakTransactions, AnUpdateAcrossBothBackendsIsRefused)
+TEST_F(FlatpakTransactions, AnUpdateAcrossBothInstallationsIsRefused)
 {
-    // Decision C of H.3: one backend and one installation per Update; several
-    // backends are UpdateAll's (H.4).
+    // A request spans one backend and one installation (PlanRequest); the
+    // user and system installations together are UpdateAll's (D-031).
     start([](fp::FakeStore& s) {
         s.installed_[Scope::User] = {{app("org.gimp.GIMP"), "flathub"}};
         s.updates_[Scope::User] = {{app("org.gimp.GIMP"), "flathub", "c2"}};
@@ -801,6 +801,31 @@ TEST_F(WithPackageKit, PackageKitAndFlatpakRunAtTheSameTime)
     ASSERT_TRUE(waitState(flatpak.path, "succeeded"));
     EXPECT_EQ(journal(deb.path).at("backend").value<std::string>(), "packagekit");
     EXPECT_EQ(journal(flatpak.path).at("backend").value<std::string>(), "flatpak");
+}
+
+TEST_F(WithPackageKit, AnUpdateAcrossBothBackendsIsRefused)
+{
+    // Decision C of H.3: an Update names one backend; UpdateAll (H.4) is for
+    // several.
+    fakepk::Answer installedDeb;
+    installedDeb.packages = {pkg(pk::Info::Installed, "gimp;3.0.4-3;amd64;installed:debian-stable-main")};
+    m_pk.answer("GetPackages", installedDeb);
+    fakepk::Answer updates;
+    updates.packages = {pkg(pk::Info::Security, "gimp;3.0.4-4;amd64;debian-stable-security")};
+    m_pk.answer("GetUpdates", updates);
+    start([](fp::FakeStore& s) {
+        s.installed_[Scope::User] = {{app("org.gimp.GIMP"), "flathub"}};
+        s.updates_[Scope::User] = {{app("org.gimp.GIMP"), "flathub", "c2"}};
+    }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return has(updateOffers(), "packagekit:gimp") && has(updateOffers(), kGimpUser); }));
+    const int added = m_added;
+    const Answer a = update({"packagekit:gimp", kGimpUser});
+    EXPECT_EQ(a.error, kInvalidArgs);
+    settle();
+    EXPECT_EQ(m_added, added);
+    EXPECT_EQ(m_store->resolves.load(), 0);
+    for (const auto& c : m_pk.calls())
+        EXPECT_NE(c.method, "UpdatePackages");
 }
 
 TEST_F(WithPackageKit, ASystemUpdateFromSettingsDoesNotHoldFlatpak)
