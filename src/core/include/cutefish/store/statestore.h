@@ -169,6 +169,10 @@ public:
     /// Inserts or replaces a transaction. When it is finished, the
     /// retention of D-018 is applied at its `finished` date.
     Result<void> saveTransaction(const TransactionRecord& record);
+    /// Inserts or replaces several transactions in one SQLite transaction:
+    /// all are written, or none (the children of an UpdateAll, H.4). Every
+    /// record is checked first; ids must be distinct.
+    Result<void> saveTransactions(std::span<const TransactionRecord> records);
     Result<std::optional<TransactionRecord>> transaction(std::string_view id) const;
     /// Unfinished transactions, oldest first.
     Result<std::vector<TransactionRecord>> openTransactions() const;

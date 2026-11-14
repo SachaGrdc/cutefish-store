@@ -558,6 +558,41 @@ TEST_F(StateStoreTest, SavingAgainReplacesTheRecord)
     EXPECT_TRUE(store.openTransactions()->empty());
 }
 
+TEST_F(StateStoreTest, SeveralTransactionsAreSavedTogetherOrNotAtAll)
+{
+    // The children of an UpdateAll (H.4): all in the journal, or none.
+    auto store = open();
+    const std::vector<TransactionRecord> two{record("child-1", TransactionState::Queued, kT0),
+                                             record("child-2", TransactionState::Queued, kT0)};
+    ASSERT_TRUE(store.saveTransactions(two));
+    EXPECT_EQ(rawQuery(path, "SELECT count(*) FROM transactions"), "2");
+
+    // One invalid record: nothing is written.
+    auto invalid = record("child-4", TransactionState::Queued, kT0);
+    invalid.offers.clear();
+    const std::vector<TransactionRecord> withInvalid{record("child-3", TransactionState::Queued, kT0), invalid};
+    auto refused = store.saveTransactions(withInvalid);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code(), ErrorCode::InvalidArgument);
+    // The same id twice: refused as well.
+    const std::vector<TransactionRecord> twice{record("child-5", TransactionState::Queued, kT0),
+                                               record("child-5", TransactionState::Queued, kT0)};
+    EXPECT_FALSE(store.saveTransactions(twice));
+
+    // A commit that does not happen: nothing of either record remains.
+    store.setCommitGuard([] { return false; });
+    const std::vector<TransactionRecord> guarded{record("child-6", TransactionState::Queued, kT0),
+                                                 record("child-7", TransactionState::Queued, kT0)};
+    auto cancelled = store.saveTransactions(guarded);
+    ASSERT_FALSE(cancelled);
+    EXPECT_EQ(cancelled.error().code(), ErrorCode::Cancelled);
+    store.setCommitGuard({});
+    EXPECT_EQ(rawQuery(path, "SELECT group_concat(id, ',') FROM (SELECT id FROM transactions ORDER BY id)"),
+              "child-1,child-2");
+    EXPECT_EQ(rawQuery(path, "SELECT count(*) FROM transaction_offers"), "2");
+    EXPECT_TRUE(store.saveTransactions(std::vector<TransactionRecord>{})); // nothing to do
+}
+
 TEST_F(StateStoreTest, InvalidRecordsAreNotWritten)
 {
     auto store = open();

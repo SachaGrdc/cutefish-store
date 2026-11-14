@@ -7,6 +7,7 @@
 #include "text.h"
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -652,6 +653,33 @@ Result<void> StateStore::saveTransaction(const TransactionRecord& record)
         return ok;
     if (record.finished)
         if (auto purged = purge(d->db, *record.finished); !purged)
+            return std::move(purged).error();
+    return tx->commit();
+}
+
+Result<void> StateStore::saveTransactions(std::span<const TransactionRecord> records)
+{
+    std::set<std::string_view> ids;
+    for (const TransactionRecord& r : records) {
+        if (auto ok = checkRecord(r); !ok)
+            return ok;
+        if (!ids.insert(r.id).second)
+            return Error::invalidArgument("transaction " + r.id + " is given twice");
+    }
+    if (records.empty())
+        return {};
+    auto tx = WriteTransaction::begin(d->db);
+    if (!tx)
+        return std::move(tx).error();
+    std::optional<UnixSeconds> latest;
+    for (const TransactionRecord& r : records) {
+        if (auto ok = writeRecord(d->db, r); !ok)
+            return ok;
+        if (r.finished && (!latest || *r.finished > *latest))
+            latest = r.finished;
+    }
+    if (latest)
+        if (auto purged = purge(d->db, *latest); !purged)
             return std::move(purged).error();
     return tx->commit();
 }
