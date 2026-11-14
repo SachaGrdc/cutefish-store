@@ -29,12 +29,20 @@ ActionTransaction::ActionTransaction(base::EventLoop& loop, base::dbus::Connecti
     m_object.addProperty("AppIds", [this] { return m_identity.appIds; });
     m_object.addProperty("OfferIds", [this] { return m_identity.offerIds; });
     m_object.addProperty("Parent", [this] { return ObjectPath{m_identity.parent.empty() ? "/" : m_identity.parent}; });
+    // D-036: empty except on an update-all parent; they never change.
+    m_object.addProperty("Children", [this] {
+        std::vector<ObjectPath> children;
+        for (const std::string& c : m_identity.children)
+            children.push_back(ObjectPath{c});
+        return children;
+    });
+    m_object.addProperty("Skipped", [this] { return m_identity.skipped; });
     m_object.addProperty("State", [this] { return std::string(toString(m_state)); });
     m_object.addProperty("Phase", [this] { return m_state == TransactionState::Running ? m_phase : std::string(); });
     m_object.addProperty("Progress", [this] { return m_progress; });
     m_object.addProperty("DownloadedBytes", [this] { return m_downloaded; });
     m_object.addProperty("TotalBytes", [this] { return m_total; });
-    m_object.addProperty("Cancellable", [this] { return !finished() && m_cancellable; });
+    m_object.addProperty("Cancellable", [this] { return cancellable(); });
     m_object.addProperty("Plan", [this] { return m_plan; });
     m_object.addProperty("ConfirmationDeadline", [this] { return static_cast<std::uint64_t>(m_deadline); });
     m_object.addProperty("Error", [this] { return m_error ? errorMap(*m_error) : VariantMap{}; });

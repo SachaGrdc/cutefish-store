@@ -46,6 +46,8 @@ struct TransactionManager::Entry
     /// It reached running: the system may have changed.
     bool ran = false;
     bool finished = false;
+    /// The last progress the backend reported, for the parent (D-036).
+    std::optional<Progress> progress;
     std::unique_ptr<ActionTransaction> object;
     std::unique_ptr<base::Timer> deadline;
 };
@@ -58,6 +60,11 @@ struct TransactionManager::Parent
     std::unique_ptr<ActionTransaction> object;
     bool finished = false;
 };
+
+std::string TransactionManager::newObjectPath(const std::string& id) const
+{
+    return newPath ? newPath() : "/org/cutefish/Store/Transactions/" + id;
+}
 
 TransactionManager::TransactionManager(base::EventLoop& loop, base::dbus::Connection& connection,
                                        StateStore& journal, Options options)
@@ -86,14 +93,25 @@ TransactionManager::Entry* TransactionManager::find(const std::string& id)
     return it == m_entries.end() ? nullptr : it->second.get();
 }
 
-bool TransactionManager::engaged(const OfferId& offer) const
+const TransactionManager::Entry* TransactionManager::find(const std::string& id) const
+{
+    const auto it = m_entries.find(id);
+    return it == m_entries.end() ? nullptr : it->second.get();
+}
+
+const TransactionManager::Entry* TransactionManager::engagedBy(const OfferId& offer) const
 {
     for (const auto& [id, e] : m_entries)
         if (!e->finished)
             for (const Target& t : e->targets)
                 if (t.offer == offer)
-                    return true;
-    return false;
+                    return e.get();
+    return nullptr;
+}
+
+bool TransactionManager::engaged(const OfferId& offer) const
+{
+    return engagedBy(offer) != nullptr;
 }
 
 std::vector<std::string> TransactionManager::paths() const
@@ -157,7 +175,8 @@ Result<std::unique_ptr<TransactionManager::Entry>> TransactionManager::make(Tran
 
 void TransactionManager::publish(Entry& e)
 {
-    e.path = newPath ? newPath() : "/org/cutefish/Store/Transactions/" + e.id;
+    if (e.path.empty()) // the children of an UpdateAll have theirs already
+        e.path = newObjectPath(e.id);
     ActionTransaction::Identity identity{.path = e.path,
                                          .id = e.id,
                                          .kind = kindName(e.tx.kind()),
@@ -165,7 +184,9 @@ void TransactionManager::publish(Entry& e)
                                          .appIds = {},
                                          .offerIds = {},
                                          .parent = {},
-                                         .created = e.created};
+                                         .created = e.created,
+                                         .children = {},
+                                         .skipped = {}};
     std::set<std::string> apps;
     for (const Target& t : e.targets) {
         identity.offerIds.push_back(t.offer.str());
@@ -219,16 +240,30 @@ Result<std::string> TransactionManager::start(TransactionKind kind, std::vector<
 
 Result<std::string> TransactionManager::startUpdateAll(std::vector<Target> updates)
 {
-    // One child per backend and installation (D-031).
+    // One child per backend and installation (D-031). An offer that another
+    // transaction already engages is left out, and said so (D-036): it is
+    // being updated or removed there.
     std::map<std::pair<BackendKind, Scope>, std::vector<Target>> groups;
+    std::vector<base::dbus::VariantMap> skipped;
     for (Target& t : updates) {
         auto address = decodeOfferId(t.offer);
         if (!address)
             return std::move(address).error();
+        if (const Entry* by = engagedBy(t.offer)) {
+            CF_INFO(cfTx) << "UpdateAll leaves " << t.offer.str() << " out: engaged by " << by->id;
+            base::dbus::VariantMap s{{"offer-id", t.offer.str()},
+                                     {"reason", std::string("engaged")},
+                                     {"transaction", base::dbus::ObjectPath{by->path}}};
+            if (t.app)
+                s.emplace("app-id", t.app->str());
+            skipped.push_back(std::move(s));
+            continue;
+        }
         groups[{address->backend, address->scope}].push_back(std::move(t));
     }
     if (groups.empty())
-        return Error::notFound("no update available");
+        return skipped.empty() ? Error::notFound("no update available")
+                               : Error::conflict("every update is engaged by another transaction");
     auto parent = std::make_unique<Parent>();
     parent->id = base::Uuid::generate().toString();
     std::vector<std::unique_ptr<Entry>> children;
@@ -238,20 +273,23 @@ Result<std::string> TransactionManager::startUpdateAll(std::vector<Target> updat
             return std::move(child).error(); // nothing created yet
         children.push_back(std::move(child).value());
     }
-    for (const auto& c : children) {
-        TransactionRecord first{.id = c->id,
-                                .backend = c->request.backend(),
-                                .scope = c->request.scope(),
-                                .offers = c->targets,
-                                .snapshot = c->tx.snapshot(),
-                                .created = c->created,
-                                .updated = c->created};
-        if (auto ok = m_journal.saveTransaction(first); !ok)
-            return Error::internal("the journal cannot be written: " + ok.error().message());
-    }
+    // The children are in the journal together or not at all: a failure
+    // leaves no queued child behind, which a restart would turn into an
+    // interrupted transaction that never existed for the user.
+    std::vector<TransactionRecord> records;
+    for (const auto& c : children)
+        records.push_back(TransactionRecord{.id = c->id,
+                                            .backend = c->request.backend(),
+                                            .scope = c->request.scope(),
+                                            .offers = c->targets,
+                                            .snapshot = c->tx.snapshot(),
+                                            .created = c->created,
+                                            .updated = c->created});
+    if (auto ok = m_journal.saveTransactions(records); !ok)
+        return Error::internal("the journal cannot be written: " + ok.error().message());
     // The parent is not journaled (D-018 keeps install, remove, update);
     // its children are.
-    parent->path = newPath ? newPath() : "/org/cutefish/Store/Transactions/" + parent->id;
+    parent->path = newObjectPath(parent->id);
     ActionTransaction::Identity identity{.path = parent->path,
                                          .id = parent->id,
                                          .kind = "update-all",
@@ -259,29 +297,39 @@ Result<std::string> TransactionManager::startUpdateAll(std::vector<Target> updat
                                          .appIds = {},
                                          .offerIds = {},
                                          .parent = {},
-                                         .created = now()};
+                                         .created = now(),
+                                         .children = {},
+                                         .skipped = std::move(skipped)};
     std::set<std::string> apps;
-    for (const auto& c : children)
+    for (const auto& c : children) {
+        c->path = newObjectPath(c->id);
+        identity.children.push_back(c->path);
         for (const Target& t : c->targets) {
             identity.offerIds.push_back(t.offer.str());
             if (t.app)
                 apps.insert(t.app->str());
         }
+    }
     identity.appIds.assign(apps.begin(), apps.end());
     const std::string pid = parent->id;
-    // Confirm and Cancel on the parent apply to every child that allows it.
+    // Confirm on the parent confirms every child awaiting it, once the
+    // parent itself awaits it: every plan is then known (D-037). Cancel
+    // applies to every child that allows it.
     parent->object = std::make_unique<ActionTransaction>(
             m_loop, &m_connection, std::move(identity),
             [this, pid] {
+                const Parent& p = *m_parents.at(pid);
+                if (p.object->state() != TransactionState::AwaitingConfirmation)
+                    return std::string(errors::kNotAllowed);
                 std::string result = errors::kNotAllowed;
-                for (const std::string& c : m_parents.at(pid)->children)
+                for (const std::string& c : std::vector<std::string>(p.children))
                     if (confirm(c).empty())
                         result.clear();
                 return result;
             },
             [this, pid] {
                 std::string result = errors::kNotAllowed;
-                for (const std::string& c : m_parents.at(pid)->children)
+                for (const std::string& c : std::vector<std::string>(m_parents.at(pid)->children))
                     if (cancel(c).empty())
                         result.clear();
                 return result;
@@ -301,6 +349,7 @@ Result<std::string> TransactionManager::startUpdateAll(std::vector<Target> updat
         m_lanes[e.request.backend()].waiting.push_back(Job{e.id});
         lanes.insert(e.request.backend());
     }
+    updateParent(p.id); // its first aggregated plan: every child queued
     const std::string path = p.path;
     m_loop.post([this, alive = m_alive, lanes] {
         if (!*alive)
@@ -402,6 +451,19 @@ void TransactionManager::awaitConfirmation(Entry& e)
 {
     // The lane is given up while the user decides (D-030).
     release(e);
+    if (!e.parent.empty()) {
+        // A child's delay starts when its parent asks for the confirmation,
+        // once every plan of the parent is known (D-037): the parent arms
+        // it then.
+        updateParent(e.parent);
+        if (const auto it = m_parents.find(e.parent); it != m_parents.end() && !it->second->finished)
+            return;
+    }
+    armDeadline(e);
+}
+
+void TransactionManager::armDeadline(Entry& e)
+{
     e.deadline = std::make_unique<base::Timer>(&m_loop);
     e.deadline->setSingleShot(true);
     const std::string id = e.id;
@@ -456,8 +518,14 @@ void TransactionManager::execute(Entry& e)
     events.progress = [this, alive = m_alive, id](const Progress& p) {
         if (!*alive)
             return;
-        if (Entry* e = find(id); e && !e->finished)
-            e->object->setProgress(p);
+        Entry* e = find(id);
+        if (!e || e->finished)
+            return;
+        e->progress = p;
+        e->object->setProgress(p);
+        if (!e->parent.empty())
+            if (const auto it = m_parents.find(e->parent); it != m_parents.end() && !it->second->finished)
+                updateParentProgress(*it->second);
     };
     events.handle = [this, alive = m_alive, id](const std::string& ref) {
         if (!*alive)
@@ -633,8 +701,9 @@ void TransactionManager::updateParent(const std::string& parentId)
     bool anyInterrupted = false;
     bool allSucceeded = true;
     std::optional<Error> firstError;
+    const bool known = plansKnown(p);
     for (const std::string& c : p.children) {
-        const Entry* e = find(c);
+        Entry* e = find(c);
         if (!e)
             continue;
         const TransactionState s = e->tx.state();
@@ -648,13 +717,31 @@ void TransactionManager::updateParent(const std::string& parentId)
         allSucceeded = allSucceeded && s == TransactionState::Succeeded;
         if (!firstError && e->tx.error())
             firstError = e->tx.error();
+        // Every plan is known: the confirmation is asked now, and the delay
+        // of each child awaiting it starts (D-019, D-037).
+        if (known && s == TransactionState::AwaitingConfirmation && !e->deadline)
+            armDeadline(*e);
     }
+    if (auto plan = parentPlan(p, known); plan != p.object->plan())
+        p.object->setPlan(std::move(plan));
     if (open) {
-        // What the user has to act on first.
-        p.object->setState(awaiting  ? TransactionState::AwaitingConfirmation
-                           : running ? TransactionState::Running
-                           : planning ? TransactionState::Planning
-                                      : TransactionState::Queued);
+        // What the user has to act on first; a confirmation only once every
+        // plan is known (D-037), until then the parent is still planning.
+        const TransactionState state = awaiting && known ? TransactionState::AwaitingConfirmation
+                                       : running         ? TransactionState::Running
+                                       : planning || awaiting ? TransactionState::Planning
+                                                              : TransactionState::Queued;
+        p.object->setState(state);
+        UnixSeconds deadline = 0;
+        if (state == TransactionState::AwaitingConfirmation)
+            for (const std::string& c : p.children)
+                if (const Entry* e = find(c); e && e->tx.state() == TransactionState::AwaitingConfirmation) {
+                    const UnixSeconds d = e->object->deadline();
+                    if (d != 0 && (deadline == 0 || d < deadline))
+                        deadline = d;
+                }
+        p.object->setDeadline(deadline);
+        updateParentProgress(p);
         return;
     }
     p.finished = true;
@@ -665,6 +752,136 @@ void TransactionManager::updateParent(const std::string& parentId)
     p.object->finish(end, end == TransactionState::Failed ? firstError : std::nullopt, now());
     const std::string id = p.id;
     retire(p.path, [this, id] { m_parents.erase(id); });
+}
+
+bool TransactionManager::plansKnown(const Parent& p) const
+{
+    for (const std::string& c : p.children) {
+        const Entry* e = find(c);
+        // A child that ended before its plan (refused, locked, cancelled)
+        // has nothing more to show.
+        if (e && !isTerminal(e->tx.state()) && !e->tx.plan())
+            return false;
+    }
+    return true;
+}
+
+bool TransactionManager::parentCancellable(const Parent& p) const
+{
+    // True when Cancel on the parent would reach at least one child.
+    for (const std::string& c : p.children) {
+        const Entry* e = find(c);
+        if (!e || e->finished)
+            continue;
+        switch (e->tx.state()) {
+        case TransactionState::Queued:
+        case TransactionState::AwaitingConfirmation:
+            return true; // immediate
+        case TransactionState::Planning: {
+            if (!e->executing)
+                return true; // computing a plan or waiting: immediate
+            // Simulating again before executing: the backend decides.
+            const auto lane = m_lanes.find(e->request.backend());
+            if (e->object->cancellable()
+                || (lane != m_lanes.end() && lane->second.backend
+                    && lane->second.backend->capabilities().cancelAnytime))
+                return true;
+            break;
+        }
+        case TransactionState::Running:
+            if (e->object->cancellable())
+                return true;
+            break;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
+base::dbus::VariantMap TransactionManager::parentPlan(const Parent& p, bool known) const
+{
+    namespace dbus = base::dbus;
+    std::vector<dbus::VariantMap> children;
+    std::set<std::string> reasons;
+    bool requiresConfirmation = false;
+    std::uint64_t downloadSize = 0;
+    std::int64_t installedSizeChange = 0;
+    for (const std::string& c : p.children) {
+        const Entry* e = find(c);
+        if (!e)
+            continue;
+        const TransactionState s = e->tx.state();
+        children.push_back({{"transaction", dbus::ObjectPath{e->path}},
+                            {"backend", std::string(toString(e->request.backend()))},
+                            {"scope", std::string(toString(e->request.scope()))},
+                            {"state", std::string(toString(s))},
+                            {"plan", e->object->plan()}});
+        if (s == TransactionState::AwaitingConfirmation) {
+            requiresConfirmation = true;
+            for (const ConfirmationReason r : e->tx.reasons().list())
+                reasons.emplace(toString(r));
+        }
+        // What will be, or was, done: a child that ended before running
+        // does nothing.
+        if (e->tx.plan() && !(isTerminal(s) && !e->ran)) {
+            downloadSize += e->tx.plan()->downloadSize();
+            installedSizeChange += e->tx.plan()->installedSizeChange();
+        }
+    }
+    dbus::VariantMap m{{"kind", std::string("update-all")},
+                       {"backend", std::string("multiple")},
+                       {"complete", known},
+                       {"requires-confirmation", requiresConfirmation},
+                       {"reasons", std::vector<std::string>(reasons.begin(), reasons.end())},
+                       {"children", children}};
+    // Totals only when every plan is known: a partial sum would look like
+    // the whole.
+    if (known) {
+        m.emplace("download-size", downloadSize);
+        m.emplace("installed-size-change", installedSizeChange);
+    }
+    return m;
+}
+
+void TransactionManager::updateParentProgress(Parent& p)
+{
+    // D-036: nothing is computed that the children do not tell. With one
+    // child, its progress is the parent's. With several, a fraction would
+    // weigh work of different kinds (a deb, a Flatpak download) against
+    // each other: it stays unknown; the byte counts add up, and are given
+    // only when every child still open runs and has announced its total.
+    Progress out;
+    if (p.children.size() == 1) {
+        if (const Entry* e = find(p.children.front()); e && e->progress) {
+            out = *e->progress;
+            out.item.clear();
+        }
+    } else {
+        bool reliable = true;
+        std::uint64_t downloaded = 0;
+        std::uint64_t total = 0;
+        for (const std::string& c : p.children) {
+            const Entry* e = find(c);
+            if (!e)
+                continue;
+            const bool open = !isTerminal(e->tx.state());
+            if (open && (e->tx.state() != TransactionState::Running || !e->progress || e->progress->totalBytes == 0)) {
+                reliable = false;
+                break;
+            }
+            if (e->progress && e->progress->totalBytes != 0) {
+                downloaded += e->progress->downloadedBytes;
+                total += e->progress->totalBytes;
+            }
+        }
+        if (reliable) {
+            out.downloadedBytes = downloaded;
+            out.totalBytes = total;
+        }
+    }
+    out.cancellable = parentCancellable(p);
+    p.object->setProgress(out);
 }
 
 void TransactionManager::recover(std::vector<TransactionRecord> toReattach)

@@ -957,7 +957,9 @@ void StoreService::exportActions()
             {{"offer_ids", "options"}, {"transaction"}});
 
     // UpdateAll: a parent update-all transaction, one child per backend and
-    // installation (D-031).
+    // installation (D-031), over the updates of every usable backend (H.2).
+    // The manager leaves out offers already engaged (D-036); a PackageKit
+    // locked by another program fails its child only (D-038).
     o.addMethod(
             "UpdateAll", "a{sv}", "o",
             [this, noOptions, answer](MethodCall& call) {

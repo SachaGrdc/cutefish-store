@@ -84,9 +84,14 @@ public:
     /// (no such backend), Conflict (an offer already engaged: Busy),
     /// Internal (the journal cannot be written).
     Result<std::string> start(TransactionKind kind, std::vector<Target> targets);
-    /// UpdateAll (D-031): a parent `update-all` transaction, and one child
-    /// `update` transaction per backend and installation. Conflict when
-    /// one of the offers is already engaged; nothing is created then.
+    /// UpdateAll (D-031, H.4): a parent `update-all` transaction, and one
+    /// child `update` transaction per backend and installation, written to
+    /// the journal together or not at all. An offer already engaged by
+    /// another transaction is left out and listed in the parent's `Skipped`
+    /// (D-036); Conflict (Busy) only when every offer is engaged, NotFound
+    /// when there is none. The parent publishes `Children`, an aggregated
+    /// `Plan`, `Progress` and `Cancellable` (D-036), and asks for a
+    /// confirmation once every child's plan is known (D-037).
     Result<std::string> startUpdateAll(std::vector<Target> updates);
     /// Recovery at startup (SERVICE.md §5.6): the running transactions the
     /// journal kept with a backend handle are re-attached, or interrupted
@@ -123,6 +128,8 @@ private:
     void plan(Entry& e);
     void execute(Entry& e);
     void awaitConfirmation(Entry& e);
+    /// Starts the confirmation delay of a transaction awaiting it (D-019).
+    void armDeadline(Entry& e);
     void stateChanged(Entry& e);
     /// Ends the transaction with this error: cancelled for Cancelled,
     /// interrupted for a lost backend operation, failed otherwise.
@@ -134,7 +141,17 @@ private:
     std::string operation(Entry& e, const char* what);
     void retire(const std::string& path, std::function<void()> erase);
     void updateParent(const std::string& parentId);
+    /// Progress, byte counts and Cancellable of a parent (D-036).
+    void updateParentProgress(Parent& p);
+    /// Every child of the parent has a plan, or ended without one (D-037).
+    bool plansKnown(const Parent& p) const;
+    bool parentCancellable(const Parent& p) const;
+    base::dbus::VariantMap parentPlan(const Parent& p, bool known) const;
+    std::string newObjectPath(const std::string& id) const;
     Entry* find(const std::string& id);
+    const Entry* find(const std::string& id) const;
+    /// The unfinished transaction that engages this offer, if any.
+    const Entry* engagedBy(const OfferId& offer) const;
     UnixSeconds now() const;
 
     base::EventLoop& m_loop;

@@ -43,6 +43,11 @@ public:
         /// The update-all parent; empty for none (published as "/").
         std::string parent = {};
         UnixSeconds created = 0;
+        /// update-all only (D-036): the paths of its children, in order.
+        std::vector<std::string> children = {};
+        /// update-all only (D-036): the updates it left out, each with
+        /// `offer-id`, `app-id` (when known), `reason` and `transaction`.
+        std::vector<base::dbus::VariantMap> skipped = {};
     };
 
     /// `confirm` and `cancel` return the D-Bus error name to answer with, or
@@ -54,6 +59,10 @@ public:
     const std::string& id() const noexcept { return m_identity.id; }
     TransactionState state() const noexcept { return m_state; }
     bool finished() const noexcept { return isTerminal(m_state); }
+    const base::dbus::VariantMap& plan() const noexcept { return m_plan; }
+    UnixSeconds deadline() const noexcept { return m_deadline; }
+    /// As published: a cancellation request would be honoured now.
+    bool cancellable() const noexcept { return !finished() && m_cancellable; }
 
     void setState(TransactionState state);
     /// The plan to show (`Plan` property), with the reasons of the pending
