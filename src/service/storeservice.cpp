@@ -849,6 +849,11 @@ void StoreService::exportActions()
                 auto offer = OfferId::parse(raw);
                 if (!offer)
                     return replyError(call, offer);
+                // New installations go to the user installation (D-005);
+                // the shared system installation is only managed (D-011),
+                // O-013 being open: refused before any transaction.
+                if (auto refused = newInstallRefusal(*offer); !refused.empty())
+                    return call.replyError(errors::kNotAllowed, refused);
                 if (auto inventory = actionInventory(*offer); !inventory)
                     return replyError(call, inventory);
                 using Answer = Result<std::pair<std::optional<AppId>, bool>>;

@@ -138,3 +138,15 @@ TEST(Marshal, ErrorNames)
     EXPECT_EQ(m.at("code").value<std::string>(), "no-space");
     EXPECT_EQ(m.at("details").value<std::string>(), "disk full");
 }
+
+TEST(Marshal, ANewInstallInASharedSystemInstallationIsRefused)
+{
+    auto offer = [](const char* raw) { return OfferId::parse(raw).value(); };
+    // D-005, D-011 (O-013 open): a new Flatpak goes to the user installation.
+    const std::string refused = newInstallRefusal(offer("flatpak:system:flathub:app/org.gimp.GIMP/x86_64/stable"));
+    EXPECT_NE(refused.find("user installation"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("flatpak:system:flathub:app/org.gimp.GIMP/x86_64/stable"), std::string::npos);
+    EXPECT_EQ(newInstallRefusal(offer("flatpak:user:flathub:app/org.gimp.GIMP/x86_64/stable")), "");
+    // Distribution packages are system-wide by nature: not concerned.
+    EXPECT_EQ(newInstallRefusal(offer("packagekit:gimp")), "");
+}

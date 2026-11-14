@@ -56,6 +56,14 @@ Result<SearchOptions> searchOptions(const dbus::VariantMap& options);
 /// The `options` of GetInstalled: `backend` (s).
 Result<std::optional<BackendKind>> installedOptions(const dbus::VariantMap& options);
 
+/// Why Install refuses this offer before any transaction, or empty when it
+/// may be installed. A new installation goes to the user installation
+/// (D-005); the system installation of a backend whose system installation
+/// is shared by every user (ConfirmationPolicy::sharedSystemScope: Flatpak)
+/// is only managed, never added to (D-011, O-013 open). Distribution
+/// packages are system-wide by nature and are not concerned.
+std::string newInstallRefusal(const OfferId& offer);
+
 dbus::VariantMap toMap(const AppSummary& summary);
 dbus::VariantMap toMap(const CategoryCount& category);
 dbus::VariantMap toMap(const InstalledItem& item);

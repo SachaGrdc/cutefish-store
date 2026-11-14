@@ -119,6 +119,19 @@ Result<std::optional<BackendKind>> installedOptions(const dbus::VariantMap& opti
     return backend;
 }
 
+std::string newInstallRefusal(const OfferId& offer)
+{
+    auto address = decodeOfferId(offer);
+    if (!address)
+        return {}; // not this rule's concern: the offer is refused further on
+    if (address->scope != Scope::System
+        || !ConfirmationPolicy::defaultSharedSystemScope().contains(address->backend))
+        return {};
+    return "new " + std::string(toString(address->backend))
+            + " installations go to the user installation; " + offer.str()
+            + " is in the system installation";
+}
+
 dbus::VariantMap toMap(const AppSummary& s)
 {
     return {{"id", s.id.str()},
