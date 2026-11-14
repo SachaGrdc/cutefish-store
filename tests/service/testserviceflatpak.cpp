@@ -1,4 +1,5 @@
-// Flatpak transactions through the service (H.3, SERVICE.md §23): the service
+// Flatpak transactions through the service (H.3, SERVICE.md §23), and
+// UpdateAll over every backend and installation (H.4, §24): the service
 // in-process with the real Flatpak backend (FlatpakBackend) over a double of
 // libflatpak (tests/backend-flatpak/fakestore.h), and, where both backends
 // are needed, its real PackageKit backend against a simulated PackageKit
@@ -149,6 +150,8 @@ protected:
                                                       return;
                                                   if (const auto it = changed.find("State"); it != changed.end())
                                                       m_states[m.path()].push_back(it->second.value<std::string>());
+                                                  if (const auto it = changed.find("Progress"); it != changed.end())
+                                                      m_progress[m.path()].push_back(it->second.value<double>());
                                               }));
     }
 
@@ -305,6 +308,7 @@ protected:
     {
         return call(kPath, kInterface, "Update", offers, dbus::VariantMap{});
     }
+    Answer updateAll() { return call(kPath, kInterface, "UpdateAll", dbus::VariantMap{}); }
     std::string confirm(const std::string& t) { return call(t, kTxInterface, "Confirm").error; }
     std::string cancel(const std::string& t) { return call(t, kTxInterface, "Cancel").error; }
 
@@ -328,6 +332,31 @@ protected:
     bool waitState(const std::string& t, const std::string& wanted)
     {
         return spin([&] { return state(t) == wanted; });
+    }
+
+    /// The Children of an update-all parent (D-036), in order.
+    std::vector<std::string> children(const std::string& t)
+    {
+        std::vector<std::string> out;
+        const auto p = transaction(t);
+        if (p.contains("Children"))
+            for (const auto& c : p.at("Children").value<std::vector<dbus::ObjectPath>>())
+                out.push_back(c.path);
+        return out;
+    }
+
+    std::vector<dbus::VariantMap> skipped(const std::string& t)
+    {
+        const auto p = transaction(t);
+        return p.contains("Skipped") ? p.at("Skipped").value<std::vector<dbus::VariantMap>>()
+                                     : std::vector<dbus::VariantMap>{};
+    }
+
+    template <typename T>
+    T txProperty(const std::string& t, const char* name)
+    {
+        const auto p = transaction(t);
+        return p.contains(name) ? p.at(name).value<T>() : T{};
     }
 
     dbus::VariantMap plan(const std::string& t)
@@ -389,6 +418,7 @@ protected:
     fp::FakeStore* m_store = nullptr;
     std::vector<dbus::Match> m_matches;
     std::map<std::string, std::vector<std::string>> m_states;
+    std::map<std::string, std::vector<double>> m_progress;
     int m_installedChanged = 0;
     int m_added = 0;
 };
@@ -853,6 +883,508 @@ TEST_F(WithPackageKit, ASystemUpdateFromSettingsDoesNotHoldFlatpak)
     EXPECT_EQ(realInstalls(), 0);
     ASSERT_TRUE(m_pk.finish(external));
     EXPECT_EQ(property<std::string>("State"), "ready");
+}
+
+// --- UpdateAll over every backend and installation (H.4) ------------------------
+//
+// D-031 (one child per backend and installation), and the H.4 decisions:
+// D-036 (Children, Skipped, aggregated Plan, Progress and Cancellable),
+// D-037 (one confirmation once every plan is known), D-038 (a locked
+// PackageKit fails its child only).
+
+constexpr const char* kBusy = "org.cutefish.Store1.Error.Busy";
+constexpr const char* kGimpDebInstalled = "gimp;3.0.4-3;amd64;installed:debian-stable-main";
+constexpr const char* kGimpDebUpdate = "gimp;3.0.4-4;amd64;debian-stable-security";
+constexpr const char* kLibDebInstalled = "libgimp-old;1.0;amd64;installed:debian-stable-main";
+
+/// GIMP and Inkscape in the user installation, QGIS in the system one, each
+/// with an update.
+void flatpakUpdates(fp::FakeStore& s, bool system = true, bool inkscape = false)
+{
+    s.installed_[Scope::User] = {{app("org.gimp.GIMP"), "flathub"}};
+    s.updates_[Scope::User] = {{app("org.gimp.GIMP"), "flathub", "c2"}};
+    if (inkscape) {
+        s.installed_[Scope::User].push_back({app("org.inkscape.Inkscape"), "flathub"});
+        s.updates_[Scope::User].push_back({app("org.inkscape.Inkscape"), "flathub", "c2"});
+    }
+    if (system) {
+        s.installed_[Scope::System] = {{app("org.qgis.qgis", "lts"), "flathub"}};
+        s.updates_[Scope::System] = {{app("org.qgis.qgis", "lts"), "flathub", "c2"}};
+    }
+}
+
+TEST_F(FlatpakTransactions, UpdateAllLeavesOutWhatIsAlreadyEngagedAndSaysWhy)
+{
+    // D-036, decision A: an offer another transaction engages is left out of
+    // UpdateAll, and listed in Skipped with the transaction that holds it.
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false, true); });
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer gimp = update({kGimpUser});
+    ASSERT_TRUE(gimp.error.empty()) << gimp.error;
+    ASSERT_TRUE(waitState(gimp.path, "awaiting-confirmation"));
+
+    const Answer all = updateAll();
+    ASSERT_TRUE(all.error.empty()) << all.error;
+    const auto left = skipped(all.path);
+    ASSERT_EQ(left.size(), 1u);
+    EXPECT_EQ(left[0].at("offer-id").value<std::string>(), kGimpUser);
+    EXPECT_EQ(left[0].at("app-id").value<std::string>(), "org.gimp.GIMP");
+    EXPECT_EQ(left[0].at("reason").value<std::string>(), "engaged");
+    EXPECT_EQ(left[0].at("transaction").value<dbus::ObjectPath>().path, gimp.path);
+    EXPECT_EQ(strings(transaction(all.path), "OfferIds"), std::vector<std::string>{kInkscapeUser});
+    const auto kids = children(all.path);
+    ASSERT_EQ(kids.size(), 1u);
+    EXPECT_EQ(strings(transaction(kids[0]), "OfferIds"), std::vector<std::string>{kInkscapeUser});
+
+    // The two go on separately; the skipped offer stays with its own
+    // transaction.
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+    EXPECT_EQ(state(gimp.path), "awaiting-confirmation");
+    EXPECT_EQ(cancel(gimp.path), "");
+    ASSERT_TRUE(waitState(gimp.path, "cancelled"));
+    EXPECT_EQ(m_store->runs.load(), 1);
+}
+
+TEST_F(FlatpakTransactions, UpdateAllIsBusyOnlyWhenEveryUpdateIsEngaged)
+{
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false, true); });
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer both = update({kGimpUser, kInkscapeUser});
+    ASSERT_TRUE(waitState(both.path, "awaiting-confirmation"));
+    const int added = m_added;
+    const std::size_t journaled = history().size();
+    EXPECT_EQ(updateAll().error, kBusy);
+    settle();
+    EXPECT_EQ(m_added, added); // nothing created
+    EXPECT_EQ(history().size(), journaled);
+    EXPECT_EQ(m_store->resolves.load(), 1); // only the Update's plan
+}
+
+class UpdateAllWithPackageKit : public WithPackageKit
+{
+protected:
+    /// GIMP installed from Debian with a security update. `removes`: the
+    /// update also removes a package (a confirmation). `holdSimulation`:
+    /// the first simulation stays running until finished by the test.
+    /// `holdReal`: the real update stays running, cancellable or not.
+    void debUpdate(bool removes = false, bool holdSimulation = false, bool holdReal = false, bool cancellable = true)
+    {
+        fakepk::Answer installedDeb;
+        installedDeb.packages = {pkg(pk::Info::Installed, kGimpDebInstalled)};
+        m_pk.answer("GetPackages", installedDeb);
+        fakepk::Answer updates;
+        updates.packages = {pkg(pk::Info::Security, kGimpDebUpdate)};
+        m_pk.answer("GetUpdates", updates);
+        fakepk::Answer sim;
+        sim.packages = {pkg(pk::Info::Updating, kGimpDebUpdate)};
+        if (removes)
+            sim.packages.push_back(pkg(pk::Info::Removing, kLibDebInstalled));
+        if (holdSimulation) {
+            fakepk::Answer held = sim;
+            held.hold = true;
+            m_pk.answer("UpdatePackages", held, true);
+        }
+        m_pk.answer("UpdatePackages", sim, true);
+        fakepk::Answer real;
+        if (holdReal) {
+            real.hold = true;
+            real.steps = {{pk::Status::Update, 50, cancellable}};
+        }
+        m_pk.answer("UpdatePackages", real, false);
+    }
+
+    int storeUpdates(bool simulate)
+    {
+        int n = 0;
+        for (const auto& c : m_pk.calls())
+            n += c.method == "UpdatePackages" && c.simulate() == simulate;
+        return n;
+    }
+
+    /// The held UpdatePackages of the store, once it is the only transaction
+    /// running and the last one asked (the store's PackageKit queries are
+    /// one at a time, P-009: none can run beside it).
+    std::string heldPackageKit()
+    {
+        std::vector<std::string> held;
+        spin([&] {
+            held = m_pk.runningTransactions();
+            const auto calls = m_pk.calls();
+            return held.size() == 1 && !calls.empty() && calls.back().method == "UpdatePackages";
+        });
+        return held.size() == 1 ? held.front() : std::string();
+    }
+
+    /// The children of a parent, by their only offer.
+    std::map<std::string, std::string> childrenByOffer(const std::string& parent)
+    {
+        std::map<std::string, std::string> out;
+        for (const std::string& c : children(parent)) {
+            const auto offers = strings(transaction(c), "OfferIds");
+            if (offers.size() == 1)
+                out[offers.front()] = c;
+        }
+        return out;
+    }
+};
+
+TEST_F(UpdateAllWithPackageKit, UpdateAllCoversEveryBackendAndInstallation)
+{
+    debUpdate(false, false, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 3; }));
+    EXPECT_EQ(property<std::uint32_t>("UpdateCount"), 3u);
+
+    const Answer all = updateAll();
+    ASSERT_TRUE(all.error.empty()) << all.error;
+    const auto parent = transaction(all.path);
+    EXPECT_EQ(parent.at("Kind").value<std::string>(), "update-all");
+    EXPECT_EQ(parent.at("Backend").value<std::string>(), "multiple");
+    EXPECT_EQ(parent.at("Parent").value<dbus::ObjectPath>().path, "/");
+    EXPECT_TRUE(skipped(all.path).empty());
+    EXPECT_EQ(strings(parent, "OfferIds").size(), 3u);
+
+    // One child per backend and installation (D-031), each pointing back.
+    const auto byOffer = childrenByOffer(all.path);
+    ASSERT_EQ(byOffer.size(), 3u);
+    for (const char* offer : {"packagekit:gimp", kGimpUser, kQgisSystem}) {
+        ASSERT_TRUE(byOffer.contains(offer)) << offer;
+        const auto child = transaction(byOffer.at(offer));
+        EXPECT_EQ(child.at("Kind").value<std::string>(), "update");
+        EXPECT_EQ(child.at("Parent").value<dbus::ObjectPath>().path, all.path);
+        EXPECT_TRUE(children(byOffer.at(offer)).empty());
+        EXPECT_TRUE(skipped(byOffer.at(offer)).empty());
+    }
+    EXPECT_EQ(transaction(byOffer.at("packagekit:gimp")).at("Backend").value<std::string>(), "packagekit");
+    EXPECT_EQ(transaction(byOffer.at(kGimpUser)).at("Backend").value<std::string>(), "flatpak");
+
+    // PackageKit needs no confirmation and runs; the two Flatpak children
+    // bring permissions and wait: the parent asks once, with every plan.
+    ASSERT_TRUE(waitState(byOffer.at("packagekit:gimp"), "running"));
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    const auto p = plan(all.path);
+    EXPECT_EQ(p.at("kind").value<std::string>(), "update-all");
+    EXPECT_TRUE(p.at("complete").value<bool>(false));
+    EXPECT_TRUE(p.at("requires-confirmation").value<bool>(false));
+    EXPECT_TRUE(has(strings(p, "reasons"), "new-permissions"));
+    const auto planned = p.at("children").value<std::vector<dbus::VariantMap>>();
+    ASSERT_EQ(planned.size(), 3u);
+    std::uint64_t download = 0;
+    for (std::size_t i = 0; i < planned.size(); ++i) {
+        const std::string path = planned[i].at("transaction").value<dbus::ObjectPath>().path;
+        EXPECT_EQ(path, children(all.path)[i]); // same order as Children
+        EXPECT_EQ(planned[i].at("plan").value<dbus::VariantMap>(), plan(path));
+        EXPECT_EQ(planned[i].at("state").value<std::string>(), state(path));
+        download += plan(path).at("download-size").value<std::uint64_t>();
+    }
+    EXPECT_EQ(p.at("download-size").value<std::uint64_t>(), download);
+    EXPECT_EQ(download, 3000u); // two Flatpak plans of 1500, PackageKit gives 0 here
+
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(byOffer.at(kGimpUser), "succeeded"));
+    ASSERT_TRUE(waitState(byOffer.at(kQgisSystem), "succeeded"));
+    EXPECT_EQ(state(all.path), "running"); // PackageKit still runs
+    m_pk.replace("GetUpdates", fakepk::Answer{});
+    ASSERT_TRUE(m_pk.finish(heldPackageKit()));
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+    EXPECT_EQ(storeUpdates(false), 1);
+    EXPECT_EQ(m_store->runs.load(), 2);
+
+    // Children in the journal, the parent never (D-018, D-031).
+    for (const auto& [offer, path] : byOffer)
+        EXPECT_EQ(journal(path).at("state").value<std::string>(), "succeeded") << offer;
+    const std::string parentId = parent.at("Id").value<std::string>();
+    for (auto& h : history())
+        EXPECT_NE(h.at("id").value<std::string>(), parentId);
+    ASSERT_TRUE(spin([&] { return updateOffers().empty() && property<std::uint32_t>("UpdateCount") == 0; }));
+}
+
+TEST_F(UpdateAllWithPackageKit, PackageKitRunsBesideFlatpakAndFlatpakOneAtATime)
+{
+    // P-009 as decided: the backends never wait for each other (D-030); the
+    // two Flatpak installations share one lane (D-034).
+    debUpdate(false, false, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 3; }));
+    const Answer all = updateAll();
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    const auto byOffer = childrenByOffer(all.path);
+    m_store->whileRunning.close();
+    EXPECT_EQ(confirm(all.path), "");
+
+    // PackageKit and one Flatpak child run together; the other Flatpak child
+    // waits, confirmed, in planning.
+    std::string first;
+    std::string second;
+    ASSERT_TRUE(spin([&] {
+        const std::string user = state(byOffer.at(kGimpUser));
+        const std::string system = state(byOffer.at(kQgisSystem));
+        if (user == "running" && system == "planning") {
+            first = byOffer.at(kGimpUser);
+            second = byOffer.at(kQgisSystem);
+        } else if (system == "running" && user == "planning") {
+            first = byOffer.at(kQgisSystem);
+            second = byOffer.at(kGimpUser);
+        }
+        return !first.empty() && state(byOffer.at("packagekit:gimp")) == "running";
+    }));
+    EXPECT_EQ(state(all.path), "running");
+    EXPECT_EQ(m_store->runs.load(), 1);
+    settle();
+    EXPECT_EQ(state(second), "planning");
+
+    m_store->whileRunning.open();
+    ASSERT_TRUE(waitState(first, "succeeded"));
+    ASSERT_TRUE(waitState(second, "succeeded"));
+    EXPECT_EQ(state(byOffer.at("packagekit:gimp")), "running");
+    ASSERT_TRUE(m_pk.finish(heldPackageKit()));
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+}
+
+TEST_F(UpdateAllWithPackageKit, TheParentAsksForConfirmationOnceEveryPlanIsKnown)
+{
+    // D-037, decision D: a child awaiting a confirmation does not make the
+    // parent ask while another child is still planning.
+    debUpdate(true, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    ASSERT_TRUE(all.error.empty()) << all.error;
+    const auto byOffer = childrenByOffer(all.path);
+    const std::string deb = byOffer.at("packagekit:gimp");
+    const std::string flatpak = byOffer.at(kGimpUser);
+
+    ASSERT_TRUE(waitState(flatpak, "awaiting-confirmation"));
+    const std::string simulation = heldPackageKit(); // PackageKit still simulating
+    ASSERT_FALSE(simulation.empty());
+    settle();
+    EXPECT_EQ(state(deb), "planning");
+    EXPECT_EQ(state(all.path), "planning");
+    EXPECT_EQ(confirm(all.path), kNotAllowed); // not every plan is shown yet
+    EXPECT_EQ(txProperty<std::uint64_t>(flatpak, "ConfirmationDeadline"), 0u); // its delay has not started
+    auto partial = plan(all.path);
+    EXPECT_FALSE(partial.at("complete").value<bool>(true));
+    EXPECT_FALSE(partial.contains("download-size")); // never a partial total
+    EXPECT_FALSE(partial.contains("installed-size-change"));
+
+    ASSERT_TRUE(m_pk.finish(simulation));
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    ASSERT_TRUE(waitState(deb, "awaiting-confirmation"));
+    const auto p = plan(all.path);
+    EXPECT_TRUE(p.at("complete").value<bool>(false));
+    EXPECT_TRUE(p.contains("download-size"));
+    EXPECT_TRUE(has(strings(p, "reasons"), "new-permissions"));
+    EXPECT_TRUE(has(strings(p, "reasons"), "removes-packages"));
+    const auto debDeadline = txProperty<std::uint64_t>(deb, "ConfirmationDeadline");
+    const auto flatpakDeadline = txProperty<std::uint64_t>(flatpak, "ConfirmationDeadline");
+    EXPECT_NE(debDeadline, 0u);
+    EXPECT_NE(flatpakDeadline, 0u);
+    EXPECT_EQ(txProperty<std::uint64_t>(all.path, "ConfirmationDeadline"), std::min(debDeadline, flatpakDeadline));
+
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+    EXPECT_EQ(state(deb), "succeeded");
+    EXPECT_EQ(state(flatpak), "succeeded");
+    // One confirmation asked, once.
+    const auto seen = states(all.path);
+    EXPECT_EQ(std::count(seen.begin(), seen.end(), "awaiting-confirmation"), 1);
+}
+
+TEST_F(UpdateAllWithPackageKit, AChildConfirmationDelayStartsWhenTheParentAsks)
+{
+    // D-019 with D-037: a child that waits for its siblings' plans is not
+    // cancelled by its delay meanwhile; once the parent asks, the delay
+    // applies to every child, and nothing runs without a confirmation.
+    debUpdate(true, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); },
+          Options{.packagekit = true, .confirmationTimeout = 300ms});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    const auto byOffer = childrenByOffer(all.path);
+    const std::string flatpak = byOffer.at(kGimpUser);
+    ASSERT_TRUE(waitState(flatpak, "awaiting-confirmation"));
+    const std::string simulation = heldPackageKit();
+    settle(700ms); // more than the delay
+    EXPECT_EQ(state(flatpak), "awaiting-confirmation");
+
+    ASSERT_TRUE(m_pk.finish(simulation));
+    ASSERT_TRUE(waitState(all.path, "cancelled"));
+    EXPECT_EQ(state(flatpak), "cancelled");
+    EXPECT_EQ(state(byOffer.at("packagekit:gimp")), "cancelled");
+    EXPECT_EQ(m_store->executes.load(), 0);
+    EXPECT_EQ(storeUpdates(false), 0);
+}
+
+TEST_F(UpdateAllWithPackageKit, ALockedPackageKitFailsItsChildWhileFlatpakUpdates)
+{
+    // D-038, decision B: Settings is updating the system; the deb child fails
+    // locked, Flatpak goes on, and the parent ends failed. The system update
+    // is never touched.
+    debUpdate();
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    fakepk::Answer held;
+    held.hold = true;
+    held.steps = {{pk::Status::Install, 30, false}};
+    const std::string external = m_pk.startExternal("UpdatePackages", held);
+    ASSERT_TRUE(spin([&] {
+        const auto b = backend("packagekit");
+        return b.contains("activity") && b.at("activity").value<std::string>() == "changing";
+    }));
+    const int simulations = storeUpdates(true);
+
+    const Answer all = updateAll();
+    ASSERT_TRUE(all.error.empty()) << all.error;
+    const auto byOffer = childrenByOffer(all.path);
+    ASSERT_TRUE(waitState(byOffer.at("packagekit:gimp"), "failed"));
+    EXPECT_EQ(errorCode(byOffer.at("packagekit:gimp")), "locked");
+    // The failed child has no plan: every plan is known, the parent asks.
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(byOffer.at(kGimpUser), "succeeded"));
+    ASSERT_TRUE(waitState(all.path, "failed"));
+    EXPECT_EQ(errorCode(all.path), "locked");
+    EXPECT_EQ(storeUpdates(true), simulations); // nothing sent to PackageKit
+    EXPECT_EQ(m_pk.cancels(), 0);
+    ASSERT_TRUE(m_pk.finish(external));
+    EXPECT_EQ(property<std::string>("State"), "ready");
+}
+
+TEST_F(UpdateAllWithPackageKit, APartialFailureNeverSucceeds)
+{
+    debUpdate();
+    start([](fp::FakeStore& s) {
+        flatpakUpdates(s, false);
+        s.runError = Error::backend(BackendFailure::AuthDenied, "polkit said no");
+    }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    const auto byOffer = childrenByOffer(all.path);
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(all.path, "failed"));
+    EXPECT_EQ(state(byOffer.at("packagekit:gimp")), "succeeded");
+    EXPECT_EQ(state(byOffer.at(kGimpUser)), "failed");
+    EXPECT_EQ(errorCode(all.path), "auth-denied");
+    EXPECT_EQ(journal(byOffer.at("packagekit:gimp")).at("state").value<std::string>(), "succeeded");
+    EXPECT_EQ(journal(byOffer.at(kGimpUser)).at("state").value<std::string>(), "failed");
+}
+
+TEST_F(UpdateAllWithPackageKit, CancellingTheParentReachesWhatCanBeCancelled)
+{
+    // D-036: the parent is Cancellable when a Cancel would reach at least one
+    // child; it never cancels what cannot be.
+    debUpdate(false, false, true, false); // PackageKit: AllowCancel false
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    const auto byOffer = childrenByOffer(all.path);
+    const std::string deb = byOffer.at("packagekit:gimp");
+    const std::string flatpak = byOffer.at(kGimpUser);
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_TRUE(txProperty<bool>(all.path, "Cancellable")); // the Flatpak child awaits
+    m_store->whileRunning.close();
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(flatpak, "running"));
+    ASSERT_TRUE(spin([&] { return state(deb) == "running" && !txProperty<bool>(deb, "Cancellable"); }));
+    ASSERT_TRUE(spin([&] { return txProperty<bool>(all.path, "Cancellable"); }));
+
+    EXPECT_EQ(cancel(all.path), "");
+    ASSERT_TRUE(waitState(flatpak, "cancelled"));
+    EXPECT_EQ(state(deb), "running");
+    ASSERT_TRUE(spin([&] { return !txProperty<bool>(all.path, "Cancellable"); }));
+    EXPECT_EQ(cancel(all.path), kNotAllowed); // only PackageKit is left, and it refuses
+    EXPECT_EQ(m_pk.cancels(), 0);
+    ASSERT_TRUE(m_pk.finish(heldPackageKit()));
+    ASSERT_TRUE(waitState(all.path, "cancelled"));
+    EXPECT_EQ(state(deb), "succeeded");
+}
+
+TEST_F(UpdateAllWithPackageKit, TheParentShowsNoFractionForSeveralChildren)
+{
+    // D-036: several children of different kinds have no common measure; the
+    // parent never publishes a fraction the children did not give.
+    debUpdate(false, false, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    const auto byOffer = childrenByOffer(all.path);
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(byOffer.at(kGimpUser), "succeeded"));
+    ASSERT_TRUE(spin([&] { return txProperty<double>(byOffer.at("packagekit:gimp"), "Progress") == 0.5; }));
+    ASSERT_TRUE(m_pk.finish(heldPackageKit()));
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+    // The children had progress (Flatpak 0.5 at its end, PackageKit 50 %).
+    EXPECT_FALSE(m_progress[byOffer.at("packagekit:gimp")].empty());
+    for (const double fraction : m_progress[all.path])
+        EXPECT_EQ(fraction, -1.0);
+    EXPECT_EQ(txProperty<double>(all.path, "Progress"), -1.0);
+}
+
+TEST_F(FlatpakTransactions, TheParentOfOneChildShowsItsProgress)
+{
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); });
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 1; }));
+    const Answer all = updateAll();
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(all.path, "succeeded"));
+    const auto& seen = m_progress[all.path];
+    EXPECT_NE(std::find(seen.begin(), seen.end(), 0.5), seen.end()); // the child's 0.5
+}
+
+TEST_F(UpdateAllWithPackageKit, AfterARestartTheChildrenAreRecoveredWithoutTheirParent)
+{
+    // §5.6 unchanged: the parent is not journaled. A PackageKit child still
+    // running is re-attached alone (Parent "/"); a Flatpak child running is
+    // interrupted. Nothing is executed again. (H.4 study: see SERVICE.md
+    // §24 for the options to keep the link.)
+    debUpdate(false, false, true);
+    start([](fp::FakeStore& s) { flatpakUpdates(s, false); }, Options{.packagekit = true});
+    ASSERT_TRUE(spin([&] { return updateOffers().size() == 2; }));
+    const Answer all = updateAll();
+    const auto byOffer = childrenByOffer(all.path);
+    ASSERT_TRUE(waitState(all.path, "awaiting-confirmation"));
+    m_store->whileRunning.close();
+    EXPECT_EQ(confirm(all.path), "");
+    ASSERT_TRUE(waitState(byOffer.at(kGimpUser), "running"));
+    ASSERT_TRUE(waitState(byOffer.at("packagekit:gimp"), "running"));
+    const std::string debId = transaction(byOffer.at("packagekit:gimp")).at("Id").value<std::string>();
+    const std::string flatpakId = transaction(byOffer.at(kGimpUser)).at("Id").value<std::string>();
+    const std::string parentId = transaction(all.path).at("Id").value<std::string>();
+    const std::string held = heldPackageKit();
+    m_store->whileRunning.open();
+    release();
+
+    start({}, Options{.packagekit = true});
+    std::string reattached;
+    ASSERT_TRUE(spin([&] {
+        for (const auto& t : value<std::vector<dbus::ObjectPath>>("ListTransactions").value_or(
+                     std::vector<dbus::ObjectPath>{}))
+            if (transaction(t.path).at("Id").value<std::string>() == debId)
+                reattached = t.path;
+        return !reattached.empty();
+    }));
+    EXPECT_EQ(transaction(reattached).at("Parent").value<dbus::ObjectPath>().path, "/");
+    for (const auto& t : value<std::vector<dbus::ObjectPath>>("ListTransactions").value_or(
+                 std::vector<dbus::ObjectPath>{})) {
+        EXPECT_NE(transaction(t.path).at("Id").value<std::string>(), parentId);
+        EXPECT_NE(transaction(t.path).at("Kind").value<std::string>(), "update-all");
+    }
+    std::map<std::string, std::string> byId;
+    ASSERT_TRUE(spin([&] {
+        byId.clear();
+        for (auto& h : history())
+            byId[h.at("id").value<std::string>()] = h.at("state").value<std::string>();
+        return byId[flatpakId] == "interrupted";
+    }));
+    ASSERT_TRUE(m_pk.finish(held));
+    ASSERT_TRUE(waitState(reattached, "succeeded"));
+    EXPECT_EQ(m_store->executes.load(), 0);
+    EXPECT_EQ(storeUpdates(false), 1); // never run again
 }
 
 } // namespace

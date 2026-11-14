@@ -104,7 +104,33 @@ public:
                 return done(Error::backend(BackendFailure::AuthDenied, "denied by the fake"));
             if (events.started)
                 events.started(accepted);
+            if (m_holdExecution) {
+                // Running until complete(); progress() reports meanwhile.
+                m_events = std::move(events);
+                m_done = std::move(done);
+                return;
+            }
             done(ExecutionResult{.outcome = ExecutionResult::Outcome::Completed});
+        });
+    }
+
+    // --- Scripting (H.4) ---------------------------------------------------
+    /// The execution stays running until complete().
+    void holdExecution() { m_holdExecution = true; }
+    bool running() const { return static_cast<bool>(m_done); }
+    /// Reports progress of the held execution, as the backend would.
+    void progress(const Progress& p)
+    {
+        post([this, p] {
+            if (m_events.progress)
+                m_events.progress(p);
+        });
+    }
+    void complete()
+    {
+        post([this] {
+            if (auto done = std::exchange(m_done, {}))
+                done(ExecutionResult{.outcome = ExecutionResult::Outcome::Completed});
         });
     }
 
@@ -129,6 +155,9 @@ private:
     base::EventLoop& m_loop;
     BackendKind m_kind;
     bool m_fails;
+    bool m_holdExecution = false;
+    OperationEvents m_events;
+    Completion<ExecutionResult> m_done;
 };
 
 class TransactionManagerTest : public ::testing::Test
@@ -170,6 +199,13 @@ protected:
         }
     }
 
+    /// Runs the loop for a while, for "nothing more happens" checks.
+    void settle(std::chrono::milliseconds d = 300ms)
+    {
+        const auto end = std::chrono::steady_clock::now() + d;
+        spin([&] { return std::chrono::steady_clock::now() > end; });
+    }
+
     dbus::Proxy transaction(const std::string& path) const
     {
         return dbus::Proxy(m_connection.get(), m_connection->uniqueName(), path, "org.cutefish.Store1.Transaction");
@@ -190,6 +226,7 @@ protected:
                 if (m_fetch != state)
                     return;
                 if (const auto all = reply.value<dbus::VariantMap>()) {
+                    m_all[path] = *all;
                     if (const auto it = all->find("State"); it != all->end())
                         if (const auto v = it->second.get<std::string>())
                             m_states[path] = *v;
@@ -247,7 +284,18 @@ protected:
     std::map<std::string, std::string> m_states;
     std::map<std::string, std::string> m_backends;
     std::map<std::string, dbus::VariantMap> m_errors;
+    /// Every property of each path, as last read.
+    std::map<std::string, dbus::VariantMap> m_all;
     std::shared_ptr<Fetch> m_fetch;
+
+    template <typename T>
+    T prop(const std::string& path, const char* name) const
+    {
+        const auto it = m_all.find(path);
+        if (it == m_all.end() || !it->second.contains(name))
+            return T{};
+        return it->second.at(name).value<T>();
+    }
 };
 
 TEST_F(TransactionManagerTest, UpdateAllPartialFailureNeverSucceeds)
@@ -297,6 +345,106 @@ TEST_F(TransactionManagerTest, UpdateAllPartialFailureNeverSucceeds)
     EXPECT_NE(std::find_if(history->begin(), history->end(),
                            [](const TransactionRecord& r) { return r.snapshot.state == TransactionState::Succeeded; }),
               history->end());
+}
+
+// --- Aggregated progress of the parent (H.4, D-036) ------------------------------
+
+std::vector<std::string> childrenOf(const std::vector<std::string>& paths, const std::string& parent)
+{
+    std::vector<std::string> out;
+    for (const std::string& p : paths)
+        if (p != parent)
+            out.push_back(p);
+    return out;
+}
+
+Progress progress(double fraction, std::uint64_t downloaded, std::uint64_t total)
+{
+    Progress p;
+    p.fraction = fraction;
+    p.downloadedBytes = downloaded;
+    p.totalBytes = total;
+    return p;
+}
+
+TEST_F(TransactionManagerTest, AParentWithOneChildShowsItsProgress)
+{
+    FakeBackend packagekit(m_loop, BackendKind::PackageKit, false);
+    packagekit.holdExecution();
+    m_manager->addBackend(packagekit);
+    auto started = m_manager->startUpdateAll({{OfferId::parse("packagekit:gimp").value(), std::nullopt}});
+    ASSERT_TRUE(started) << started.error().message();
+    const std::string parent = started.value();
+    std::vector<std::string> children;
+    ASSERT_TRUE(spin([&] {
+        children = childrenOf(m_manager->paths(), parent);
+        return children.size() == 1 && stateOf(children[0]) == "running";
+    }));
+    EXPECT_EQ(prop<double>(parent, "Progress"), -1.0); // nothing told yet
+
+    packagekit.progress(progress(0.5, 100, 400));
+    ASSERT_TRUE(spin([&] { return prop<double>(parent, "Progress") == 0.5; }));
+    EXPECT_EQ(prop<std::uint64_t>(parent, "DownloadedBytes"), 100u);
+    EXPECT_EQ(prop<std::uint64_t>(parent, "TotalBytes"), 400u);
+    // Its only child cannot be cancelled now (the fake says so): neither can
+    // the parent.
+    EXPECT_FALSE(prop<bool>(parent, "Cancellable"));
+
+    packagekit.complete();
+    ASSERT_TRUE(spin([&] { return stateOf(parent) == "succeeded"; }));
+}
+
+TEST_F(TransactionManagerTest, AParentWithSeveralChildrenNeverInventsAFraction)
+{
+    // D-036: a deb and a Flatpak are not comparable work. The parent gives
+    // no fraction; it adds up the bytes only when every child still open
+    // runs and has announced its total.
+    FakeBackend packagekit(m_loop, BackendKind::PackageKit, false);
+    FakeBackend flatpak(m_loop, BackendKind::Flatpak, false);
+    packagekit.holdExecution();
+    flatpak.holdExecution();
+    m_manager->addBackend(packagekit);
+    m_manager->addBackend(flatpak);
+    auto started = m_manager->startUpdateAll(
+            {{OfferId::parse("packagekit:gimp").value(), std::nullopt},
+             {OfferId::parse("flatpak:user:flathub:app/org.example.App/x86_64/stable").value(), std::nullopt}});
+    ASSERT_TRUE(started) << started.error().message();
+    const std::string parent = started.value();
+    std::map<std::string, std::string> byBackend; // backend → path
+    ASSERT_TRUE(spin([&] {
+        byBackend.clear();
+        for (const std::string& c : childrenOf(m_manager->paths(), parent))
+            byBackend[backendOf(c)] = c;
+        return byBackend.size() == 2 && stateOf(byBackend["packagekit"]) == "running"
+               && stateOf(byBackend["flatpak"]) == "running";
+    }));
+    const std::string pkChild = byBackend["packagekit"];
+    const std::string fpChild = byBackend["flatpak"];
+
+    // The Flatpak child does not know its total yet: no byte count.
+    packagekit.progress(progress(0.5, 100, 400));
+    flatpak.progress(progress(0.25, 50, 0));
+    ASSERT_TRUE(spin([&] {
+        return prop<double>(pkChild, "Progress") == 0.5 && prop<double>(fpChild, "Progress") == 0.25;
+    }));
+    settle();
+    EXPECT_EQ(prop<double>(parent, "Progress"), -1.0);
+    EXPECT_EQ(prop<std::uint64_t>(parent, "TotalBytes"), 0u);
+    EXPECT_EQ(prop<std::uint64_t>(parent, "DownloadedBytes"), 0u);
+
+    // Both totals known: the bytes add up; still no fraction.
+    flatpak.progress(progress(0.3, 200, 600));
+    ASSERT_TRUE(spin([&] { return prop<std::uint64_t>(parent, "TotalBytes") == 1000u; }));
+    EXPECT_EQ(prop<std::uint64_t>(parent, "DownloadedBytes"), 300u);
+    EXPECT_EQ(prop<double>(parent, "Progress"), -1.0);
+
+    packagekit.complete();
+    ASSERT_TRUE(spin([&] { return stateOf(pkChild) == "succeeded"; }));
+    EXPECT_EQ(prop<double>(parent, "Progress"), -1.0);
+    EXPECT_EQ(stateOf(parent), "running");
+    flatpak.complete();
+    ASSERT_TRUE(spin([&] { return stateOf(parent) == "succeeded"; }));
+    EXPECT_EQ(prop<double>(parent, "Progress"), -1.0);
 }
 
 } // namespace
