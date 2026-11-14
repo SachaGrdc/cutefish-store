@@ -8,6 +8,40 @@
 
 namespace cutefish::store::flatpak {
 
+// translate.cpp maps errors by value, without GLib: every value it knows is
+// the one of the libraries this store is built against.
+static_assert(codes::flatpak::kAlreadyInstalled == FLATPAK_ERROR_ALREADY_INSTALLED);
+static_assert(codes::flatpak::kNotInstalled == FLATPAK_ERROR_NOT_INSTALLED);
+static_assert(codes::flatpak::kDifferentRemote == FLATPAK_ERROR_DIFFERENT_REMOTE);
+static_assert(codes::flatpak::kAborted == FLATPAK_ERROR_ABORTED);
+static_assert(codes::flatpak::kRemoteNotFound == FLATPAK_ERROR_REMOTE_NOT_FOUND);
+static_assert(codes::flatpak::kRuntimeNotFound == FLATPAK_ERROR_RUNTIME_NOT_FOUND);
+static_assert(codes::flatpak::kDowngrade == FLATPAK_ERROR_DOWNGRADE);
+static_assert(codes::flatpak::kInvalidRef == FLATPAK_ERROR_INVALID_REF);
+static_assert(codes::flatpak::kInvalidData == FLATPAK_ERROR_INVALID_DATA);
+static_assert(codes::flatpak::kUntrusted == FLATPAK_ERROR_UNTRUSTED);
+static_assert(codes::flatpak::kRemoteUsed == FLATPAK_ERROR_REMOTE_USED);
+static_assert(codes::flatpak::kInvalidName == FLATPAK_ERROR_INVALID_NAME);
+static_assert(codes::flatpak::kOutOfSpace == FLATPAK_ERROR_OUT_OF_SPACE);
+static_assert(codes::flatpak::kWrongUser == FLATPAK_ERROR_WRONG_USER);
+static_assert(codes::flatpak::kRefNotFound == FLATPAK_ERROR_REF_NOT_FOUND);
+static_assert(codes::flatpak::kPermissionDenied == FLATPAK_ERROR_PERMISSION_DENIED);
+static_assert(codes::flatpak::kAuthenticationFailed == FLATPAK_ERROR_AUTHENTICATION_FAILED);
+static_assert(codes::flatpak::kNotAuthorized == FLATPAK_ERROR_NOT_AUTHORIZED);
+static_assert(codes::gio::kNoSpace == G_IO_ERROR_NO_SPACE);
+static_assert(codes::gio::kPermissionDenied == G_IO_ERROR_PERMISSION_DENIED);
+static_assert(codes::gio::kCancelled == G_IO_ERROR_CANCELLED);
+static_assert(codes::gio::kTimedOut == G_IO_ERROR_TIMED_OUT);
+static_assert(codes::gio::kHostNotFound == G_IO_ERROR_HOST_NOT_FOUND);
+static_assert(codes::gio::kHostUnreachable == G_IO_ERROR_HOST_UNREACHABLE);
+static_assert(codes::gio::kNetworkUnreachable == G_IO_ERROR_NETWORK_UNREACHABLE);
+static_assert(codes::gio::kConnectionRefused == G_IO_ERROR_CONNECTION_REFUSED);
+static_assert(codes::gio::kProxyFailed == G_IO_ERROR_PROXY_FAILED);
+static_assert(codes::gio::kConnectionClosed == G_IO_ERROR_CONNECTION_CLOSED);
+static_assert(codes::gio::kNotConnected == G_IO_ERROR_NOT_CONNECTED);
+static_assert(codes::gdbus::kAccessDenied == G_DBUS_ERROR_ACCESS_DENIED);
+static_assert(codes::gdbus::kAuthFailed == G_DBUS_ERROR_AUTH_FAILED);
+
 namespace {
 
 /// The FlatpakRefKind of a parsed ref.
@@ -36,7 +70,7 @@ Error errorOf(GError** error)
     else if (e->domain == G_DBUS_ERROR)
         domain = "g-dbus";
     else
-        domain = "flatpak";
+        domain = "other"; // OSTree, GLib...: their codes mean nothing here
     Error out = mapFlatpakError(domain, e->code, e->message ? e->message : "");
     g_clear_error(error);
     return out;

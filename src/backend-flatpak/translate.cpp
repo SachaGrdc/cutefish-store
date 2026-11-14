@@ -127,52 +127,55 @@ std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string
 
 Error mapFlatpakError(std::string_view domain, int code, std::string_view message)
 {
+    const std::string text(message);
     if (domain == "flatpak") {
+        namespace f = codes::flatpak;
         switch (code) {
-        case 4:  return Error::cancelled("flatpak aborted: " + std::string(message)); // FLATPAK_ERROR_ABORTED
-        case 13: return Error::backend(BackendFailure::Untrusted, "untrusted: " + std::string(message));
-        case 19: return Error::backend(BackendFailure::NoSpace, "out of space: " + std::string(message));
-        case 8:  // REMOTE_NOT_FOUND
-        case 22: return Error::notFound(std::string(message)); // REF_NOT_FOUND
-        case 9:  return Error::backend(BackendFailure::Dependency, "runtime not found: " + std::string(message));
-        case 20: // WRONG_USER
-        case 23: // PERMISSION_DENIED
-        case 24: // AUTHENTICATION_FAILED
-        case 25: return Error::backend(BackendFailure::AuthDenied, std::string(message));
-        case 0:  return Error::conflict("already installed: " + std::string(message));
-        case 1:  return Error::notFound("not installed: " + std::string(message));
-        case 3:  // DIFFERENT_REMOTE
-        case 10: return Error::backend(BackendFailure::PackageConflict, std::string(message)); // DOWNGRADE
-        default: return Error::backend(BackendFailure::Unspecified, "flatpak error " + std::to_string(code)
-                                                                   + ": " + std::string(message));
+        case f::kAborted: return Error::cancelled("flatpak aborted: " + text);
+        case f::kUntrusted: return Error::backend(BackendFailure::Untrusted, "untrusted: " + text);
+        case f::kOutOfSpace: return Error::backend(BackendFailure::NoSpace, "out of space: " + text);
+        case f::kRemoteNotFound:
+        case f::kRefNotFound: return Error::notFound(text);
+        case f::kRuntimeNotFound: return Error::backend(BackendFailure::Dependency, "runtime not found: " + text);
+        case f::kWrongUser:
+        case f::kPermissionDenied:
+        case f::kAuthenticationFailed:
+        case f::kNotAuthorized: return Error::backend(BackendFailure::AuthDenied, text);
+        case f::kAlreadyInstalled: return Error::conflict("already installed: " + text);
+        case f::kNotInstalled: return Error::notFound("not installed: " + text);
+        case f::kDifferentRemote:
+        case f::kDowngrade: return Error::backend(BackendFailure::PackageConflict, text);
+        // Flatpak refuses to remove a remote something installed came from.
+        case f::kRemoteUsed: return Error::notAllowed("remote in use: " + text);
+        case f::kInvalidRef:
+        case f::kInvalidName:
+        case f::kInvalidData: return Error::invalidArgument(text);
+        default: return Error::backend(BackendFailure::Unspecified, "flatpak error " + std::to_string(code) + ": " + text);
         }
     }
     if (domain == "g-io") {
+        namespace g = codes::gio;
         switch (code) {
-        case 19: return Error::cancelled("cancelled"); // G_IO_ERROR_CANCELLED
-        case 24: // G_IO_ERROR_TIMED_OUT
-        case 1:  // G_IO_ERROR_NOT_FOUND
-        case 2:  // G_IO_ERROR_EXISTS
-        case 3:  // G_IO_ERROR_IS_DIRECTORY
-        case 4:  // G_IO_ERROR_NOT_DIRECTORY
-        case 5:  // G_IO_ERROR_NOT_EMPTY
-        case 26: // G_IO_ERROR_HOST_NOT_FOUND
-        case 32: // G_IO_ERROR_BROKEN_PIPE
-        case 39: // G_IO_ERROR_NOT_CONNECTED
-        case 44: return Error::backend(BackendFailure::Network, "network: " + std::string(message));
-        case 30: // G_IO_ERROR_NO_SPACE
-        case 38: return Error::backend(BackendFailure::NoSpace, "out of space: " + std::string(message));
-        case 28: return Error::backend(BackendFailure::AuthDenied, std::string(message)); // G_IO_ERROR_PERMISSION_DENIED
-        default: return Error::backend(BackendFailure::Unspecified, "I/O error " + std::to_string(code)
-                                                                    + ": " + std::string(message));
+        case g::kCancelled: return Error::cancelled("cancelled");
+        case g::kTimedOut:
+        case g::kHostNotFound:
+        case g::kHostUnreachable:
+        case g::kNetworkUnreachable:
+        case g::kConnectionRefused:
+        case g::kProxyFailed:
+        case g::kConnectionClosed:
+        case g::kNotConnected: return Error::backend(BackendFailure::Network, "network: " + text);
+        case g::kNoSpace: return Error::backend(BackendFailure::NoSpace, "out of space: " + text);
+        case g::kPermissionDenied: return Error::backend(BackendFailure::AuthDenied, text);
+        default: return Error::backend(BackendFailure::Unspecified, "I/O error " + std::to_string(code) + ": " + text);
         }
     }
     if (domain == "g-dbus") {
-        if (code == 0) // G_DBUS_ERROR_ACCESS_DENIED
-            return Error::backend(BackendFailure::AuthDenied, std::string(message));
-        return Error::backend(BackendFailure::Unspecified, "D-Bus error: " + std::string(message));
+        if (code == codes::gdbus::kAccessDenied || code == codes::gdbus::kAuthFailed)
+            return Error::backend(BackendFailure::AuthDenied, text);
+        return Error::backend(BackendFailure::Unspecified, "D-Bus error: " + text);
     }
-    return Error::backend(BackendFailure::Unspecified, std::string(message));
+    return Error::backend(BackendFailure::Unspecified, text);
 }
 
 std::vector<std::string> normalisePermissions(std::vector<std::string> permissions)

@@ -41,6 +41,49 @@ Result<std::pair<Scope, std::string>> remoteOfSource(const SourceId& source);
 /// How many of these installed refs came from the remote `name`.
 std::uint32_t installedFrom(std::span<const InstalledRef> installed, std::string_view name);
 
+/// The error codes the translation knows, by value: this file has no GLib.
+/// libflatpakstore.cpp checks each one against FlatpakError (libflatpak
+/// 1.16), GIOErrorEnum and GDBusError at compile time.
+namespace codes {
+namespace flatpak {
+inline constexpr int kAlreadyInstalled = 0;
+inline constexpr int kNotInstalled = 1;
+inline constexpr int kDifferentRemote = 3;
+inline constexpr int kAborted = 4;
+inline constexpr int kRemoteNotFound = 7;
+inline constexpr int kRuntimeNotFound = 8;
+inline constexpr int kDowngrade = 9;
+inline constexpr int kInvalidRef = 10;
+inline constexpr int kInvalidData = 11;
+inline constexpr int kUntrusted = 12;
+inline constexpr int kRemoteUsed = 15;
+inline constexpr int kInvalidName = 17;
+inline constexpr int kOutOfSpace = 18;
+inline constexpr int kWrongUser = 19;
+inline constexpr int kRefNotFound = 21;
+inline constexpr int kPermissionDenied = 22;
+inline constexpr int kAuthenticationFailed = 23;
+inline constexpr int kNotAuthorized = 24;
+} // namespace flatpak
+namespace gio {
+inline constexpr int kNoSpace = 12;
+inline constexpr int kPermissionDenied = 14;
+inline constexpr int kCancelled = 19;
+inline constexpr int kTimedOut = 24;
+inline constexpr int kHostNotFound = 28;
+inline constexpr int kHostUnreachable = 37;
+inline constexpr int kNetworkUnreachable = 38;
+inline constexpr int kConnectionRefused = 39;
+inline constexpr int kProxyFailed = 40;
+inline constexpr int kConnectionClosed = 44;
+inline constexpr int kNotConnected = 45;
+} // namespace gio
+namespace gdbus {
+inline constexpr int kAccessDenied = 9;
+inline constexpr int kAuthFailed = 10;
+} // namespace gdbus
+} // namespace codes
+
 /// A backend failure mapped from a Flatpak or GIO error (ARCHITECTURE §7.3
 /// "Erreurs"). `domain` is `flatpak`, `g-io` or `g-dbus`.
 Error mapFlatpakError(std::string_view domain, int code, std::string_view message);

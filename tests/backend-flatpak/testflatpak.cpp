@@ -60,18 +60,30 @@ TEST(FlatpakTranslate, ClassifiesRemotesByUrlHost)
 
 TEST(FlatpakTranslate, MapsFlatpakAndGioErrors)
 {
-    // FLATPAK_ERROR_OUT_OF_SPACE = 19
-    EXPECT_EQ(mapFlatpakError("flatpak", 19, "disk full").backendFailure(), BackendFailure::NoSpace);
-    // FLATPAK_ERROR_UNTRUSTED = 13
-    EXPECT_EQ(mapFlatpakError("flatpak", 13, "unsigned").backendFailure(), BackendFailure::Untrusted);
-    // FLATPAK_ERROR_ABORTED = 4
-    EXPECT_EQ(mapFlatpakError("flatpak", 4, "aborted").code(), ErrorCode::Cancelled);
-    // FLATPAK_ERROR_PERMISSION_DENIED = 23
-    EXPECT_EQ(mapFlatpakError("flatpak", 23, "denied").backendFailure(), BackendFailure::AuthDenied);
-    // G_IO_ERROR_CANCELLED = 19
-    EXPECT_EQ(mapFlatpakError("g-io", 19, "cancelled").code(), ErrorCode::Cancelled);
-    // G_IO_ERROR_HOST_NOT_FOUND = 26
-    EXPECT_EQ(mapFlatpakError("g-io", 26, "host").backendFailure(), BackendFailure::Network);
+    // The values of libflatpak 1.16 and GIO (checked against the real enums
+    // when libflatpakstore.cpp is built).
+    EXPECT_EQ(mapFlatpakError("flatpak", 18, "disk full").backendFailure(), BackendFailure::NoSpace); // OUT_OF_SPACE
+    EXPECT_EQ(mapFlatpakError("flatpak", 12, "unsigned").backendFailure(), BackendFailure::Untrusted); // UNTRUSTED
+    EXPECT_EQ(mapFlatpakError("flatpak", 4, "aborted").code(), ErrorCode::Cancelled);                  // ABORTED
+    EXPECT_EQ(mapFlatpakError("flatpak", 22, "denied").backendFailure(), BackendFailure::AuthDenied);  // PERMISSION_DENIED
+    EXPECT_EQ(mapFlatpakError("flatpak", 7, "no remote").code(), ErrorCode::NotFound);                 // REMOTE_NOT_FOUND
+    EXPECT_EQ(mapFlatpakError("flatpak", 21, "no ref").code(), ErrorCode::NotFound);                   // REF_NOT_FOUND
+    EXPECT_EQ(mapFlatpakError("flatpak", 8, "no runtime").backendFailure(), BackendFailure::Dependency); // RUNTIME_NOT_FOUND
+    EXPECT_EQ(mapFlatpakError("flatpak", 15, "in use").code(), ErrorCode::NotAllowed);                 // REMOTE_USED
+    EXPECT_EQ(mapFlatpakError("flatpak", 17, "bad name").code(), ErrorCode::InvalidArgument);          // INVALID_NAME
+    EXPECT_EQ(mapFlatpakError("flatpak", 11, "bad file").code(), ErrorCode::InvalidArgument);          // INVALID_DATA
+    // SETUP_FAILED (13) is nothing the store can name.
+    EXPECT_EQ(mapFlatpakError("flatpak", 13, "setup").backendFailure(), BackendFailure::Unspecified);
+    EXPECT_EQ(mapFlatpakError("g-io", 19, "cancelled").code(), ErrorCode::Cancelled);                  // CANCELLED
+    EXPECT_EQ(mapFlatpakError("g-io", 28, "host").backendFailure(), BackendFailure::Network);          // HOST_NOT_FOUND
+    EXPECT_EQ(mapFlatpakError("g-io", 38, "net").backendFailure(), BackendFailure::Network);           // NETWORK_UNREACHABLE
+    EXPECT_EQ(mapFlatpakError("g-io", 12, "full").backendFailure(), BackendFailure::NoSpace);          // NO_SPACE
+    EXPECT_EQ(mapFlatpakError("g-io", 14, "denied").backendFailure(), BackendFailure::AuthDenied);     // PERMISSION_DENIED
+    EXPECT_EQ(mapFlatpakError("g-io", 1, "missing").backendFailure(), BackendFailure::Unspecified);    // NOT_FOUND
+    EXPECT_EQ(mapFlatpakError("g-dbus", 9, "denied").backendFailure(), BackendFailure::AuthDenied);    // ACCESS_DENIED
+    EXPECT_EQ(mapFlatpakError("g-dbus", 0, "failed").backendFailure(), BackendFailure::Unspecified);   // FAILED
+    // Another domain: its code is not read as a Flatpak one.
+    EXPECT_EQ(mapFlatpakError("other", 12, "ostree").backendFailure(), BackendFailure::Unspecified);
 }
 
 TEST(FlatpakTranslate, NormalisesPermissions)
