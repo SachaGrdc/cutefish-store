@@ -664,6 +664,87 @@ Niveau de preuve des justifications, repris de l'audit de la phase 0.1 :
   §22.4).
 - **Détails** : SERVICE.md §24.
 
+### D-039 — Dépôts APT en lecture seule
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrage D1).
+- **Décision** : les dépôts APT sont listés (`ListSources`, activés ou
+  non), jamais modifiés : ni ajout, ni suppression, ni activation, ni
+  désactivation. Toute demande de modification d'un dépôt APT répond
+  `NotSupported`, sans rien envoyer à PackageKit.
+- **Raison** [CODE, interfaces et symboles installés de PackageKit
+  1.3.1] : PackageKit n'a aucune méthode d'ajout (`RepoSetData` n'est pas
+  implémentée par le backend APT) ; `RepoEnable` et `RepoRemove` existent
+  (polkit `system-sources-configure`, `auth_admin_keep`) mais les dépôts
+  du système relèvent des outils du système (Cutefish Settings), et
+  écrire soi-même dans `/etc/apt` demanderait un composant privilégié
+  (P-007).
+- **Détails** : SERVICE.md §25.
+
+### D-040 — Aucun ajout de source en H.5 ; ajout Flatpak futur depuis un `.flatpakrepo`
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrages D3 et D9).
+- **Décision** :
+  - H.5 n'ajoute aucune source : pas d'ajout de remote tierce, et
+    l'ajout de Flathub (H.5d) attend la décision sur P-011, qui reste
+    **proposée** (arbitrages D2 et D7 reportés : pas de fichier embarqué,
+    pas de consentement enregistré) ; `AddSource` n'est pas exporté
+    (D-022) ;
+  - l'ajout d'une remote par sa seule URL n'est jamais exposé ni raccordé
+    au service ; le magasin Flatpak n'ajoute une remote que depuis le
+    contenu d'un `.flatpakrepo` contenant sa clé GPG, avec la
+    vérification des signatures forcée ;
+  - le refus des ajouts implicites pendant une transaction (G.1) est
+    inchangé.
+- **Détails** : SERVICE.md §25.
+
+### D-041 — Suppression d'une remote utilisateur inutilisée seulement
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrage D4).
+- **Décision** : `RemoveSource` ne supprime qu'une remote de
+  l'installation Flatpak **utilisateur**, et seulement si rien d'installé
+  n'en vient (applications et runtimes). Aucune désinstallation en
+  cascade. Les remotes de l'installation système restent en lecture
+  seule (D-011).
+- **Détails** : SERVICE.md §25.
+
+### D-042 — Confirmation pour ajouter ou activer une source
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrage D5).
+- **Décision** : ajouter ou activer une source demande une confirmation
+  explicite (`Confirm` sur la transaction, raison `new-source`, délai de
+  D-019). Désactiver une source, ou supprimer une source inutilisée, n'en
+  demande pas.
+- **Conséquence en H.5** : sans ajout (D-040), la règle s'applique à
+  l'activation ; réactiver une remote tierce déjà configurée n'est pas un
+  ajout au sens de D-040.
+- **Détails** : SERVICE.md §25.
+
+### D-043 — Transactions de source hors du journal
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrage D6).
+- **Décision** : les transactions `enable-source`, `disable-source` et
+  `remove-source` sont des objets `Store1.Transaction` publiés sur le bus
+  (comme `refresh`, D-021), avec leurs signaux ; elles ne sont pas écrites
+  dans le journal de `state.sqlite`. Aucune migration.
+- **Conséquence** : après un redémarrage du service, une transaction de
+  source qui attendait sa confirmation est perdue ; une modification déjà
+  faite reste visible par `ListSources`.
+- **Détails** : SERVICE.md §25.
+
+### D-044 — Remote sans vérification des signatures : `untrusted`
+
+- **Statut** : Validée (propriétaire, étape H.5, arbitrage D8).
+- **Décision** :
+  - une remote Flatpak dont la vérification GPG est désactivée
+    (`gpg-verify=false`) n'est jamais utilisée pour installer ou mettre à
+    jour : la transaction échoue avec `untrusted` pendant sa
+    planification (ARCHITECTURE §9.3) ; elle ne peut pas non plus être
+    activée ; elle reste listée, désactivable et supprimable ;
+  - Flathub reste reconnu par l'hôte de son URL (`translate.cpp`) ;
+    ARCHITECTURE §7.3 est corrigée en ce sens. Ce n'est pas une
+    validation de P-011.
+- **Détails** : SERVICE.md §25.
+
 ### P-006 — Cœur indépendant de Cutefish, `ToolkitBase` limitée à la couche hôte
 
 - **Statut** : Validée avec modification (propriétaire, après la matrice de
