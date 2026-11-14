@@ -443,6 +443,13 @@ void TransactionManager::execute(Entry& e)
                 (void)m_lanes[e->request.backend()].backend->cancel(e->operation);
         } else {
             e->ran = true;
+            // A backend that can always be cancelled (Flatpak, §7.6) is
+            // cancellable from the start of running, before any progress
+            // says so; otherwise the backend's progress decides (PackageKit:
+            // AllowCancel, §6.5).
+            Backend& b = *m_lanes[e->request.backend()].backend;
+            if (b.capabilities().cancelAnytime)
+                e->object->setCancellable(true);
         }
         stateChanged(*e);
     };
